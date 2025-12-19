@@ -706,6 +706,18 @@ const HomeScreen: React.FC = () => {
               </View>
 
               <View style={styles.headerIcons}>
+                <Link href="/marketplace" asChild>
+                  <TouchableOpacity style={styles.iconBtn}>
+                    <LinearGradient
+                      colors={['#e50914', '#b20710']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      <Ionicons name="storefront" size={22} color="#ffffff" style={styles.iconMargin} />
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </Link>
                 <Link href="/search" asChild>
                   <TouchableOpacity style={styles.iconBtn}>
                     <LinearGradient

@@ -3,7 +3,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { IMAGE_BASE_URL } from '../../constants/api';
 import { getAccentFromPosterPath } from '../../constants/theme';
@@ -14,6 +14,8 @@ import type { Media } from '../../types';
 
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { useAccent } from '../components/AccentContext';
+import CustomBottomSheet from '../components/post-review/BottomSheet';
+import BottomSheet from '@gorhom/bottom-sheet';
 
 
 
@@ -27,6 +29,12 @@ const WatchPartyScreen = () => {
   const [currentParty, setCurrentParty] = useState<WatchParty | null>(null);
   const { scrape: scrapeStream, loading: scrapingStream } = usePStream();
   const { accentColor, setAccentColor } = useAccent();
+  const { isSubscribed } = useSubscription();
+  const bottomSheetRef = useRef<BottomSheet>(null);
+  const derivedAccent = useMemo(
+  const { accentColor, setAccentColor } = useAccent();
+    [selected?.poster_path, myList],
+  );
   const { isSubscribed } = useSubscription();
   const derivedAccent = useMemo(
     () => getAccentFromPosterPath(selected?.poster_path ?? myList[0]?.poster_path),
@@ -206,7 +214,59 @@ const WatchPartyScreen = () => {
     }
   };
 
-  return (
+  const MiniMoviesScreen = () => {
+    const [trending, setTrending] = useState<Media[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+      const fetchTrending = async () => {
+        try {
+          const response = await fetch(`${API_BASE_URL}/trending/all/day?api_key=${API_KEY}`);
+          const data = await response.json();
+          setTrending(data.results?.slice(0, 10) || []);
+        } catch (err) {
+          console.warn('Failed to fetch trending movies', err);
+        } finally {
+          setLoading(false);
+        }
+      };
+      fetchTrending();
+    }, []);
+
+    const addToMyList = async (movie: Media) => {
+      try {
+        const key = await getProfileScopedKey('myList');
+        const stored = await AsyncStorage.getItem(key);
+        const currentList: Media[] = stored ? JSON.parse(stored) : [];
+        const updatedList = [...currentList, movie];
+        await AsyncStorage.setItem(key, JSON.stringify(updatedList));
+        setMyList(updatedList);
+        if (!selected) {
+          setSelected(movie);
+        }
+        bottomSheetRef.current?.close();
+        Alert.alert('Added to My List', `${movie.title || movie.name} has been added to your list.`);
+      } catch (err) {
+        console.warn('Failed to add to my list', err);
+        Alert.alert('Error', 'Failed to add movie to your list.');
+      }
+    };
+
+    if (loading) {
+      return (
+        <View style={styles.miniLoading}>
+          <Text style={styles.miniLoadingText}>Loading movies...</Text>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.miniMoviesContainer}>
+        <Text style={styles.miniMoviesTitle}>Add Movies to Your List</Text>
+        <Text style={styles.miniMoviesSubtitle}>
+          Select movies to add to your list and start watch parties with them.
+        </Text>
+        <FlatList
     <View style={styles.container}>
       <LinearGradient
         colors={[accentColor, '#0b0511', '#040406']}
@@ -216,7 +276,13 @@ const WatchPartyScreen = () => {
         pointerEvents="none"
       />
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.replace('/movies')} style={styles.backButton}>
+        <TouchableOpacity onPress={() => {
+          if (myList.length === 0) {
+            bottomSheetRef.current?.expand();
+          } else {
+            router.replace('/movies');
+          }
+        }} style={styles.backButton}>
           <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Watch Party</Text>

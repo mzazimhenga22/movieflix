@@ -1,15 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
+import { ResizeMode, Video } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { Video, ResizeMode } from 'expo-av';
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
-import { useAccent } from '../components/AccentContext';
-import { Media } from '../../types';
 import { useSubscription } from '../../providers/SubscriptionProvider';
+import { Media } from '../../types';
+import { useAccent } from '../components/AccentContext';
 import BottomNav from '../components/social-feed/BottomNav';
 import FeedCard from '../components/social-feed/FeedCard';
 import FeedCardPlaceholder from '../components/social-feed/FeedCardPlaceholder';
@@ -373,13 +373,29 @@ const SocialFeed = () => {
           colors={['rgba(95,132,255,0.12)', 'rgba(255,255,255,0)']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.bgOrbPrimary}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 320,
+            borderRadius: 160,
+            zIndex: 0,
+          }}
         />
         <LinearGradient
           colors={['rgba(229,9,20,0.12)', 'rgba(255,255,255,0)']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
-          style={styles.bgOrbSecondary}
+          style={{
+            position: 'absolute',
+            top: 120,
+            right: 0,
+            width: 220,
+            height: 220,
+            borderRadius: 110,
+            zIndex: 0,
+          }}
         />
 
         <View style={styles.container}>
@@ -516,7 +532,7 @@ const SocialFeed = () => {
             <Animated.View
               pointerEvents={headerPointerEvents}
               style={[
-              styles.topSection,
+              { paddingTop: 8, paddingBottom: 14, gap: 12 },
               {
                 transform: [{ translateY: topSectionTranslateY }],
                 opacity: topSectionOpacity,
@@ -530,7 +546,11 @@ const SocialFeed = () => {
             }}
           >
               <View style={styles.topInner}>
-                <SocialHeader title="Welcome, streamer" />
+                <View style={styles.headerWithIcon}>
+                  <SocialHeader title="Social Feed" />
+                  <TouchableOpacity style={styles.marketplaceIcon} onPress={() => router.push('/marketplace')}>
+                    <Ionicons name="storefront" size={24} color="#fff" />
+                  </TouchableOpacity>
                 {/* Feed Mode Switcher */}
                 <View style={styles.modeSwitcher}>
                   <TouchableOpacity
@@ -566,6 +586,7 @@ const SocialFeed = () => {
                   }
                   setActiveTab(tab);
                 }} />
+
               </View>
             </Animated.View>
 
@@ -596,7 +617,6 @@ const SocialFeed = () => {
           )}
         </View>
       </ScreenWrapper>
-      
       <BottomNav />
     </View>
   );
@@ -617,36 +637,25 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     position: 'relative',
   },
-  bgOrbPrimary: {
-    position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    right: -80,
-    top: -40,
-    opacity: 0.9,
-  },
-  bgOrbSecondary: {
-    position: 'absolute',
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    left: -60,
-    top: 40,
-    opacity: 0.9,
-  },
-  topSection: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    zIndex: 10,
-  },
   topInner: {
-    paddingHorizontal: 12,
+    padding: 12,
     paddingTop: 8,
     paddingBottom: 14,
     gap: 12,
+  },
+  headerWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  marketplaceIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(229,9,20,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   feedContainer: {
     flex: 1,
@@ -666,32 +675,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 6,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
   },
   ashLayer: {
     position: 'absolute',
     left: 0,
     right: 0,
     top: 0,
-    bottom: 0,
+    height: 80,
+    zIndex: 2,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    pointerEvents: 'none',
   },
   ashParticle: {
     position: 'absolute',
     bottom: 0,
-    width: 4,
-    height: 4,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.55)',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    opacity: 0.6,
   },
   modeSwitcher: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 20,
-    padding: 4,
-    gap: 4,
+    gap: 8,
+    marginBottom: 8,
   },
   modeButton: {
     flexDirection: 'row',
@@ -700,6 +708,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 16,
     gap: 6,
+    marginRight: 8,
   },
   modeButtonActive: {
     backgroundColor: 'rgba(229,9,20,0.8)',
@@ -717,7 +726,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     zIndex: 20,
   },
-  /* TikTok-style video feed */
   tiktokContainer: {
     flex: 1,
   },
@@ -778,6 +786,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginTop: 16,
   },
+
 });
 
 export default SocialFeed;

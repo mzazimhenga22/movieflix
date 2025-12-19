@@ -196,11 +196,11 @@ export function usePStream() {
               const embedRun = await providers.runAll({
                 media,
                 sourceOrder: [sourceId],
-                embedId: embed.id,
+                embedOrder: [embed.embedScraperId],
                 disableOpensubtitles: true,
               });
               if (embedRun?.stream) {
-                const playback = buildPlayback(embedRun.stream, sourceId, embed.id);
+                const playback = buildPlayback(embedRun.stream, sourceId, embed.embedScraperId);
                 setResult(playback);
                 return playback;
               }

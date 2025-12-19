@@ -152,7 +152,7 @@ export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
 const styles = StyleSheet.create({
   headerWrap: {
     marginHorizontal: 12,
-    marginTop: Platform.OS === 'ios' ? 44 : 18,
+    marginTop: 0,
     marginBottom: 10,
     borderRadius: 18,
     overflow: 'hidden',
@@ -165,7 +165,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 14,
+    paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.04)',

@@ -6,13 +6,13 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-    Alert,
-    Image,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  Alert,
+  Image,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 
 import ScreenWrapper from '../components/ScreenWrapper';
@@ -21,17 +21,17 @@ import { getAccentFromPosterPath } from '../constants/theme';
 
 import { onAuthStateChanged } from 'firebase/auth';
 import {
-    addDoc,
-    arrayRemove,
-    arrayUnion,
-    collection,
-    doc,
-    getDoc,
-    getDocs,
-    query,
-    serverTimestamp,
-    updateDoc,
-    where,
+  addDoc,
+  arrayRemove,
+  arrayUnion,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
 } from 'firebase/firestore';
 
 type UserDoc = {
@@ -324,6 +324,10 @@ const ProfileScreen: React.FC = () => {
           <Ionicons name="arrow-back" size={24} color="white" />
         </TouchableOpacity>
 
+        <TouchableOpacity style={styles.marketplaceButton} onPress={() => router.push('/marketplace')}>
+          <Ionicons name="storefront" size={24} color="white" />
+        </TouchableOpacity>
+
         {isOwnProfile && (
           <TouchableOpacity style={styles.searchButton} onPress={handleSearch}>
             <Ionicons name="search" size={24} color="white" />
@@ -439,6 +443,15 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 8,
   },
+  marketplaceButton: {
+    position: 'absolute',
+    top: 50,
+    left: 70,
+    zIndex: 10,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 20,
+    padding: 8,
+  },
   searchButton: {
     position: 'absolute',
     top: 50,
@@ -448,7 +461,21 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 8,
   },
+  innerContainer: { flex: 1 },
   inner: { flex: 1 },
+  headerWithIcon: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  marketplaceIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
 
   profileHeader: {
     alignItems: 'center',
