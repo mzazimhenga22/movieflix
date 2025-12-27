@@ -17,6 +17,7 @@ import {
   type Unsubscribe,
 } from 'firebase/firestore';
 import { firestore } from '@/constants/firebase';
+import { notifyPush } from '@/lib/pushApi';
 
 import type { CallSession, CallStatus, CreateCallOptions } from './types';
 
@@ -111,6 +112,9 @@ export const createCallSession = async (
       },
     },
   });
+
+  // Fire-and-forget push (handled server-side with auth + Firestore validation).
+  void notifyPush({ kind: 'call', callId: docRef.id });
 
   return {
     callId: docRef.id,

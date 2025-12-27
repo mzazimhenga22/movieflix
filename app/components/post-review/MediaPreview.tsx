@@ -1,5 +1,5 @@
 
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useRef, useState } from 'react';
 
 import {
 
@@ -87,13 +87,13 @@ function StarRating({ onRatingChange, totalStars = 5, initialRating = 0 }: { onR
 
     return (
 
-      <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 20 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 14 }}>
 
         {Array.from({ length: totalStars }, (_, index) => (
 
           <Pressable key={index} onPress={() => handlePress(index)} hitSlop={10}>
 
-            <Ionicons name={index < rating ? 'star' : 'star-outline'} size={40} color={index < rating ? '#FFD700' : '#ddd'} style={{ marginHorizontal: 8 }}/>
+            <Ionicons name={index < rating ? 'star' : 'star-outline'} size={34} color={index < rating ? '#FFD700' : '#ddd'} style={{ marginHorizontal: 6 }}/>
 
           </Pressable>
 
@@ -135,7 +135,7 @@ export default function MediaPreview({
 
 
 
-  const [overlayText, setOverlayText] = useState(initialReviewData?.overlayText || '');
+  const [overlayText, setOverlayText] = useState((initialReviewData && initialReviewData.overlayText) || '');
 
   const mediaContentRef = useRef<MediaContentHandle | null>(null);
 
@@ -155,7 +155,11 @@ export default function MediaPreview({
 
     try {
 
-      const currentTextPosition = mediaContentRef.current?.getOverlayTextPosition() || { x: 0, y: 0 };
+      const currentTextPosition =
+        (mediaContentRef.current &&
+        typeof (mediaContentRef.current as any).getOverlayTextPosition === 'function'
+          ? (mediaContentRef.current as any).getOverlayTextPosition()
+          : null) || { x: 0, y: 0 };
 
       await onPost({
 
@@ -171,7 +175,7 @@ export default function MediaPreview({
 
       console.warn('post/update failed', e);
 
-      Alert.alert('Error', e?.message ?? 'An unknown error occurred.');
+      Alert.alert('Error', e && (e as any).message ? String((e as any).message) : 'An unknown error occurred.');
 
     } finally {
 
@@ -181,94 +185,43 @@ export default function MediaPreview({
 
   };
 
-
-
   const handleClose = () => {
-
-    const currentTextPosition = mediaContentRef.current?.getOverlayTextPosition() || { x: 0, y: 0 };
+    const currentTextPosition =
+      (mediaContentRef.current &&
+      typeof (mediaContentRef.current as any).getOverlayTextPosition === 'function'
+        ? (mediaContentRef.current as any).getOverlayTextPosition()
+        : null) || { x: 0, y: 0 };
+    const originalTextPosition = (originalReviewData && originalReviewData.overlayTextPosition) || { x: 0, y: 0 };
 
     const hasTextPositionChanged =
+      Math.abs(currentTextPosition.x - originalTextPosition.x) > 0.5 ||
+      Math.abs(currentTextPosition.y - originalTextPosition.y) > 0.5;
 
-      initialReviewData?.overlayTextPosition &&
+    const hasChanges = Boolean(
+      isEditing &&
+        originalReviewData &&
+        (originalReviewData.title !== reviewData.title ||
+          originalReviewData.review !== reviewData.review ||
+          originalReviewData.rating !== reviewData.rating ||
+          (originalReviewData.overlayText != null ? originalReviewData.overlayText : '') !== overlayText ||
+          hasTextPositionChanged)
+    );
 
-      (initialReviewData.overlayTextPosition.x !== currentTextPosition.x ||
-
-        initialReviewData.overlayTextPosition.y !== currentTextPosition.y);
-
-
-
-    const hasChanges =
-
-      originalReviewData &&
-
-      (originalReviewData.rating !== reviewData.rating ||
-
-        originalReviewData.review !== reviewData.review ||
-
-        originalReviewData.title !== reviewData.title ||
-
-        originalReviewData.overlayText !== overlayText ||
-
-        hasTextPositionChanged);
-
-
-
-    const isNewAndDirty = !isEditing && (reviewData.title || reviewData.review || reviewData.rating > 0 || overlayText);
-
-
+    const isNewAndDirty = Boolean(!isEditing && (reviewData.title || reviewData.review || reviewData.rating > 0 || overlayText));
 
     if (isNewAndDirty || hasChanges) {
-
       Alert.alert(
-
         'Discard changes?',
-
         'You have unsaved changes. Are you sure you want to discard them?',
-
         [
-
           { text: 'Continue editing', style: 'cancel' },
-
           { text: 'Discard', onPress: onClose, style: 'destructive' },
-
         ]
-
       );
-
-    } else {
-
-      onClose?.();
-
+      return;
     }
 
-  };
-
-  
-
-  const renderDescriptionWithHashtags = (text: string) => {
-
-    const parts = text.split(/([#@]\w+)/g);
-
-    const elements = parts.map((part, index) => {
-
-      if (part.startsWith('#')) {
-
-        return <Text key={index} style={styles.hashtagText}>{part}</Text>;
-
-      }
-
-      if (part.startsWith('@')) {
-
-        return <Text key={index} style={styles.mentionText}>{part}</Text>;
-
-      }
-
-      return <Text key={index}>{part}</Text>;
-
-    });
-
-    return <Text>{elements}</Text>;
-
+    if (onClose) onClose();
   };
 
 
@@ -276,6 +229,13 @@ export default function MediaPreview({
   return (
 
     <View style={styles.fullScreenWrapper}>
+
+      <LinearGradient
+        colors={['rgba(0,0,0,0.08)', 'rgba(0,0,0,0.85)']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFillObject}
+      />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
 
@@ -293,7 +253,7 @@ export default function MediaPreview({
 
               setOverlayText={setOverlayText}
 
-              initialOverlayTextPosition={initialReviewData?.overlayTextPosition}
+              initialOverlayTextPosition={initialReviewData ? initialReviewData.overlayTextPosition : undefined}
 
               isEditingText={false}
 
@@ -305,23 +265,29 @@ export default function MediaPreview({
 
 
 
-            <View style={[styles.header, { top: insets.top + 10 }]}>
-
-                <TouchableOpacity onPress={handleClose} style={styles.headerButton}>
-
-                    <Ionicons name="arrow-back" size={24} color="#fff" />
-
+            <View style={[styles.headerWrap, { top: insets.top + 8 }]}>
+              <LinearGradient
+                colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.headerGlow}
+              />
+              <View style={styles.headerBar}>
+                <TouchableOpacity onPress={handleClose} style={styles.iconBtn} accessibilityLabel="Back">
+                  <Ionicons name="arrow-back" size={20} color="#fff" />
                 </TouchableOpacity>
-
-                <Text style={styles.headerTitle}>New Review</Text>
-
-                <View style={styles.headerButton}/>
-
+                <View style={styles.headerTitleWrap}>
+                  <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">
+                    {isEditing ? 'Edit Review' : 'New Review'}
+                  </Text>
+                </View>
+                <View style={styles.iconBtnPlaceholder} />
+              </View>
             </View>
 
 
 
-            <View style={styles.formContainer}>
+            <View style={[styles.formContainer, { bottom: Math.max(92, insets.bottom + 96) }]}>
 
                 <View style={styles.captionContainer}>
 
@@ -329,7 +295,7 @@ export default function MediaPreview({
 
                         style={styles.captionInput}
 
-                        placeholder="Write a caption... #hashtag @mention"
+                        placeholder="Write a caption..."
 
                         placeholderTextColor="#aaa"
 
@@ -363,17 +329,33 @@ export default function MediaPreview({
 
                     </TouchableOpacity>
 
+                    <TouchableOpacity style={styles.optionButton} onPress={() => {}}>
+
+                        <Ionicons name="trending-up" size={20} color="#fff" />
+
+                        <Text style={styles.optionText}>Boost to Trends</Text>
+
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.optionButton} onPress={() => {}}>
+
+                        <Ionicons name="at" size={20} color="#fff" />
+
+                        <Text style={styles.optionText}>Tag Users</Text>
+
+                    </TouchableOpacity>
+
                 </View>
 
             </View>
 
 
 
-            <View style={[styles.footer, { paddingBottom: insets.bottom + 12 }]}>
+            <View style={[styles.footer, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
 
                 <TouchableOpacity onPress={handlePost} disabled={isPosting} style={styles.postButton}>
 
-                    <LinearGradient colors={["#4facfe", "#00f2fe"]} style={styles.postButtonGradient}>
+                    <LinearGradient colors={["#ff8a00", "#e50914"]} style={styles.postButtonGradient}>
 
                         {isPosting ? <ActivityIndicator color="#fff" /> : <Text style={styles.postButtonText}>{isEditing ? 'Update' : 'Post'}</Text>}
 
@@ -467,44 +449,53 @@ export default function MediaPreview({
 
 const styles = StyleSheet.create({
 
-    fullScreenWrapper: { flex: 1, backgroundColor: 'black' },
+    fullScreenWrapper: { flex: 1, backgroundColor: 'transparent' },
 
     container: { flex: 1 },
 
-    header: {
-
+    headerWrap: {
         position: 'absolute',
-
-        left: 16,
-
-        right: 16,
-
-        flexDirection: 'row',
-
-        justifyContent: 'space-between',
-
-        alignItems: 'center',
-
+        left: 12,
+        right: 12,
         zIndex: 10,
-
+        borderRadius: 18,
+        overflow: 'hidden',
     },
-
-    headerButton: {
-
-        padding: 8,
-
-        backgroundColor: 'rgba(0,0,0,0.3)',
-
-        borderRadius: 99,
-
-        width: 40,
-
-        height: 40,
-
+    headerGlow: {
+        ...StyleSheet.absoluteFillObject,
+        opacity: 0.7,
+    },
+    headerBar: {
+        paddingVertical: 12,
+        paddingHorizontal: 12,
+        borderRadius: 18,
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.12)',
+        flexDirection: 'row',
         alignItems: 'center',
-
+        justifyContent: 'space-between',
+    },
+    headerTitleWrap: {
+        flex: 1,
+        minWidth: 0,
+        alignItems: 'center',
         justifyContent: 'center',
-
+        paddingHorizontal: 10,
+    },
+    iconBtn: {
+        width: 40,
+        height: 40,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(255,255,255,0.08)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.14)',
+    },
+    iconBtnPlaceholder: {
+        width: 40,
+        height: 40,
     },
 
     headerTitle: {
@@ -518,30 +509,26 @@ const styles = StyleSheet.create({
     },
 
     formContainer: {
-
         position: 'absolute',
-
-        bottom: 120,
-
-        left: 16,
-
-        right: 16,
-
+        left: 12,
+        right: 12,
         zIndex: 10,
-
-        gap: 16,
-
+        gap: 12,
     },
 
     captionContainer: {
 
-        backgroundColor: 'rgba(0,0,0,0.4)',
+        backgroundColor: 'rgba(5,6,15,0.7)',
 
-        borderRadius: 12,
+        borderRadius: 16,
 
         padding: 12,
 
-        minHeight: 80,
+        minHeight: 72,
+
+        borderWidth: 1,
+
+        borderColor: 'rgba(255,255,255,0.12)',
 
     },
 
@@ -549,7 +536,7 @@ const styles = StyleSheet.create({
 
         color: 'white',
 
-        fontSize: 16,
+        fontSize: 15,
 
         flex: 1,
 
@@ -575,7 +562,9 @@ const styles = StyleSheet.create({
 
         flexDirection: 'row',
 
-        gap: 12,
+        flexWrap: 'wrap',
+
+        gap: 10,
 
     },
 
@@ -585,17 +574,25 @@ const styles = StyleSheet.create({
 
         alignItems: 'center',
 
-        backgroundColor: 'rgba(0,0,0,0.4)',
+        backgroundColor: 'rgba(5,6,15,0.66)',
 
         paddingHorizontal: 12,
 
         paddingVertical: 10,
 
-        borderRadius: 12,
+        borderRadius: 16,
 
         gap: 8,
 
-        flex: 1,
+        flexGrow: 1,
+
+        flexBasis: '48%',
+
+        minWidth: 150,
+
+        borderWidth: 1,
+
+        borderColor: 'rgba(255,255,255,0.12)',
 
     },
 
@@ -615,9 +612,9 @@ const styles = StyleSheet.create({
 
         bottom: 0,
 
-        left: 16,
+        left: 12,
 
-        right: 16,
+        right: 12,
 
         zIndex: 10,
 
@@ -625,13 +622,17 @@ const styles = StyleSheet.create({
 
     postButton: {
 
-        height: 52,
+        height: 54,
+
+        borderRadius: 18,
+
+        overflow: 'hidden',
 
     },
 
     postButtonGradient: {
 
-        borderRadius: 14,
+        borderRadius: 18,
 
         height: '100%',
 
@@ -667,13 +668,17 @@ const styles = StyleSheet.create({
 
     modalContent: {
 
-        backgroundColor: '#2c2c2c',
+        backgroundColor: 'rgba(5,6,15,0.96)',
 
         borderRadius: 16,
 
         padding: 20,
 
         width: '100%',
+
+        borderWidth: 1,
+
+        borderColor: 'rgba(255,255,255,0.12)',
 
     },
 
@@ -693,7 +698,7 @@ const styles = StyleSheet.create({
 
     modalInput: {
 
-        backgroundColor: '#444',
+        backgroundColor: 'rgba(255,255,255,0.06)',
 
         color: 'white',
 
@@ -709,7 +714,7 @@ const styles = StyleSheet.create({
 
     modalButton: {
 
-        backgroundColor: '#007AFF',
+        backgroundColor: '#e50914',
 
         borderRadius: 10,
 
@@ -730,5 +735,3 @@ const styles = StyleSheet.create({
     }
 
 });
-
-

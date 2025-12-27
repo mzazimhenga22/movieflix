@@ -8,14 +8,11 @@ import {
   Text,
   FlatList,
   Image,
-  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import Constants from 'expo-constants';
-
-const { width } = Dimensions.get('window');
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface MediaItem {
   id: string;
@@ -30,6 +27,7 @@ interface MediaPickerProps {
 }
 
 export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps) {
+  const insets = useSafeAreaInsets();
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [recentMedia, setRecentMedia] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,6 +90,30 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
     }
   };
 
+  const pickFromCamera = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission required', 'Camera access is needed to take a photo or video.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        allowsEditing: false,
+        quality: 1,
+      });
+
+      if (!result.canceled && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const type: 'image' | 'video' = asset.type === 'video' ? 'video' : 'image';
+        onMediaPicked(asset.uri, type);
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Could not open the camera.');
+    }
+  };
+
   const handleMediaSelect = (media: MediaItem) => {
     onMediaPicked(media.uri, media.type);
   };
@@ -99,6 +121,12 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   if (hasPermission === null) {
     return (
       <View style={styles.container}>
+        <LinearGradient
+          colors={['#e50914', '#150a13', '#05060f']}
+          start={[0, 0]}
+          end={[1, 1]}
+          style={StyleSheet.absoluteFillObject}
+        />
         <ActivityIndicator size="large" color="#fff" />
         <Text style={styles.loadingText}>Requesting permissions...</Text>
       </View>
@@ -108,6 +136,12 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   if (hasPermission === false) {
     return (
       <View style={styles.container}>
+        <LinearGradient
+          colors={['#e50914', '#150a13', '#05060f']}
+          start={[0, 0]}
+          end={[1, 1]}
+          style={StyleSheet.absoluteFillObject}
+        />
         <Ionicons name="images" size={64} color="#666" />
         <Text style={styles.errorTitle}>Gallery Access Required</Text>
         <Text style={styles.errorText}>
@@ -137,14 +171,45 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-          <Ionicons name="close" size={28} color="#fff" />
-        </TouchableOpacity>
-        <Text style={styles.title}>Create Post</Text>
-        <TouchableOpacity onPress={pickFromGallery} style={styles.galleryButton}>
-          <Ionicons name="images" size={20} color="#fff" />
-        </TouchableOpacity>
+      <LinearGradient
+        colors={['#e50914', '#150a13', '#05060f']}
+        start={[0, 0]}
+        end={[1, 1]}
+        style={StyleSheet.absoluteFillObject}
+      />
+      <LinearGradient
+        colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.1, y: 0 }}
+        end={{ x: 0.9, y: 1 }}
+        style={styles.bgOrbPrimary}
+      />
+      <LinearGradient
+        colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.8, y: 0 }}
+        end={{ x: 0.2, y: 1 }}
+        style={styles.bgOrbSecondary}
+      />
+
+      <View style={[styles.headerWrap, { marginTop: Math.max(12, insets.top + 6) }]}>
+        <LinearGradient
+          colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.headerGlow}
+        />
+        <View style={styles.headerBar}>
+          <TouchableOpacity onPress={onClose} style={styles.iconBtn} accessibilityLabel="Close">
+            <Ionicons name="close" size={22} color="#fff" />
+          </TouchableOpacity>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+              Create Post
+            </Text>
+          </View>
+          <TouchableOpacity onPress={pickFromGallery} style={styles.iconBtn} accessibilityLabel="Open gallery">
+            <Ionicons name="images" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {loading ? (
@@ -170,25 +235,14 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
             showsVerticalScrollIndicator={false}
           />
 
-          <View style={styles.bottomOptions}>
-            <TouchableOpacity style={styles.cameraOption} onPress={pickFromGallery}>
-              <LinearGradient
-                colors={['#667eea', '#764ba2']}
-                style={styles.cameraGradient}
-              >
-                <Ionicons name="camera" size={32} color="#fff" />
-              </LinearGradient>
-              <Text style={styles.cameraText}>Camera</Text>
+          <View style={[styles.bottomBar, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
+            <TouchableOpacity style={styles.bottomPill} onPress={pickFromCamera} activeOpacity={0.9}>
+              <Ionicons name="camera" size={20} color="#fff" />
+              <Text style={styles.bottomPillText}>Camera</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity style={styles.galleryOption} onPress={pickFromGallery}>
-              <LinearGradient
-                colors={['#f093fb', '#f5576c']}
-                style={styles.galleryGradient}
-              >
-                <Ionicons name="images" size={32} color="#fff" />
-              </LinearGradient>
-              <Text style={styles.galleryText}>Gallery</Text>
+            <TouchableOpacity style={styles.bottomPill} onPress={pickFromGallery} activeOpacity={0.9}>
+              <Ionicons name="images" size={20} color="#fff" />
+              <Text style={styles.bottomPillText}>Gallery</Text>
             </TouchableOpacity>
           </View>
         </>
@@ -200,7 +254,28 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: 'transparent',
+    paddingTop: 0,
+  },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 360,
+    height: 360,
+    borderRadius: 180,
+    top: -60,
+    left: -60,
+    opacity: 0.6,
+    transform: [{ rotate: '15deg' }],
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    bottom: -90,
+    right: -40,
+    opacity: 0.55,
+    transform: [{ rotate: '-12deg' }],
   },
   loadingText: {
     color: '#fff',
@@ -237,21 +312,43 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 50,
-    paddingBottom: 20,
+  headerWrap: {
+    marginHorizontal: 12,
+    marginBottom: 10,
+    borderRadius: 18,
+    overflow: 'hidden',
   },
-  closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+  headerGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.7,
+  },
+  headerBar: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerTitleWrap: {
+    flex: 1,
+    minWidth: 0,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  iconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
   },
   title: {
     color: '#fff',
@@ -363,15 +460,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: '#ff4444',
   },
-  galleryButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
-  },
+  
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -382,7 +471,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
   },
   recentTitle: {
     color: '#fff',
@@ -396,13 +485,13 @@ const styles = StyleSheet.create({
   },
   mediaGrid: {
     paddingHorizontal: 8,
-    paddingBottom: 120,
+    paddingBottom: 140,
   },
   mediaItem: {
     flex: 1,
     aspectRatio: 1,
     margin: 4,
-    borderRadius: 8,
+    borderRadius: 12,
     overflow: 'hidden',
   },
   mediaImage: {
@@ -417,46 +506,31 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 4,
   },
-  bottomOptions: {
+  bottomBar: {
     position: 'absolute',
-    bottom: 40,
-    left: 0,
-    right: 0,
+    left: 12,
+    right: 12,
+    bottom: 0,
+    paddingTop: 10,
     flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingHorizontal: 40,
+    gap: 12,
   },
-  cameraOption: {
-    alignItems: 'center',
-  },
-  cameraGradient: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+  bottomPill: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: 'rgba(5,6,15,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
   },
-  cameraText: {
+  bottomPillText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  galleryOption: {
-    alignItems: 'center',
-  },
-  galleryGradient: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  galleryText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '500',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.2,
   },
 });

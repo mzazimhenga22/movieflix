@@ -5,12 +5,26 @@ import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { InteractionManager, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { authPromise, firestore } from '../../../constants/firebase';
 
-export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
+export default function SocialHeader({ title = 'Feeds', compact = false }: { title?: string; compact?: boolean }) {
   const router = useRouter();
   const [userName, setUserName] = useState('streamer');
+  const navInFlightRef = React.useRef(false);
+  const deferNav = React.useCallback((action: () => void) => {
+    if (navInFlightRef.current) return;
+    navInFlightRef.current = true;
+    requestAnimationFrame(() => {
+      InteractionManager.runAfterInteractions(() => {
+        try {
+          action();
+        } finally {
+          navInFlightRef.current = false;
+        }
+      });
+    });
+  }, []);
 
   useEffect(() => {
     let unsub: (() => void) | null = null;
@@ -107,7 +121,7 @@ export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
         />
 
         <View style={styles.leftGroup}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.leftIcon}>
+          <TouchableOpacity onPress={() => deferNav(() => router.back())} style={styles.leftIcon}>
             <Ionicons name="arrow-back" size={28} color="#ffffff" />
           </TouchableOpacity>
         </View>
@@ -115,14 +129,20 @@ export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
         <View style={styles.titleRow}>
           <View style={styles.accentDot} />
           <View>
-            <Text style={styles.eyebrow}>Social</Text>
-            <Text style={styles.titleText}>Welcome, {userName}</Text>
-            <Text style={styles.subtitle}>{title}</Text>
+            {compact ? (
+              <Text style={styles.titleText}>{title || 'Social'}</Text>
+            ) : (
+              <>
+                <Text style={styles.eyebrow}>Social</Text>
+                <Text style={styles.titleText}>Welcome, {userName}</Text>
+                <Text style={styles.subtitle}>{title}</Text>
+              </>
+            )}
           </View>
         </View>
 
         <View style={styles.headerIcons}>
-          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/messaging')}>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
             <LinearGradient
               colors={['#e50914', '#b20710']}
               start={{ x: 0, y: 0 }}
@@ -133,7 +153,7 @@ export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
             </LinearGradient>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/search')}>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/search'))}>
             <LinearGradient
               colors={['#e50914', '#b20710']}
               start={{ x: 0, y: 0 }}
@@ -152,8 +172,8 @@ export default function SocialHeader({ title = 'Feeds' }: { title?: string }) {
 const styles = StyleSheet.create({
   headerWrap: {
     marginHorizontal: 12,
-    marginTop: 0,
-    marginBottom: 10,
+    marginTop: Platform.OS === 'ios' ? 80 : 50,
+    marginBottom: 6,
     borderRadius: 18,
     overflow: 'hidden',
   },

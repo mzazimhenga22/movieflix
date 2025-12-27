@@ -1,0 +1,19 @@
+## Netlify configuration for proxy-only deployment
+[build]
+  command = "echo \"No site build – deploying Netlify Functions only\""
+  publish = "netlify/public"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/updates/app-update.json"
+  to = "/.netlify/functions/app-update"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/"
+  to = "/index.html"
+  status = 200

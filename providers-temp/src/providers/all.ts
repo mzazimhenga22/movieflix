@@ -83,6 +83,7 @@ import { myanimeScraper } from './sources/myanime';
 import { nunflixScraper } from './sources/nunflix';
 import { pelisplushdScraper } from './sources/pelisplushd';
 import { primewireScraper } from './sources/primewire';
+import { primesrcScraper } from './sources/primesrc';
 import { rgshowsScraper } from './sources/rgshows';
 import { ridooMoviesScraper } from './sources/ridomovies';
 import { slidemoviesScraper } from './sources/slidemovies';
@@ -99,6 +100,7 @@ import { zunimeScraper } from './sources/zunime';
 export function gatherAllSources(): Array<Sourcerer> {
   // all sources are gathered here
   return [
+    primesrcScraper,
     fsOnlineScraper,
     dopeboxScraper,
     cuevana3Scraper,

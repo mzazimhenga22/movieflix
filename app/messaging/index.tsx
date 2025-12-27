@@ -1,19 +1,22 @@
+import { Ionicons } from '@expo/vector-icons'
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ActivityIndicator,
-  Alert,
-  Animated,
-  FlatList,
-  Platform,
-  SafeAreaView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    Animated,
+    FlatList,
+    Image,
+    Modal,
+    Platform,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { Ionicons } from '@expo/vector-icons'
 
 import useIncomingCall from '@/hooks/useIncomingCall'
 import { createCallSession, declineCall, listenToCallHistory } from '@/lib/calls/callService'
@@ -25,34 +28,42 @@ import { BlurView } from 'expo-blur'
 import { LinearGradient } from 'expo-linear-gradient'
 import type { User } from 'firebase/auth'
 
-import MovieList from '../../components/MovieList'
+import { useMessagingSettings } from '@/hooks/useMessagingSettings'
 import ScreenWrapper from '../../components/ScreenWrapper'
 import { Media } from '../../types'
 import { onStoriesUpdate } from '../components/social-feed/storiesController'
-import { useMessagingSettings } from '@/hooks/useMessagingSettings'
+import { useActiveProfile } from '../../hooks/use-active-profile'
+import { useAccent } from '../components/AccentContext'
+import { accentGradient, darkenColor, withAlpha } from '../../lib/colorUtils'
 
 import FAB from './components/FAB'
-import Header from './components/Header'
 import IncomingCallCard from './components/IncomingCallCard'
 import MessageItem from './components/MessageItem'
 import NewChatSheet from './components/NewChatSheet'
 import NoMessages from './components/NoMessages'
 import StoryItem from './components/StoryItem'
+import MessagingErrorBoundary from './components/ErrorBoundary'
 import {
-  Conversation,
-  createGroupConversation,
-  deleteConversation,
-  findOrCreateConversation,
-  getFollowing,
-  markConversationRead,
-  onAuthChange,
-  onConversationsUpdate,
-  Profile,
-  setConversationPinned,
+    Conversation,
+    acceptMessageRequest,
+    ensureGlobalBroadcastChannel,
+    createGroupConversation,
+    deleteConversation,
+    findOrCreateConversation,
+    getFollowing,
+    getProfileById,
+    GLOBAL_BROADCAST_CHANNEL_ID,
+    markConversationRead,
+    onAuthChange,
+    onConversationsUpdate,
+    onConversationUpdate,
+    Profile,
+    setConversationPinned,
 } from './controller'
 
-const HEADER_HEIGHT = 150
+const HEADER_HEIGHT = 120
 const STORY_WINDOW_MS = 24 * 60 * 60 * 1000
+const VERIFIED_CHANNEL_IDS = new Set([GLOBAL_BROADCAST_CHANNEL_ID])
 
 type ConversationListItem = Conversation & { unread: number }
 
@@ -103,8 +114,14 @@ const MessagingScreen = () => {
   const [following, setFollowing] = useState<Profile[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [callHistory, setCallHistory] = useState<CallSession[]>([])
+  const [broadcastConversation, setBroadcastConversation] = useState<Conversation | null>(null)
+  const [profileCache, setProfileCache] = useState<Record<string, Profile>>({})
+  const [isRequestSheetVisible, setRequestSheetVisible] = useState(false)
+  const [requestActionId, setRequestActionId] = useState<string | null>(null)
+  const [isConversationsLoading, setConversationsLoading] = useState(true)
 
   const [searchQuery, setSearchQuery] = useState('')
+  const [isSearchMode, setSearchMode] = useState(false)
   const [isSheetVisible, setSheetVisible] = useState(false)
 
   const [activeFilter, setActiveFilter] = useState<'All' | 'Unread'>('All')
@@ -127,8 +144,22 @@ const MessagingScreen = () => {
   const [didBootstrapFollowingStreaks, setDidBootstrapFollowingStreaks] = useState(false)
 
   const [isStartingCall, setIsStartingCall] = useState(false)
+  const activeProfile = useActiveProfile()
+  const profileGreetingName = activeProfile?.name ?? 'streamer'
 
   const incomingCall = useIncomingCall(user?.uid)
+  const { accentColor } = useAccent()
+  const accent = accentColor || '#e50914'
+  const accentDark = darkenColor(accent, 0.35)
+  const accentDeeper = darkenColor(accent, 0.6)
+  const accentGlow = withAlpha(accent, 0.24)
+  const accentOrb = withAlpha(accent, 0.18)
+  const accentOrbSecondary = withAlpha(accent, 0.1)
+  const iconGradientColors = accentGradient(accent, 0.2)
+  const activePillStyle = { backgroundColor: withAlpha(accent, 0.9), borderColor: accent }
+  const accentDotStyle = { backgroundColor: accent, shadowColor: accent }
+  const iconShadowStyle = { shadowColor: withAlpha(accent, 0.65) }
+  const callIconStyle = { backgroundColor: withAlpha(accent, 0.2) }
 
   // ----------------------------
   // Stories rail normalization
@@ -194,6 +225,175 @@ const MessagingScreen = () => {
     return entries
   }, [groupedStories, user?.uid, user?.displayName, user?.photoURL])
 
+  const storyViewerStories = useMemo(() => {
+    const byUser = new Map<string, Story[]>()
+
+    for (const s of stories) {
+      const userId = s?.userId ? String(s.userId) : ''
+      if (!userId) continue
+
+      const createdAtMs =
+        s.createdAt && typeof (s.createdAt as any)?.toMillis === 'function'
+          ? (s.createdAt as any).toMillis()
+          : null
+
+      if (createdAtMs && Date.now() - createdAtMs > STORY_WINDOW_MS) continue
+
+      const list = byUser.get(userId) ?? []
+      list.push(s)
+      byUser.set(userId, list)
+    }
+
+    const groups = Array.from(byUser.entries()).map(([userId, list]) => {
+      const sorted = [...list].sort((a, b) => {
+        const ta = a.createdAt && typeof (a.createdAt as any)?.toMillis === 'function' ? (a.createdAt as any).toMillis() : 0
+        const tb = b.createdAt && typeof (b.createdAt as any)?.toMillis === 'function' ? (b.createdAt as any).toMillis() : 0
+        return ta - tb
+      })
+
+      const first = sorted[0]
+      const last = sorted[sorted.length - 1]
+
+      const avatar = (last as any)?.userAvatar || last?.avatar || last?.photoURL || null
+      const title = first?.username || 'Story'
+
+      const media = sorted
+        .map((st) => {
+          const uri = String(st.photoURL || (st as any).mediaUrl || '')
+          if (!uri) return null
+          const lower = uri.toLowerCase()
+          const type = lower.includes('.mp4') || lower.includes('.m3u8') ? ('video' as const) : ('image' as const)
+          return {
+            type,
+            uri,
+            storyId: String(st.id),
+            caption: typeof st.caption === 'string' ? st.caption : undefined,
+          }
+        })
+        .filter(Boolean)
+
+      const latestCreatedAt =
+        last?.createdAt && typeof (last.createdAt as any)?.toMillis === 'function' ? (last.createdAt as any).toMillis() : 0
+
+      return {
+        id: userId,
+        userId,
+        username: first?.username ?? undefined,
+        title,
+        avatar,
+        image: avatar,
+        media,
+        __latestCreatedAt: latestCreatedAt,
+      }
+    })
+
+    return groups
+      .filter((g: any) => Array.isArray(g.media) && g.media.length > 0)
+      .sort((a: any, b: any) => (b.__latestCreatedAt ?? 0) - (a.__latestCreatedAt ?? 0))
+      .map(({ __latestCreatedAt, ...rest }: any) => rest)
+  }, [stories])
+
+  const requestInbox = useMemo(() => {
+    if (!user?.uid) return []
+    return conversations.filter(
+      (conv) =>
+        conv.status === 'pending' &&
+        !conv.isGroup &&
+        (conv.requestInitiatorId ?? null) !== user.uid,
+    )
+  }, [conversations, user?.uid])
+
+  const pendingRequestCount = requestInbox.length
+
+  const broadcastUpdatedLabel = useMemo(() => {
+    if (!broadcastConversation?.updatedAt) return 'Updated moments ago'
+    const raw = broadcastConversation.updatedAt
+    const date =
+      raw && typeof raw === 'object' && typeof raw.toDate === 'function'
+        ? raw.toDate()
+        : raw && typeof raw.seconds === 'number'
+          ? new Date(raw.seconds * 1000)
+          : typeof raw === 'number'
+            ? new Date(raw)
+            : new Date()
+
+    return formatStoryTime(date.getTime()) ?? 'Updated moments ago'
+  }, [broadcastConversation?.updatedAt])
+
+  const isConversationVerified = useCallback((conv: Conversation | null | undefined) => {
+    if (!conv) return false
+    if (conv.isBroadcast) return true
+    return VERIFIED_CHANNEL_IDS.has(conv.id)
+  }, [])
+
+  const getRequestDisplayName = useCallback(
+    (conversation: Conversation) => {
+      const initiatorId = conversation.requestInitiatorId
+      if (initiatorId && profileCache[initiatorId]?.displayName) {
+        return profileCache[initiatorId].displayName
+      }
+      if (conversation.name) return conversation.name
+      const fallbackId = conversation.members?.find((member) => member !== user?.uid)
+      if (fallbackId && profileCache[fallbackId]?.displayName) {
+        return profileCache[fallbackId].displayName
+      }
+      if (fallbackId) return `@${fallbackId.slice(0, 6)}…`
+      return 'New request'
+    },
+    [profileCache, user?.uid],
+  )
+
+  const getRequestAvatar = useCallback(
+    (conversation: Conversation) => {
+      const initiatorId = conversation.requestInitiatorId
+      const fallbackId = conversation.members?.find((member) => member !== user?.uid)
+      const targetId = initiatorId || fallbackId
+      if (targetId && profileCache[targetId]?.photoURL) {
+        return profileCache[targetId]?.photoURL ?? null
+      }
+      return null
+    },
+    [profileCache, user?.uid],
+  )
+
+  useEffect(() => {
+    if (!requestInbox.length) return
+    const missingIds = requestInbox
+      .map((conv) => conv.requestInitiatorId)
+      .filter((id): id is string => !!id && !profileCache[id])
+    if (!missingIds.length) return
+
+    let isMounted = true
+    const load = async () => {
+      try {
+        const next = await Promise.all(missingIds.slice(0, 8).map((id) => getProfileById(id)))
+        if (!isMounted) return
+        setProfileCache((prev) => {
+          const clone = { ...prev }
+          next.forEach((profile) => {
+            if (profile && !clone[profile.id]) {
+              clone[profile.id] = profile
+            }
+          })
+          return clone
+        })
+      } catch (err) {
+        console.warn('[messaging] failed loading request profiles', err)
+      }
+    }
+
+    void load()
+    return () => {
+      isMounted = false
+    }
+  }, [requestInbox, profileCache])
+
+  useEffect(() => {
+    if (requestInbox.length === 0) {
+      setRequestSheetVisible(false)
+    }
+  }, [requestInbox.length])
+
   // ----------------------------
   // Auth bootstrap
   // ----------------------------
@@ -201,6 +401,10 @@ const MessagingScreen = () => {
     const unsub = onAuthChange((currentUser) => {
       setUser(currentUser)
       setAuthReady(true)
+      if (!currentUser) {
+        setConversations([])
+        setConversationsLoading(true)
+      }
     })
     return () => unsub()
   }, [])
@@ -213,7 +417,9 @@ const MessagingScreen = () => {
 
     let alive = true
     const unsubConversations = onConversationsUpdate((list) => {
-      if (alive) setConversations(list)
+      if (!alive) return
+      setConversations(list)
+      setConversationsLoading(false)
     })
     const unsubStories = onStoriesUpdate((list) => {
       if (alive) setStories(list as any)
@@ -348,6 +554,31 @@ const MessagingScreen = () => {
     return () => clearTimeout(timer)
   }, [isAuthReady, headerOpacity, promoTranslateX])
 
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+
+    const initChannel = async () => {
+      try {
+        await ensureGlobalBroadcastChannel()
+        unsubscribe = onConversationUpdate(GLOBAL_BROADCAST_CHANNEL_ID, (conv) => {
+          setBroadcastConversation(conv)
+        })
+      } catch (err) {
+        console.warn('[messaging] broadcast channel init failed', err)
+      }
+    }
+
+    void initChannel()
+
+    return () => {
+      if (unsubscribe) {
+        try {
+          unsubscribe()
+        } catch {}
+      }
+    }
+  }, [])
+
   // ----------------------------
   // Unread computation aligned with controller.ts (lastReadAtBy)
   // ----------------------------
@@ -402,6 +633,13 @@ const MessagingScreen = () => {
           ? enhancedConversations.filter((m) => m.isGroup)
           : enhancedConversations.filter((m) => !m.isGroup)
 
+      base = base.filter((m) => {
+        if (!user?.uid) return true
+        if (m.status !== 'pending') return true
+        if (!m.requestInitiatorId) return true
+        return m.requestInitiatorId === user.uid
+      })
+
       if (activeFilter === 'Unread') base = base.filter((m) => m.unread > 0)
 
       if (q) {
@@ -450,6 +688,43 @@ const MessagingScreen = () => {
     setSpotlightRect(null)
   }, [])
 
+  const handleQuickAccept = useCallback(
+    async (conversationId: string) => {
+      setRequestActionId(conversationId)
+      try {
+        await acceptMessageRequest(conversationId)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unable to accept request'
+        Alert.alert('Unable to accept', message)
+      } finally {
+        setRequestActionId(null)
+      }
+    },
+    [],
+  )
+
+  const handleQuickDecline = useCallback(
+    (conversationId: string) => {
+      Alert.alert('Decline request?', 'They will not be notified.', [
+        { text: 'Keep', style: 'cancel' },
+        {
+          text: 'Decline',
+          style: 'destructive',
+          onPress: () => {
+            setRequestActionId(conversationId)
+            void deleteConversation(conversationId)
+              .catch((err) => {
+                const message = err instanceof Error ? err.message : 'Unable to decline request'
+                Alert.alert('Unable to decline', message)
+              })
+              .finally(() => setRequestActionId(null))
+          },
+        },
+      ])
+    },
+    [],
+  )
+
   const handleStartChat = useCallback(
     async (person: Profile) => {
       try {
@@ -487,14 +762,23 @@ const MessagingScreen = () => {
         return
       }
 
-      const targetId = story?.latestStoryId || story?.id
+      const initialStoryId = story?.userId ? String(story.userId) : String(story?.id ?? '')
+      if (!initialStoryId) return
+
       router.push({
-        pathname: '/story/[id]',
-        params: { id: targetId, photoURL: story?.photoURL ?? story?.displayAvatar ?? '' },
-      })
+        pathname: '/story-viewer',
+        params: {
+          stories: JSON.stringify(storyViewerStories),
+          initialStoryId,
+          ...(story?.latestStoryId ? { initialMediaId: String(story.latestStoryId) } : {}),
+        },
+      } as any)
     },
-    [router],
+    [router, storyViewerStories],
   )
+
+  const handleOpenSearch = useCallback(() => setSearchMode(true), [])
+  const handleCloseSearch = useCallback(() => setSearchMode(false), [])
 
   const handleStartCall = useCallback(
     async (conversation: Conversation, mode: CallType) => {
@@ -560,61 +844,153 @@ const MessagingScreen = () => {
   // ----------------------------
   if (!isAuthReady) {
     return (
-      <ScreenWrapper>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" />
-        </View>
-      </ScreenWrapper>
+      <MessagingErrorBoundary>
+        <ScreenWrapper>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" />
+          </View>
+        </ScreenWrapper>
+      </MessagingErrorBoundary>
     )
   }
 
-  const accentColor = '#e50914'
   const headerHeight = HEADER_HEIGHT
 
   return (
+    <MessagingErrorBoundary>
     <ScreenWrapper>
+      <StatusBar barStyle="light-content" backgroundColor="#0E0E0E" />
       <LinearGradient
-        colors={[accentColor, '#150a13', '#05060f']}
+        colors={[accent, accentDark, accentDeeper]}
         start={[0, 0]}
         end={[1, 1]}
         style={StyleSheet.absoluteFillObject}
       />
 
-      <SafeAreaView style={[styles.container, { paddingTop: insets.top }]}>
-        {/* Header stack */}
-        <View style={{ height: headerHeight, marginHorizontal: 14 }}>
-          <Animated.View
-            style={{
-              position: 'absolute',
-              left: 0,
-              right: 0,
-              top: 0,
-              opacity: headerOpacity,
-            }}
-          >
-            <Header
-              scrollY={scrollY}
-              onSettingsPress={() => navigateTo('/messaging/settings')}
-              onSearchChange={setSearchQuery}
-              searchQuery={searchQuery}
-              headerHeight={headerHeight}
-            />
-          </Animated.View>
+      <LinearGradient
+        colors={[accentOrb, 'rgba(255,255,255,0)']}
+        start={{ x: 0.1, y: 0 }}
+        end={{ x: 0.9, y: 1 }}
+        style={styles.bgOrbPrimary}
+      />
+      <LinearGradient
+        colors={[accentOrbSecondary, 'rgba(255,255,255,0)']}
+        start={{ x: 0.8, y: 0 }}
+        end={{ x: 0.2, y: 1 }}
+        style={styles.bgOrbSecondary}
+      />
 
-          {showPromoRow && continueWatching.length > 0 && (
-            <Animated.View
-              style={[
-                styles.promoRow,
-                {
-                  left: 0,
-                  right: 0,
-                  top: 0,
-                  transform: [{ translateX: promoTranslateX }],
-                },
-              ]}
-            >
-              <MovieList title="Continue Watching" movies={continueWatching.slice(0, 20)} showProgress />
-            </Animated.View>
+      <View style={styles.container}>
+        {/* Header (glassy hero) */}
+        <View style={styles.headerWrap}>
+          {isSearchMode ? (
+            <BlurView intensity={80} tint="dark" style={styles.searchSheet}>
+              <View style={styles.searchHeaderRow}>
+                <TouchableOpacity onPress={handleCloseSearch} style={styles.searchBackBtn}>
+                  <Ionicons name="arrow-back" size={22} color="#fff" />
+                </TouchableOpacity>
+                <Text style={styles.searchHeading}>Search</Text>
+              </View>
+              <View style={styles.searchInputRow}>
+                <Ionicons name="search" size={18} color="#fff" />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search chats, groups & channels"
+                  placeholderTextColor="rgba(255,255,255,0.6)"
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  autoFocus
+                />
+                {searchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.searchClearBtn}>
+                    <Ionicons name="close" size={16} color="#fff" />
+                  </TouchableOpacity>
+                )}
+              </View>
+              <Text style={styles.searchHint}>Filtering {enhancedConversations.length} chats in real time.</Text>
+            </BlurView>
+          ) : (
+            <>
+              <LinearGradient
+                colors={[accentGlow, 'rgba(10,12,24,0.4)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.headerGlow}
+              />
+              <View style={styles.headerBar}>
+                <TouchableOpacity style={styles.titleRow} activeOpacity={0.85} onPress={handleOpenSearch}>
+                  <View style={[styles.accentDot, accentDotStyle]} />
+                  <View>
+                    <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
+                      Messages & Stories
+                    </Text>
+                    <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
+                      Hey, {profileGreetingName}
+                    </Text>
+                    <Text style={styles.headerSubtitle} numberOfLines={1} ellipsizeMode="tail">
+                      Connect & Share
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                <View style={styles.headerIcons}>
+                  <TouchableOpacity style={[styles.iconBtn, iconShadowStyle]} onPress={handleOpenSearch}>
+                    <LinearGradient
+                      colors={iconGradientColors}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      <Ionicons name="search-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                    </LinearGradient>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.iconBtn, iconShadowStyle]}
+                    onPress={() => navigateTo('/messaging/settings')}
+                  >
+                    <LinearGradient
+                      colors={iconGradientColors}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      <Ionicons name="settings-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={styles.headerMetaRow}>
+                <View style={styles.metaPill}>
+                  <Ionicons name="chatbubbles" size={14} color="#fff" />
+                  <Text style={styles.metaText}>{enhancedConversations.length} chats</Text>
+                </View>
+                <View style={[styles.metaPill, styles.metaPillSoft]}>
+                  <Ionicons name="people" size={14} color="#fff" />
+                  <Text style={styles.metaText}>{following.length} following</Text>
+                </View>
+                <View style={[styles.metaPill, styles.metaPillOutline]}>
+                  <Ionicons name="call" size={14} color="#fff" />
+                  <Text style={styles.metaText}>Voice & Video</Text>
+                </View>
+              </View>
+
+              <View style={styles.quickRow}>
+                <TouchableOpacity style={styles.quickTile} onPress={() => navigateTo('/messaging/new')}>
+                  <Ionicons name="create-outline" size={18} color="#fff" />
+                  <Text style={styles.quickTileText}>New chat</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.quickTile} onPress={() => setActiveKind('Groups')}>
+                  <Ionicons name="people-outline" size={18} color="#fff" />
+                  <Text style={styles.quickTileText}>Groups</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.quickTile} onPress={() => setActiveKind('Calls')}>
+                  <Ionicons name="call-outline" size={18} color="#fff" />
+                  <Text style={styles.quickTileText}>Calls</Text>
+                </TouchableOpacity>
+              </View>
+            </>
           )}
         </View>
 
@@ -642,7 +1018,7 @@ const MessagingScreen = () => {
 
                   return (
                     <TouchableOpacity style={styles.callItem}>
-                      <View style={styles.callIcon}>
+                      <View style={[styles.callIcon, callIconStyle]}>
                         <Ionicons
                           name={call.type === 'video' ? 'videocam' : 'call'}
                           size={20}
@@ -668,13 +1044,19 @@ const MessagingScreen = () => {
                 keyExtractor={(item) => item.id}
                 ListHeaderComponent={
                   <View style={styles.listHeaderWrap}>
+                    {isConversationsLoading && (
+                      <View style={styles.fetchingBanner}>
+                        <ActivityIndicator color="#fff" size="small" />
+                        <Text style={styles.fetchingText}>Fetching messages…</Text>
+                      </View>
+                    )}
                     <View style={styles.pillsRow}>
                       {(['Chats', 'Groups', 'Calls'] as const).map((kind) => {
                         const isActive = activeKind === kind
                         return (
                           <TouchableOpacity
                             key={kind}
-                            style={[styles.pill, isActive && styles.pillActive]}
+                            style={[styles.pill, isActive && activePillStyle]}
                             onPress={() => setActiveKind(kind)}
                           >
                             <Text style={[styles.pillText, isActive && styles.pillTextActive]}>{kind}</Text>
@@ -685,7 +1067,7 @@ const MessagingScreen = () => {
                   </View>
                 }
                 contentContainerStyle={{
-                  paddingTop: headerHeight + 8,
+                  paddingTop: headerHeight,
                   paddingBottom: Platform.OS === 'ios' ? insets.bottom + 120 : insets.bottom + 100,
                 }}
                 showsVerticalScrollIndicator={false}
@@ -701,6 +1083,7 @@ const MessagingScreen = () => {
                     onLongPress={handleMessageLongPress}
                     onStartCall={handleStartCall}
                     callDisabled={isStartingCall}
+                    isVerified={isConversationVerified(item)}
                   />
                 )}
                 keyExtractor={(item) => item.id}
@@ -709,13 +1092,19 @@ const MessagingScreen = () => {
                 })}
                 ListHeaderComponent={
                   <View style={styles.listHeaderWrap}>
+                    {isConversationsLoading && (
+                      <View style={styles.fetchingBanner}>
+                        <ActivityIndicator color="#fff" size="small" />
+                        <Text style={styles.fetchingText}>Fetching messages…</Text>
+                      </View>
+                    )}
                     <View style={styles.pillsRow}>
                       {(['Chats', 'Groups', 'Calls'] as const).map((kind) => {
                         const isActive = activeKind === kind
                         return (
                           <TouchableOpacity
                             key={kind}
-                            style={[styles.pill, isActive && styles.pillActive]}
+                            style={[styles.pill, isActive && activePillStyle]}
                             onPress={() => setActiveKind(kind)}
                           >
                             <Text style={[styles.pillText, isActive && styles.pillTextActive]}>{kind}</Text>
@@ -730,7 +1119,7 @@ const MessagingScreen = () => {
                         return (
                           <TouchableOpacity
                             key={label}
-                            style={[styles.pill, isActive && styles.pillActive]}
+                            style={[styles.pill, isActive && activePillStyle]}
                             onPress={() => setActiveFilter(label)}
                           >
                             <Text style={[styles.pillText, isActive && styles.pillTextActive]}>{label}</Text>
@@ -738,6 +1127,79 @@ const MessagingScreen = () => {
                         )
                       })}
                     </View>
+
+                    {broadcastConversation && (
+                      <TouchableOpacity
+                        activeOpacity={0.9}
+                        onPress={() => handleMessagePress(GLOBAL_BROADCAST_CHANNEL_ID)}
+                      >
+                        <LinearGradient
+                          colors={[withAlpha(accent, 0.2), withAlpha(accent, 0.06)]}
+                          start={{ x: 0, y: 0 }}
+                          end={{ x: 1, y: 1 }}
+                          style={styles.broadcastCard}
+                        >
+                          <View style={styles.broadcastIconWrap}>
+                            <Ionicons name="megaphone-outline" size={20} color="#fff" />
+                          </View>
+                          <View style={styles.broadcastCopy}>
+                            <View style={styles.broadcastTitleRow}>
+                              <Text style={styles.broadcastTitle} numberOfLines={1}>
+                                {broadcastConversation.name || 'Onboarding & Updates'}
+                              </Text>
+                              {isConversationVerified(broadcastConversation) && (
+                                <View style={styles.verifiedBadge}>
+                                  <Ionicons name="checkmark" size={12} color="#fff" />
+                                </View>
+                              )}
+                              <View style={styles.broadcastBadge}>
+                                <Text style={styles.broadcastBadgeText}>Admin only</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.broadcastSubtitle} numberOfLines={1}>
+                              {broadcastConversation.lastMessage ||
+                                'Catch the latest announcements from MovieFlix.'}
+                            </Text>
+                            <Text style={styles.broadcastUpdated}>{broadcastUpdatedLabel}</Text>
+                            <Text style={styles.broadcastFootnote} numberOfLines={2}>
+                              Auto-followed for every profile. Tap to see MovieFlix onboarding tips—no request needed.
+                            </Text>
+                          </View>
+                          <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.8)" />
+                        </LinearGradient>
+                      </TouchableOpacity>
+                    )}
+
+                    {pendingRequestCount > 0 && (
+                      <TouchableOpacity
+                        activeOpacity={0.9}
+                        onPress={() => setRequestSheetVisible(true)}
+                      >
+                        <LinearGradient
+                          colors={[withAlpha('#1f1f1f', 0.7), withAlpha('#050505', 0.9)]}
+                          start={{ x: 0, y: 0 }}
+                          end={{ x: 1, y: 1 }}
+                          style={styles.requestsCard}
+                        >
+                          <View style={styles.requestsIconWrap}>
+                            <Ionicons name="mail-unread-outline" size={20} color="#fff" />
+                            <View style={styles.requestsCountBadge}>
+                              <Text style={styles.requestsCountText}>{pendingRequestCount}</Text>
+                            </View>
+                          </View>
+                          <View style={styles.requestsCopy}>
+                            <Text style={styles.requestsTitle}>Message requests</Text>
+                            <Text style={styles.requestsSubtitle} numberOfLines={2}>
+                              Approve or decline new chats. They won’t know you saw it until you allow.
+                            </Text>
+                          </View>
+                          <View style={styles.requestsCta}>
+                            <Text style={styles.requestsCtaText}>Review</Text>
+                            <Ionicons name="chevron-forward" size={16} color="#fff" />
+                          </View>
+                        </LinearGradient>
+                      </TouchableOpacity>
+                    )}
 
                     <View style={styles.storiesContainer}>
                       <View style={styles.storiesHeaderRow}>
@@ -757,7 +1219,7 @@ const MessagingScreen = () => {
                   </View>
                 }
                 contentContainerStyle={{
-                  paddingTop: headerHeight + 8,
+                  paddingTop: headerHeight,
                   paddingBottom: Platform.OS === 'ios' ? insets.bottom + 120 : insets.bottom + 100,
                 }}
                 showsVerticalScrollIndicator={false}
@@ -785,6 +1247,7 @@ const MessagingScreen = () => {
                 onLongPress={() => {}}
                 onStartCall={handleStartCall}
                 callDisabled={isStartingCall}
+                isVerified={isConversationVerified(spotlightConversation)}
               />
             </View>
 
@@ -843,39 +1306,339 @@ const MessagingScreen = () => {
           onStartChat={handleStartChat}
           onCreateGroup={handleCreateGroup}
         />
-      </SafeAreaView>
+
+        <Modal
+          visible={isRequestSheetVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setRequestSheetVisible(false)}
+        >
+          <View style={styles.requestSheetOverlay}>
+            <TouchableOpacity
+              style={styles.requestSheetBackdrop}
+              activeOpacity={1}
+              onPress={() => setRequestSheetVisible(false)}
+            />
+            <View style={[styles.requestSheet, { paddingBottom: insets.bottom + 20 }]}>
+              <View style={styles.requestSheetHandle} />
+              <View style={styles.requestSheetHeader}>
+                <View>
+                  <Text style={styles.requestSheetTitle}>Message requests</Text>
+                  <Text style={styles.requestSheetSubtitle}>
+                    {pendingRequestCount} pending
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setRequestSheetVisible(false)}>
+                  <Ionicons name="close" size={22} color="#fff" />
+                </TouchableOpacity>
+              </View>
+              <FlatList
+                data={requestInbox}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => {
+                  const avatar = getRequestAvatar(item)
+                  const name = getRequestDisplayName(item)
+                  const preview = item.requestPreview || item.lastMessage || 'Tap to open chat'
+                  const isBusy = requestActionId === item.id
+                  return (
+                    <View style={styles.requestRow}>
+                      {avatar ? (
+                        <Image source={{ uri: avatar }} style={styles.requestAvatar} />
+                      ) : (
+                        <View style={styles.requestAvatarPlaceholder}>
+                          <Ionicons name="person" size={18} color="rgba(255,255,255,0.8)" />
+                        </View>
+                      )}
+                      <TouchableOpacity
+                        style={styles.requestCopy}
+                        activeOpacity={0.9}
+                        onPress={() => {
+                          setRequestSheetVisible(false)
+                          handleMessagePress(item.id)
+                        }}
+                      >
+                        <Text style={styles.requestName} numberOfLines={1}>
+                          {name}
+                        </Text>
+                        <Text style={styles.requestPreview} numberOfLines={2}>
+                          {preview}
+                        </Text>
+                      </TouchableOpacity>
+                      <View style={styles.requestActions}>
+                        <TouchableOpacity
+                          style={[styles.requestAcceptBtn, isBusy && styles.requestBtnDisabled]}
+                          onPress={() => void handleQuickAccept(item.id)}
+                          disabled={isBusy}
+                        >
+                          <Text style={styles.requestAcceptText}>Allow</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.requestDeclineBtn, isBusy && styles.requestBtnDisabled]}
+                          onPress={() => handleQuickDecline(item.id)}
+                          disabled={isBusy}
+                        >
+                          <Text style={styles.requestDeclineText}>Decline</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )
+                }}
+                ItemSeparatorComponent={() => <View style={styles.requestDivider} />}
+                ListEmptyComponent={() => (
+                  <View style={styles.requestEmpty}>
+                    <Text style={styles.requestEmptyTitle}>All caught up</Text>
+                    <Text style={styles.requestEmptySubtitle}>
+                      New chats from people you don’t follow will show up here.
+                    </Text>
+                  </View>
+                )}
+                contentContainerStyle={{ paddingBottom: 12 }}
+              />
+            </View>
+          </View>
+        </Modal>
+        </View>
     </ScreenWrapper>
+    </MessagingErrorBoundary>
   )
 }
 
 const styles = StyleSheet.create({
+  gradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 380,
+    height: 380,
+    borderRadius: 190,
+    top: -60,
+    left: -60,
+    opacity: 0.6,
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    bottom: -90,
+    right: -40,
+    opacity: 0.55,
+  },
   container: { flex: 1 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   listContainer: { flex: 1 },
 
-  listHeaderWrap: {
+  // Header glass hero
+  headerWrap: {
+    marginHorizontal: 12,
+    marginTop: Platform.OS === 'ios' ? 34 : 22,
+    marginBottom: 4,
+    borderRadius: 18,
+    overflow: 'hidden',
+  },
+  searchSheet: {
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: 'rgba(7,9,15,0.92)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  searchHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  searchBackBtn: {
+    padding: 6,
+    marginRight: 10,
+  },
+  searchHeading: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  searchInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  searchInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 16,
+  },
+  searchClearBtn: {
+    padding: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  searchHint: {
+    marginTop: 12,
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 12,
+  },
+  headerGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.7,
+  },
+  headerBar: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.14,
+    shadowRadius: 20,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
+  },
+  accentDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+    shadowColor: '#000',
+    shadowOpacity: 0.6,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  headerEyebrow: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    letterSpacing: 0.6,
+  },
+  headerText: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  headerSubtitle: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  iconBtn: {
+    marginLeft: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  iconBg: {
+    padding: 10,
+    borderRadius: 12,
+  },
+  iconMargin: {
+    marginRight: 4,
+  },
+  headerMetaRow: {
+    flexDirection: 'row',
+    gap: 10,
+    flexWrap: 'wrap',
+    rowGap: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 8,
+  },
+  metaPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    maxWidth: '100%',
+    flexShrink: 1,
+  },
+  metaPillSoft: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  metaPillOutline: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  metaText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+
+  quickRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingBottom: 10,
     paddingTop: 4,
+    gap: 10,
+  },
+  quickTile: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  quickTileText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+
+  listHeaderWrap: {
+    paddingTop: 0,
   },
 
   // Unified pill styling (tighter UI)
   pillsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 6,
-    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    gap: 6,
   },
   pill: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.14)',
     backgroundColor: 'rgba(255,255,255,0.03)',
-  },
-  pillActive: {
-    backgroundColor: '#e50914',
-    borderColor: '#e50914',
   },
   pillText: {
     color: 'rgba(255,255,255,0.82)',
@@ -883,10 +1646,169 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   pillTextActive: { color: '#fff' },
+  fetchingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginHorizontal: 12,
+    marginBottom: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  fetchingText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  broadcastCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 18,
+    padding: 14,
+    marginHorizontal: 12,
+    marginVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    gap: 12,
+  },
+  broadcastIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  broadcastCopy: {
+    flex: 1,
+  },
+  broadcastTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 4,
+  },
+  broadcastTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+    flex: 1,
+  },
+  broadcastBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  broadcastBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  broadcastSubtitle: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  broadcastUpdated: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+  },
+  broadcastFootnote: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
+    marginTop: 4,
+  },
+  verifiedBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: '#0d6efd',
+    marginRight: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  requestsCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginHorizontal: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.07)',
+    gap: 12,
+  },
+  requestsIconWrap: {
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  requestsCountBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    minWidth: 20,
+    paddingHorizontal: 4,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#e50914',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  requestsCountText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  requestsCopy: {
+    flex: 1,
+  },
+  requestsTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  requestsSubtitle: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  requestsCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  requestsCtaText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
 
   storiesContainer: {
-    paddingVertical: 12,
-    paddingHorizontal: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
     backgroundColor: 'transparent',
     marginBottom: 8,
   },
@@ -894,8 +1816,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
-    paddingHorizontal: 4,
+    marginBottom: 6,
+    paddingHorizontal: 2,
   },
   storiesTitle: {
     fontSize: 16,
@@ -910,8 +1832,8 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   storiesListContent: {
-    paddingLeft: 6,
-    paddingRight: 8,
+    paddingLeft: 4,
+    paddingRight: 6,
   },
 
   promoRow: {
@@ -934,7 +1856,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   spotlightContent: {
     position: 'absolute',
@@ -975,8 +1897,8 @@ const styles = StyleSheet.create({
   callItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.08)',
   },
@@ -984,7 +1906,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(229,9,20,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
@@ -1001,6 +1923,131 @@ const styles = StyleSheet.create({
   callSubtitle: {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 14,
+  },
+  requestSheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(3,5,12,0.75)',
+    justifyContent: 'flex-end',
+  },
+  requestSheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  requestSheet: {
+    backgroundColor: '#07090F',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingTop: 12,
+    paddingHorizontal: 16,
+    maxHeight: '75%',
+  },
+  requestSheetHandle: {
+    width: 50,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  requestSheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  requestSheetTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  requestSheetSubtitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  requestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  requestAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    marginRight: 12,
+  },
+  requestAvatarPlaceholder: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    marginRight: 12,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  requestCopy: {
+    flex: 1,
+  },
+  requestName: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  requestPreview: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  requestActions: {
+    marginLeft: 10,
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  requestAcceptBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: '#19c37d',
+  },
+  requestAcceptText: {
+    color: '#02060f',
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  requestDeclineBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  requestDeclineText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  requestBtnDisabled: {
+    opacity: 0.5,
+  },
+  requestDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    marginVertical: 6,
+  },
+  requestEmpty: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  requestEmptyTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  requestEmptySubtitle: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 6,
   },
 })
 

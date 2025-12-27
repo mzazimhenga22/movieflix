@@ -91,7 +91,7 @@ const LoginScreen = () => {
           </TouchableOpacity>
 
           <TouchableOpacity onPress={() => router.push('/signup')}>
-            <Text style={styles.link}>Don't have an account? Sign up</Text>
+            <Text style={styles.link}>{`Don't have an account? Sign up`}</Text>
           </TouchableOpacity>
         </View>
       </View>

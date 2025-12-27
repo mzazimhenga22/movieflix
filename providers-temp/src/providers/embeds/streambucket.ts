@@ -145,7 +145,7 @@ export const streambucketScraper = makeEmbed({
           {
             id: 'primary',
             type: 'hls',
-            playlist: createM3U8ProxyUrl(videoUrl, { requires: [flags.CORS_ALLOWED], disallowed: [] }, headers),
+            playlist: createM3U8ProxyUrl(videoUrl, ctx.features, headers),
             headers,
             flags: [flags.CORS_ALLOWED],
             captions: [],
@@ -192,7 +192,7 @@ export const streambucketScraper = makeEmbed({
         {
           id: 'primary',
           type: 'hls',
-          playlist: createM3U8ProxyUrl(videoUrl, { requires: [flags.CORS_ALLOWED], disallowed: [] }, headers),
+          playlist: createM3U8ProxyUrl(videoUrl, ctx.features, headers),
           headers,
           flags: [flags.CORS_ALLOWED],
           captions: [],

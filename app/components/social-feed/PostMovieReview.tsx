@@ -25,8 +25,8 @@ export default function PostMovieReview() {
           <Ionicons name="film-outline" size={22} color="#fff" />
         </View>
         <View style={styles.textContent}>
-          <Text style={styles.title}>Post Movie Review</Text>
-          <Text style={styles.subtitle}>Share your thoughts about a movie</Text>
+          <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">Post Movie Review</Text>
+          <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="tail">Share your thoughts about a movie</Text>
         </View>
         <View style={styles.chevronWrap}>
           <Ionicons name="chevron-forward" size={20} color="#fff" />
@@ -38,8 +38,8 @@ export default function PostMovieReview() {
 
 const styles = StyleSheet.create({
   container: {
-    marginHorizontal: 16,
-    marginVertical: 8,
+    marginHorizontal: 12,
+    marginVertical: 6,
     borderRadius: 18,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
@@ -62,17 +62,17 @@ const styles = StyleSheet.create({
   content: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
     gap: 12,
   },
   iconWrapper: {
-    width: 46,
-    height: 46,
+    width: 44,
+    height: 44,
     borderRadius: 14,
     backgroundColor: '#e50914',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 10,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
     shadowColor: '#e50914',
@@ -86,13 +86,13 @@ const styles = StyleSheet.create({
   },
   title: {
     color: '#fff',
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: '800',
     letterSpacing: 0.2,
   },
   subtitle: {
-    color: '#999',
-    fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
     marginTop: 2,
   },
   chevronWrap: {

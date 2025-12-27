@@ -1,4 +1,5 @@
 import { updateStreakForContext } from '@/lib/streaks/streakManager';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Feather, MaterialIcons } from '@expo/vector-icons';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
@@ -6,24 +7,25 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    FlatList,
-    GestureResponderEvent,
-    Image,
-    Keyboard,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Animated,
+  Dimensions,
+  FlatList,
+  GestureResponderEvent,
+  Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { useActiveProfilePhoto } from '../../../hooks/use-active-profile-photo';
 import { useUser } from '../../../hooks/use-user';
+import { buildProfileScopedKey, getStoredActiveProfile } from '../../../lib/profileStorage';
 import type { Comment, FeedCardItem } from '../../../types/social-feed';
 
 type PlanTier = 'free' | 'plus' | 'premium';
@@ -61,12 +63,15 @@ export default function FeedCard({
   active,
   currentPlan,
 }: Props) {
+  const router = useRouter();
   const { user } = useUser();
   const activeProfilePhoto = useActiveProfilePhoto();
 
   const [commentsVisible, setCommentsVisible] = useState(false);
   const [newComment, setNewComment] = useState('');
   const [spoilerRevealed, setSpoilerRevealed] = useState<Record<string, boolean>>({});
+  const [autoPlayFeedVideos, setAutoPlayFeedVideos] = useState(true);
+  const [hideSpoilers, setHideSpoilers] = useState(true);
   const [reactionsVisible, setReactionsVisible] = useState(false);
   const [selectedReaction, setSelectedReaction] = useState<string>('');
 
@@ -125,23 +130,61 @@ export default function FeedCard({
   const hasPlayed = useRef(false);
 
   useEffect(() => {
+    let mounted = true;
+    const parseBool = (raw: string | null, fallback: boolean) => {
+      if (raw == null) return fallback;
+      try {
+        const parsed = JSON.parse(raw);
+        return typeof parsed === 'boolean' ? parsed : fallback;
+      } catch {
+        if (raw === 'true') return true;
+        if (raw === 'false') return false;
+        return fallback;
+      }
+    };
+
+    (async () => {
+      try {
+        const profile = await getStoredActiveProfile();
+        const feedKey = buildProfileScopedKey('socialSettings:autoPlayFeedVideos', profile?.id ?? undefined);
+        const spoilerKey = buildProfileScopedKey('socialSettings:hideSpoilers', profile?.id ?? undefined);
+        const [rawFeed, rawSpoilers] = await Promise.all([
+          AsyncStorage.getItem(feedKey).catch(() => null),
+          AsyncStorage.getItem(spoilerKey).catch(() => null),
+        ]);
+        if (!mounted) return;
+        setAutoPlayFeedVideos(parseBool(rawFeed, true));
+        setHideSpoilers(parseBool(rawSpoilers, true));
+      } catch {
+        if (!mounted) return;
+        setAutoPlayFeedVideos(true);
+        setHideSpoilers(true);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     hasPlayed.current = false;
     videoRef.current?.pauseAsync();
   }, [item.videoUrl]);
 
   useEffect(() => {
-    if (active && item.videoUrl && videoRef.current && !hasPlayed.current) {
+    if (autoPlayFeedVideos && active && item.videoUrl && videoRef.current && !hasPlayed.current) {
       videoRef.current
         .playAsync()
         .then(() => {
           hasPlayed.current = true;
         })
         .catch((e) => console.warn('FeedCard video play error', e));
-    } else if (!active && videoRef.current) {
+    } else if ((!active || !autoPlayFeedVideos) && videoRef.current) {
       videoRef.current.pauseAsync();
       hasPlayed.current = false;
     }
-  }, [active, item.videoUrl]);
+  }, [active, autoPlayFeedVideos, item.videoUrl]);
 
   useEffect(() => {
     if (commentsVisible) {
@@ -189,6 +232,33 @@ export default function FeedCard({
     lastTapRef.current = now;
     tapTimeout.current = setTimeout(() => {
       onWatch(item.id);
+
+      if (item.videoUrl) {
+        const reelPayload = {
+          id: String(item.id),
+          mediaType: 'feed',
+          title: (item.movie || item.review || 'Reel').slice(0, 120),
+          docId: (item as any).docId ?? null,
+          videoUrl: item.videoUrl,
+          avatar: item.avatar ?? null,
+          user: item.user ?? null,
+          likes: item.likes ?? 0,
+          commentsCount: item.commentsCount ?? 0,
+          likerAvatars: [],
+          music: `Original Sound - ${item.user ?? 'MovieFlix'}`,
+        };
+
+        router.push(
+          {
+            pathname: '/reels/feed',
+            params: {
+              id: String(item.id),
+              list: JSON.stringify([reelPayload]),
+              title: 'Reels',
+            },
+          } as any,
+        );
+      }
       tapTimeout.current = null;
     }, 320);
   };
@@ -223,7 +293,7 @@ export default function FeedCard({
 
   const renderCommentItem = ({ item: c }: { item: CommentWithAvatar }) => {
     const isSpoiler = !!c.spoiler;
-    const revealed = spoilerRevealed[String(c.id)];
+    const revealed = !hideSpoilers || spoilerRevealed[String(c.id)];
 
     const commentAvatarUri = resolveAvatarUri(c.avatar ?? c.avatarUrl ?? null);
 
@@ -256,8 +326,6 @@ export default function FeedCard({
     );
   };
 
-  const router = useRouter();
-  // ...existing code...
   return (
     <View style={styles.card}>
       <View style={styles.cardSheen} />
@@ -500,7 +568,7 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: 'rgba(255,255,255,0.045)',
     borderRadius: 18,
-    marginVertical: 12,
+    marginVertical: 8,
     marginHorizontal: 14,
     overflow: 'hidden',
     borderWidth: 1,

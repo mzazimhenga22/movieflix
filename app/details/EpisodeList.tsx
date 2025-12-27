@@ -1,6 +1,20 @@
 import { FontAwesome, MaterialIcons } from '@expo/vector-icons';
-import React, { useState } from 'react';
-import { ActivityIndicator, Image, LayoutAnimation, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, UIManager, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Image,
+  LayoutAnimation,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  UIManager,
+  View,
+} from 'react-native';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
+import Animated, { FadeInUp, FadeOutDown } from 'react-native-reanimated';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -59,62 +73,125 @@ const EpisodeList: React.FC<EpisodeListProps> = ({ seasons, onPlayEpisode, onDow
 
       {selectedSeason && (
         <View style={styles.episodeListContainer}>
-          {selectedSeason.episodes.map((episode) => {
-            const posterUrl = episode.still_path
-              ? `https://image.tmdb.org/t/p/w300${episode.still_path}`
-              : 'https://via.placeholder.com/130x75?text=No+Image';
-            return (
-              <View key={episode.id} style={styles.episodeCard}>
-                <Image source={{ uri: posterUrl }} style={styles.episodePoster} />
-                <View style={styles.episodeDetails}>
-                  <View style={styles.episodeHeader}>
-                    <Text style={styles.episodeName} numberOfLines={1}>
-                      {episode.episode_number}. {episode.name}
-                    </Text>
-                    <View style={styles.headerActionsRow}>
-                      <TouchableOpacity
-                        disabled={disabled}
-                        onPress={() => selectedSeason && onPlayEpisode?.(episode, selectedSeason)}
-                        style={styles.iconBtn}
-                      >
-                        <FontAwesome
-                          name="play-circle"
-                          size={28}
-                          color={disabled ? 'rgba(255,255,255,0.4)' : 'white'}
-                        />
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        disabled={disabled || (episodeDownloads?.[String(episode.id)]?.state === 'preparing' || episodeDownloads?.[String(episode.id)]?.state === 'downloading')}
-                        onPress={() => selectedSeason && onDownloadEpisode?.(episode, selectedSeason)}
-                        style={styles.iconBtn}
-                      >
-                        {episodeDownloads?.[String(episode.id)]?.state === 'downloading' || episodeDownloads?.[String(episode.id)]?.state === 'preparing' ? (
-                          <View style={styles.downloadStatusWrap}>
-                            <ActivityIndicator size="small" color="#fff" />
-                            <Text style={styles.downloadProgressText}>
-                              {Math.round((episodeDownloads?.[String(episode.id)]?.progress ?? 0) * 100)}%
-                            </Text>
-                          </View>
-                        ) : (
-                          <MaterialIcons
-                            name="file-download"
-                            size={26}
-                            color={disabled ? 'rgba(255,255,255,0.4)' : 'white'}
-                          />
-                        )}
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                  <Text style={styles.episodeOverview} numberOfLines={2}>
-                    {episode.overview}
-                  </Text>
-                  <Text style={styles.episodeRuntime}>{episode.runtime} min</Text>
-                </View>
-              </View>
-            );
-          })}
+          {selectedSeason.episodes.map((episode, index) => (
+            <Animated.View
+              entering={FadeInUp.delay(index * 40)}
+              exiting={FadeOutDown}
+              key={episode.id}
+              style={styles.episodeCard}
+            >
+              <EpisodeCard
+                episode={episode}
+                season={selectedSeason}
+                disabled={disabled}
+                downloads={episodeDownloads}
+                onPlay={onPlayEpisode}
+                onDownload={onDownloadEpisode}
+              />
+            </Animated.View>
+          ))}
         </View>
       )}
+    </View>
+  );
+};
+
+const EpisodeCard = ({
+  episode,
+  season,
+  disabled,
+  downloads,
+  onPlay,
+  onDownload,
+}: {
+  episode: Episode;
+  season: Season;
+  disabled?: boolean;
+  downloads?: EpisodeListProps['episodeDownloads'];
+  onPlay?: EpisodeListProps['onPlayEpisode'];
+  onDownload?: EpisodeListProps['onDownloadEpisode'];
+}) => {
+  const posterUrl = episode.still_path
+    ? `https://image.tmdb.org/t/p/w500${episode.still_path}`
+    : 'https://image.tmdb.org/t/p/w500_and_h281_bestv2/priQW1UXQwxz6Wn1Ks64h0cR3ej.jpg';
+
+  const downloadState = downloads?.[String(episode.id)];
+  const isDownloading = downloadState?.state === 'downloading' || downloadState?.state === 'preparing';
+  const progress = Math.round((downloadState?.progress ?? 0) * 100);
+
+  const cinematicNumber = useMemo(() => (episode.episode_number < 10 ? `0${episode.episode_number}` : episode.episode_number), [episode.episode_number]);
+
+  return (
+    <View style={styles.cardOuter}>
+      <LinearGradient colors={['#ff512f', '#dd2476']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.cardGlow} />
+      <BlurView intensity={40} tint="dark" style={styles.cardInner}>
+        <View style={styles.posterWrap}>
+          <Image source={{ uri: posterUrl }} style={styles.posterImage} />
+          <LinearGradient
+            colors={['rgba(0,0,0,0)', 'rgba(5,5,18,0.85)']}
+            style={styles.posterOverlay}
+          />
+          <View style={styles.episodeBadge}>
+            <Text style={styles.badgeLabel}>EP</Text>
+            <Text style={styles.badgeNumber}>{cinematicNumber}</Text>
+          </View>
+        </View>
+        <View style={styles.cardContent}>
+          <Text style={styles.cardTitle} numberOfLines={1}>
+            {episode.name}
+          </Text>
+          <Text style={styles.cardOverview} numberOfLines={2}>
+            {episode.overview || 'No synopsis yet—tap play to discover the story.'}
+          </Text>
+          <View style={styles.metadataRow}>
+            <View style={styles.metaChip}>
+              <Text style={styles.metaText}>{episode.runtime || 45} min</Text>
+            </View>
+            {season?.season_number != null && (
+              <View style={styles.metaChipOutline}>
+                <Text style={styles.metaTextSoft}>S{season.season_number}</Text>
+              </View>
+            )}
+            <View style={styles.metaChipOutline}>
+              <Text style={styles.metaTextSoft}>Dolby Vision</Text>
+            </View>
+          </View>
+
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              disabled={disabled}
+              style={[styles.primaryBtn, disabled && styles.disabledBtn]}
+              onPress={() => !disabled && onPlay?.(episode, season)}
+            >
+              <FontAwesome name="play" size={16} color="#05050E" />
+              <Text style={styles.primaryBtnText}>Play</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              disabled={disabled || isDownloading}
+              style={[styles.secondaryBtn, (disabled || isDownloading) && styles.disabledBtn]}
+              onPress={() => !disabled && !isDownloading && onDownload?.(episode, season)}
+            >
+              {isDownloading ? (
+                <>
+                  <ActivityIndicator size="small" color="#fff" />
+                  <Text style={styles.secondaryBtnText}>{progress}%</Text>
+                </>
+              ) : (
+                <>
+                  <MaterialIcons name="file-download" size={18} color="#fff" />
+                  <Text style={styles.secondaryBtnText}>Download</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {isDownloading && (
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${progress}%` }]} />
+            </View>
+          )}
+        </View>
+      </BlurView>
     </View>
   );
 };
@@ -150,79 +227,152 @@ const styles = StyleSheet.create({
   },
   episodeListContainer: {
     marginTop: 10,
+    gap: 16,
   },
   episodeCard: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 12,
-    marginBottom: 12,
+    borderRadius: 24,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.1,
-        shadowRadius: 10,
-      },
-      android: {
-        elevation: 3,
-      },
-    }),
   },
-  episodePoster: {
-    width: 130,
-    height: 75,
-    backgroundColor: '#222',
-    resizeMode: 'cover',
-    borderTopLeftRadius: 12,
-    borderBottomLeftRadius: 12,
+  cardOuter: {
+    borderRadius: 24,
+    padding: 1,
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
-  episodeDetails: {
-    flex: 1,
-    padding: 10,
-    justifyContent: 'space-between',
+  cardGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.25,
+    borderRadius: 24,
   },
-  episodeHeader: {
+  cardInner: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    borderRadius: 24,
+    overflow: 'hidden',
   },
-  headerActionsRow: {
-    flexDirection: 'row',
+  posterWrap: {
+    width: 150,
+    height: 160,
+  },
+  posterImage: {
+    width: '100%',
+    height: '100%',
+  },
+  posterOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  episodeBadge: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     alignItems: 'center',
   },
-  iconBtn: {
-    paddingLeft: 8,
-    paddingRight: 4,
-    paddingVertical: 2,
+  badgeLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 10,
+    letterSpacing: 1,
   },
-  downloadStatusWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  downloadProgressText: {
+  badgeNumber: {
     color: '#fff',
-    fontSize: 12,
-    marginLeft: 6,
+    fontSize: 16,
+    fontWeight: '700',
   },
-  episodeName: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 14,
+  cardContent: {
     flex: 1,
-    marginRight: 10,
+    padding: 16,
+    gap: 10,
   },
-  episodeOverview: {
-    color: '#ccc',
+  cardTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  cardOverview: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 13,
+  },
+  metadataRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  metaChip: {
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  metaChipOutline: {
+    borderColor: 'rgba(255,255,255,0.3)',
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  metaText: {
+    color: '#05050e',
+    fontWeight: '700',
     fontSize: 12,
-    marginVertical: 4,
   },
-  episodeRuntime: {
-    color: '#ccc',
-    fontSize: 11,
-    fontStyle: 'italic',
+  metaTextSoft: {
+    color: 'rgba(255,255,255,0.8)',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  primaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#fff',
+    paddingVertical: 12,
+    borderRadius: 999,
+  },
+  primaryBtnText: {
+    color: '#05050E',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  secondaryBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingVertical: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  secondaryBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  disabledBtn: {
+    opacity: 0.5,
+  },
+  progressTrack: {
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#ff8a00',
   },
 });
 

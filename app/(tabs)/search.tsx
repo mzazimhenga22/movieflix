@@ -1,35 +1,47 @@
 // app/(tabs)/search.tsx  (SearchScreen)
-import React, { useState, useEffect, useRef } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
+  ActivityIndicator,
+  Animated,
+  KeyboardAvoidingView,
+  LayoutAnimation,
+  Platform,
+  StyleSheet,
   Text,
   TextInput,
-  StyleSheet,
-  ActivityIndicator,
   TouchableOpacity,
-  KeyboardAvoidingView,
-  Platform,
-  Animated,
-  LayoutAnimation,
+  View
 } from 'react-native';
-import { useRouter } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
-import ScreenWrapper from '../../components/ScreenWrapper';
 import MovieList from '../../components/MovieList';
-import { API_KEY, API_BASE_URL } from '../../constants/api';
-import { Media } from '../../types';
-import { Ionicons } from '@expo/vector-icons';
+import ScreenWrapper from '../../components/ScreenWrapper';
+import { API_BASE_URL, API_KEY } from '../../constants/api';
+import { firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
+import { Media } from '../../types';
 import { useAccent } from '../components/AccentContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const RED_TEXT = '#e50914';
 
+type SearchTab = 'movies' | 'social' | 'messages';
+
 const SearchScreen = () => {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<Media[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeTab, setActiveTab] = useState<SearchTab>('movies');
+  const [movieResults, setMovieResults] = useState<Media[]>([]);
+  const [tvResults, setTvResults] = useState<Media[]>([]);
+  const [subtitleCheckCache, setSubtitleCheckCache] = useState<Record<string, boolean>>({});
+  const [socialResults, setSocialResults] = useState<any[]>([]);
+  const [messageResults, setMessageResults] = useState<any[]>([]);
+  const [marketplaceResults, setMarketplaceResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const { setAccentColor } = useAccent();
 
@@ -37,45 +49,171 @@ const SearchScreen = () => {
 
   /** SEARCH LOGIC */
   useEffect(() => {
-    if (query.length > 2) {
+    if (searchQuery.length > 2) {
       setLoading(true);
 
-      Promise.all([
-        fetch(
-          `${API_BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodeURIComponent(
-            query
-          )}`
-        ),
-        fetch(
-          `${API_BASE_URL}/search/tv?api_key=${API_KEY}&query=${encodeURIComponent(
-            query
-          )}`
-        ),
-      ])
-        .then(async ([movieRes, tvRes]) => {
-          const movieData = movieRes.ok ? await movieRes.json() : { results: [] };
-          const tvData = tvRes.ok ? await tvRes.json() : { results: [] };
+      const searchMovies = async () => {
+        const [movieRes, tvRes] = await Promise.all([
+          fetch(
+            `${API_BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodeURIComponent(
+              searchQuery
+            )}`
+          ),
+          fetch(
+            `${API_BASE_URL}/search/tv?api_key=${API_KEY}&query=${encodeURIComponent(
+              searchQuery
+            )}`
+          ),
+        ]);
 
-          const movies = (movieData.results || []).map((m: any) => ({
-            ...m,
-            media_type: 'movie',
-            title: m.title ?? m.original_title ?? '',
-            release_date: m.release_date ?? null,
+        const movieData = movieRes.ok ? await movieRes.json() : { results: [] };
+        const tvData = tvRes.ok ? await tvRes.json() : { results: [] };
+
+        const movies = (movieData.results || []).map((m: any) => ({
+          ...m,
+          media_type: 'movie',
+          title: m.title ?? m.original_title ?? '',
+          release_date: m.release_date ?? null,
+        }));
+
+        const tvs = (tvData.results || []).map((t: any) => ({
+          ...t,
+          media_type: 'tv',
+          title: t.name ?? t.original_name ?? '',
+          release_date: t.first_air_date ?? null,
+        }));
+
+        // Add subtitle availability indicator (will be checked when playing)
+        const moviesWithSubs = movies.map((m: any) => ({
+          ...m,
+          hasSubtitles: subtitleCheckCache[m.id] ?? null // null = not checked yet
+        }));
+        const tvsWithSubs = tvs.map((t: any) => ({
+          ...t,
+          hasSubtitles: subtitleCheckCache[t.id] ?? null
+        }));
+
+        setMovieResults(moviesWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)));
+        setTvResults(tvsWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)));
+      };
+
+      const searchSocial = async () => {
+        try {
+          // Search feeds, notifications, streaks, stories
+          const [storiesQuery, notificationsQuery, streaksQuery] = await Promise.all([
+            getDocs(query(collection(firestore, 'stories'), orderBy('createdAt', 'desc'), limit(50))),
+            getDocs(query(collection(firestore, 'notifications'), orderBy('createdAt', 'desc'), limit(50))),
+            getDocs(query(collection(firestore, 'streaks'), orderBy('createdAt', 'desc'), limit(50))),
+          ]);
+
+          const stories = storiesQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'story',
+            ...doc.data(),
+            title: doc.data().caption || 'Story'
           }));
 
-          const tvs = (tvData.results || []).map((t: any) => ({
-            ...t,
-            media_type: 'tv',
-            title: t.name ?? t.original_name ?? '',
-            release_date: t.first_air_date ?? null,
+          const notifications = notificationsQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'notification',
+            ...doc.data(),
+            title: doc.data().message || 'Notification'
           }));
 
-          const combined = [...movies, ...tvs].sort(
-            (a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)
+          const streaks = streaksQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'streak',
+            ...doc.data(),
+            title: `Streak with ${doc.data().partnerName || 'Friend'}`
+          }));
+
+          const socialResults = [...stories, ...notifications, ...streaks].filter((item: any) =>
+            item.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            item.caption?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            item.message?.toLowerCase().includes(searchQuery.toLowerCase())
           );
 
+          setSocialResults(socialResults);
+        } catch (err) {
+          console.warn('Social search error', err);
+          setSocialResults([]);
+        }
+      };
+
+      const searchMessages = async () => {
+        try {
+          // Search messages, users, chats
+          const [messagesQuery, usersQuery] = await Promise.all([
+            getDocs(query(collection(firestore, 'messages'), orderBy('createdAt', 'desc'), limit(100))),
+            getDocs(collection(firestore, 'users')),
+          ]);
+
+          const messages = messagesQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'message',
+            ...doc.data(),
+            title: doc.data().text || 'Message'
+          }));
+
+          const users = usersQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'user',
+            ...doc.data(),
+            title: doc.data().displayName || doc.data().name || 'User',
+            email: doc.data().email || ''
+          }));
+
+          const messageResults = [
+            ...messages.filter((item: any) => item.text?.toLowerCase().includes(searchQuery.toLowerCase())),
+            ...users.filter((item: any) => item.title?.toLowerCase().includes(searchQuery.toLowerCase()) || item.email?.toLowerCase().includes(searchQuery.toLowerCase()))
+          ];
+
+          setMessageResults(messageResults);
+        } catch (err) {
+          console.warn('Messages search error', err);
+          setMessageResults([]);
+        }
+      };
+
+      const searchMarketplace = async () => {
+        try {
+          // Search marketplace items
+          const marketplaceQuery = await getDocs(collection(firestore, 'marketplace'));
+          const marketplaceItems = marketplaceQuery.docs.map((doc: any) => ({
+            id: doc.id,
+            type: 'marketplace',
+            ...doc.data(),
+            title: doc.data().title || doc.data().name || 'Item'
+          }));
+
+          const marketplaceResults = marketplaceItems.filter((item: any) =>
+            item.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            item.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            item.category?.toLowerCase().includes(searchQuery.toLowerCase())
+          );
+
+          setMarketplaceResults(marketplaceResults);
+        } catch (err) {
+          console.warn('Marketplace search error', err);
+          setMarketplaceResults([]);
+        }
+      };
+
+      const searchPromises = [];
+
+      if (activeTab === 'movies') {
+        searchPromises.push(searchMovies());
+      } else if (activeTab === 'social') {
+        searchPromises.push(searchSocial());
+      } else if (activeTab === 'messages') {
+        searchPromises.push(searchMessages());
+      } else if (activeTab === 'marketplace') {
+        searchPromises.push(searchMarketplace());
+      }
+
+      Promise.all(searchPromises)
+        .then(() => {
           LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-          setResults(combined);
           setLoading(false);
         })
         .catch((err) => {
@@ -84,33 +222,32 @@ const SearchScreen = () => {
         });
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setResults([]);
+      setMovieResults([]);
+      setTvResults([]);
+      setSocialResults([]);
+      setMessageResults([]);
+      setMarketplaceResults([]);
     }
-  }, [query]);
+  }, [searchQuery, activeTab]);
 
   /** ACCENT UPDATE */
   const accentColor =
-    getAccentFromPosterPath(results[0]?.poster_path) ?? '#e50914';
+    getAccentFromPosterPath(movieResults[0]?.poster_path || tvResults[0]?.poster_path) ?? '#e50914';
 
   useEffect(() => {
     setAccentColor(accentColor);
   }, [accentColor, setAccentColor]);
 
-  const clear = () => setQuery('');
+  const clear = () => setSearchQuery('');
 
-  // Title to satisfy MovieListProps
-  const listTitle =
-    results.length > 0
-      ? query.length > 2
-        ? `Results for “${query}”`
-        : 'Results'
-      : '';
+  // Combined results for checking if we have any results
+  const hasResults = movieResults.length > 0 || tvResults.length > 0;
 
   return (
-    <ScreenWrapper>
+    <ScreenWrapper disableTopInset>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.flex}
+        style={[styles.flex, { paddingTop: insets.top + 12 }]}
       >
         {/* BACKGROUND */}
         <LinearGradient
@@ -155,15 +292,23 @@ const SearchScreen = () => {
               />
 
               <TextInput
-                placeholder="Search movies, TV shows, actors..."
+                placeholder={
+                  activeTab === 'movies'
+                    ? 'Search movies, TV shows, actors...'
+                    : activeTab === 'social'
+                    ? 'Search feeds, notifications, streaks...'
+                    : activeTab === 'messages'
+                    ? 'Search messages, users, chats...'
+                    : 'Search marketplace items...'
+                }
                 placeholderTextColor="rgba(255,255,255,0.55)"
                 style={styles.input}
-                value={query}
-                onChangeText={setQuery}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
                 returnKeyType="search"
               />
 
-              {query.length > 0 && (
+              {searchQuery.length > 0 && (
                 <TouchableOpacity onPress={clear} style={styles.clearBtn}>
                   <Ionicons name="close" size={18} color="#fff" />
                 </TouchableOpacity>
@@ -172,34 +317,144 @@ const SearchScreen = () => {
           </BlurView>
         </View>
 
+        {/* SEARCH TABS */}
+        <View style={styles.tabsContainer}>
+          {(['movies', 'social', 'messages'] as const).map((tab) => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.tab, activeTab === tab && styles.tabActive]}
+              onPress={() => setActiveTab(tab)}
+            >
+              <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
         {/* CONTENT */}
         <View style={styles.body}>
           {loading ? (
             <View style={styles.loadingWrap}>
               <ActivityIndicator size="large" color={RED_TEXT} />
             </View>
-          ) : results.length > 0 ? (
-            <MovieList movies={results} title={listTitle} />
-          ) : query.length > 2 ? (
-            <View style={styles.empty}>
-              <Ionicons
-                name="film-outline"
-                size={42}
-                color={RED_TEXT + 'CC'}
-              />
-              <Text style={styles.emptyTitle}>No results</Text>
-              <Text style={styles.emptySubtitle}>
-                Try a different title or spelling.
-              </Text>
-            </View>
-          ) : (
-            <View style={styles.centerHint}>
-              <Text style={styles.hintBig}>Start typing to search…</Text>
-              <Text style={styles.hintSmall}>
-                Movies, series, actors, genres and more.
-              </Text>
-            </View>
-          )}
+          ) : activeTab === 'movies' ? (
+            hasResults ? (
+              <View style={styles.resultsContainer}>
+                {movieResults.length > 0 && (
+                  <MovieList
+                    movies={movieResults}
+                    title={`Movies for "${searchQuery}"`}
+                  />
+                )}
+                {tvResults.length > 0 && (
+                  <MovieList
+                    movies={tvResults}
+                    title={`TV Shows for "${searchQuery}"`}
+                  />
+                )}
+              </View>
+            ) : searchQuery.length > 2 ? (
+              <View style={styles.empty}>
+                <Ionicons
+                  name="film-outline"
+                  size={42}
+                  color={RED_TEXT + 'CC'}
+                />
+                <Text style={styles.emptyTitle}>No results</Text>
+                <Text style={styles.emptySubtitle}>
+                  Try a different title or spelling.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.centerHint}>
+                <Text style={styles.hintBig}>Start typing to search…</Text>
+                <Text style={styles.hintSmall}>
+                  Movies, series, actors, genres and more.
+                </Text>
+              </View>
+            )
+          ) : activeTab === 'social' ? (
+            socialResults.length > 0 ? (
+              <View style={styles.resultsList}>
+                {socialResults.map((item) => (
+                  <TouchableOpacity key={item.id} style={styles.resultItem}>
+                    <Ionicons
+                      name={
+                        item.type === 'story' ? 'images' :
+                        item.type === 'notification' ? 'notifications' :
+                        'trophy'
+                      }
+                      size={24}
+                      color="#fff"
+                      style={styles.resultIcon}
+                    />
+                    <View style={styles.resultContent}>
+                      <Text style={styles.resultTitle}>{item.title}</Text>
+                      <Text style={styles.resultType}>{item.type}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : searchQuery.length > 2 ? (
+              <View style={styles.empty}>
+                <Ionicons
+                  name="people-outline"
+                  size={42}
+                  color={RED_TEXT + 'CC'}
+                />
+                <Text style={styles.emptyTitle}>No social results</Text>
+                <Text style={styles.emptySubtitle}>
+                  Try searching for stories, notifications, or streaks.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.centerHint}>
+                <Text style={styles.hintBig}>Search social content</Text>
+                <Text style={styles.hintSmall}>
+                  Stories, notifications, streaks and feeds.
+                </Text>
+              </View>
+            )
+          ) : activeTab === 'messages' ? (
+            messageResults.length > 0 ? (
+              <View style={styles.resultsList}>
+                {messageResults.map((item) => (
+                  <TouchableOpacity key={item.id} style={styles.resultItem}>
+                    <Ionicons
+                      name={item.type === 'user' ? 'person' : 'chatbubble'}
+                      size={24}
+                      color="#fff"
+                      style={styles.resultIcon}
+                    />
+                    <View style={styles.resultContent}>
+                      <Text style={styles.resultTitle}>{item.title}</Text>
+                      <Text style={styles.resultType}>{item.type}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : searchQuery.length > 2 ? (
+              <View style={styles.empty}>
+                <Ionicons
+                  name="chatbubble-outline"
+                  size={42}
+                  color={RED_TEXT + 'CC'}
+                />
+                <Text style={styles.emptyTitle}>No message results</Text>
+                <Text style={styles.emptySubtitle}>
+                  Try searching for users, messages, or chats.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.centerHint}>
+                <Text style={styles.hintBig}>Search messages</Text>
+                <Text style={styles.hintSmall}>
+                  Users, messages, chats and conversations.
+                </Text>
+              </View>
+            )
+          ) : null}
         </View>
       </KeyboardAvoidingView>
     </ScreenWrapper>
@@ -270,11 +525,41 @@ const styles = StyleSheet.create({
     padding: 6,
   },
 
+  /** TABS */
+  tabsContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+  },
+  tabActive: {
+    backgroundColor: '#e50914',
+  },
+  tabText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#fff',
+  },
+
   /** CONTENT */
   body: {
     flex: 1,
     marginTop: 12,
     paddingHorizontal: 16,
+  },
+  resultsContainer: {
+    flex: 1,
   },
   loadingWrap: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   empty: { marginTop: 40, alignItems: 'center' },
@@ -287,6 +572,37 @@ const styles = StyleSheet.create({
   centerHint: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   hintBig: { color: '#ffffffcc', fontSize: 18, marginBottom: 6 },
   hintSmall: { color: '#ffffff88', fontSize: 13 },
+
+  /** RESULTS */
+  resultsList: {
+    flex: 1,
+  },
+  resultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    marginBottom: 8,
+  },
+  resultIcon: {
+    marginRight: 12,
+  },
+  resultContent: {
+    flex: 1,
+  },
+  resultTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  resultType: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    marginTop: 2,
+    textTransform: 'capitalize',
+  },
 });
 
 export default SearchScreen;

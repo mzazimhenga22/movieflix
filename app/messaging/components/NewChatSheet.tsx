@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Modal,
   View,
@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Profile } from '../controller';
 import { Ionicons } from '@expo/vector-icons';
+import { useAccent } from '../../components/AccentContext';
 
 interface NewChatSheetProps {
   isVisible: boolean;
@@ -24,6 +25,15 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
   const [isGroupMode, setIsGroupMode] = useState(false);
   const [groupName, setGroupName] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const { accentColor } = useAccent();
+
+  useEffect(() => {
+    if (!isVisible) {
+      setIsGroupMode(false);
+      setGroupName('');
+      setSelectedIds(new Set());
+    }
+  }, [isVisible]);
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -47,6 +57,20 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
     setIsGroupMode(false);
     onClose();
   };
+
+  const renderInitials = useMemo(
+    () =>
+      (name: string) =>
+        name
+          .split(' ')
+          .filter(Boolean)
+          .map((p) => p[0])
+          .join('')
+          .slice(0, 2)
+          .toUpperCase(),
+    [],
+  );
+
   return (
     <Modal
       animationType="slide"
@@ -55,7 +79,7 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
       onRequestClose={onClose}
     >
       <View style={styles.modalOverlay}>
-        <View style={styles.sheetContainer}>
+        <View style={[styles.sheetContainer, { borderColor: accentColor || '#e50914' }]}> 
           <View style={styles.header}>
             <Text style={styles.title}>{isGroupMode ? 'New Group' : 'New Message'}</Text>
             <View style={styles.headerActions}>
@@ -64,8 +88,8 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
                   <Ionicons name="people-outline" size={22} color="#fff" />
                 </TouchableOpacity>
               )}
-              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-                <Ionicons name="close-circle" size={28} color="#444" />
+            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+              <Ionicons name="close-circle" size={28} color={accentColor || '#e50914'} />
               </TouchableOpacity>
             </View>
           </View>
@@ -83,7 +107,11 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
                 />
               </View>
               <TouchableOpacity
-                style={[styles.createGroupBtn, selectedIds.size === 0 && styles.createGroupBtnDisabled]}
+                style={[
+                  styles.createGroupBtn,
+                  selectedIds.size === 0 && styles.createGroupBtnDisabled,
+                  selectedIds.size > 0 && { backgroundColor: accentColor || '#4D8DFF' }
+                ]}
                 onPress={handleCreateGroup}
                 disabled={selectedIds.size === 0}
               >
@@ -100,26 +128,39 @@ const NewChatSheet = ({ isVisible, onClose, following, onStartChat, onCreateGrou
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => {
               const selected = selectedIds.has(item.id);
+              const initials = renderInitials(item.displayName || 'U');
               return (
                 <TouchableOpacity
-                  style={[styles.userItem, selected && styles.userItemSelected]}
+                  style={[
+                    styles.userItem,
+                    selected && [
+                      styles.userItemSelected,
+                      { backgroundColor: accentColor ? `${accentColor}33` : 'rgba(77,141,255,0.18)' }
+                    ]
+                  ]}
                   onPress={() =>
                     isGroupMode
                       ? toggleSelect(item.id)
                       : onStartChat(item)
                   }
                 >
-                  <Image source={{ uri: item.photoURL }} style={styles.avatar} />
-                  <Text style={styles.userName}>{item.displayName}</Text>
+                  {item.photoURL ? (
+                    <Image source={{ uri: item.photoURL }} style={styles.avatar} />
+                  ) : (
+                    <View style={[styles.avatar, styles.avatarFallback]}>
+                      <Text style={styles.avatarFallbackText}>{initials}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.userName} numberOfLines={1} ellipsizeMode="tail">{item.displayName}</Text>
                   {isGroupMode && selected && (
-                    <Ionicons name="checkmark-circle" size={20} color="#4CD964" />
+                    <Ionicons name="checkmark-circle" size={20} color={accentColor || '#4CD964'} />
                   )}
                 </TouchableOpacity>
               );
             }}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>You aren't following anyone yet.</Text>
+                <Text style={styles.emptyText}>{`You aren't following anyone yet.`}</Text>
               </View>
             }
           />
@@ -225,9 +266,24 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     marginRight: 12,
   },
+  avatarFallback: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarFallbackText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
+    letterSpacing: 0.4,
+  },
   userName: {
     fontSize: 16,
     color: '#fff',
+    flex: 1,
+    minWidth: 0,
   },
   emptyContainer: {
       flex: 1,

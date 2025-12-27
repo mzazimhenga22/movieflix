@@ -51,42 +51,96 @@ async function getStreamUrl(ctx: MovieScrapeContext | ShowScrapeContext, embedUr
 }
 
 function validateStream(url: string): boolean {
-  return (
-    url.startsWith('https://') && (url.includes('streamwish') || url.includes('filemoon') || url.includes('vidhide'))
-  );
+  return url.startsWith('http://') || url.startsWith('https://');
 }
 
-async function extractVideos(ctx: MovieScrapeContext | ShowScrapeContext, videos: VideosByLanguage) {
-  const videoList: { embedId: string; url: string }[] = [];
+function detectEmbedIdFromUrl(url: string, lang: string): string | null {
+  const lowerLang = (lang || '').toLowerCase();
+  const normalizedLang =
+    lowerLang === 'english' ? 'english' : lowerLang === 'latino' ? 'latino' : lowerLang === 'spanish' ? 'spanish' : 'latino';
 
-  for (const [lang, videoArray] of Object.entries(videos)) {
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    host = url.toLowerCase();
+  }
+
+  const isStreamwish =
+    host.includes('streamwish') ||
+    host.includes('swiftplayers') ||
+    host.includes('hgplaycdn') ||
+    host.includes('habetar') ||
+    host.includes('yuguaab') ||
+    host.includes('guxhag') ||
+    host.includes('auvexiug') ||
+    host.includes('xenolyzb');
+
+  if (host.includes('filemoon')) return 'filemoon';
+  if (isStreamwish) {
+    if (normalizedLang === 'english') return 'streamwish-english';
+    if (normalizedLang === 'spanish') return 'streamwish-spanish';
+    return 'streamwish-latino';
+  }
+  if (host.includes('vidhide')) {
+    if (normalizedLang === 'english') return 'vidhide-english';
+    if (normalizedLang === 'spanish') return 'vidhide-spanish';
+    return 'vidhide-latino';
+  }
+  if (host.includes('supervideo')) return 'supervideo';
+  if (host.includes('dropload')) return 'dropload';
+  if (host.includes('voe')) return 'voe';
+  if (host.includes('streamtape')) return 'streamtape';
+  if (host.includes('mixdrop')) return 'mixdrop';
+  if (host.includes('dood')) return 'dood';
+  return null;
+}
+
+function isDirectStreamUrl(url: string): { type: 'hls' | 'file'; url: string } | null {
+  const lower = url.toLowerCase();
+  if (lower.includes('.m3u8')) return { type: 'hls', url };
+  if (lower.includes('.mp4')) return { type: 'file', url };
+  return null;
+}
+
+type ExtractResult = {
+  embeds: { embedId: string; url: string }[];
+  directStream?: { type: 'hls' | 'file'; url: string };
+};
+
+async function extractVideos(ctx: MovieScrapeContext | ShowScrapeContext, videos: VideosByLanguage): Promise<ExtractResult> {
+  const embeds: { embedId: string; url: string }[] = [];
+  let bestDirect: { type: 'hls' | 'file'; url: string } | null = null;
+  let fallbackDirect: { type: 'hls' | 'file'; url: string } | null = null;
+
+  // Prioritize English videos first
+  const orderedLangs = ['english', 'latino', 'spanish'];
+  for (const lang of orderedLangs) {
+    const videoArray = videos[lang];
     if (!videoArray) continue;
 
     for (const video of videoArray) {
       if (!video.result) continue;
 
-      const realUrl = await getStreamUrl(ctx, video.result);
-      if (!realUrl || !validateStream(realUrl)) continue;
+      const resolvedUrl = (await getStreamUrl(ctx, video.result)) || video.result;
+      if (!resolvedUrl || !validateStream(resolvedUrl)) continue;
 
-      let embedId = '';
-      if (realUrl.includes('filemoon')) embedId = 'filemoon';
-      else if (realUrl.includes('streamwish')) {
-        if (lang === 'latino') embedId = 'streamwish-latino';
-        else if (lang === 'spanish') embedId = 'streamwish-spanish';
-        else if (lang === 'english') embedId = 'streamwish-english';
-        else embedId = 'streamwish-latino';
-      } else if (realUrl.includes('vidhide')) embedId = 'vidhide';
-      else if (realUrl.includes('voe')) embedId = 'voe';
-      else continue;
+      const direct = isDirectStreamUrl(resolvedUrl);
+      if (direct) {
+        if (lang === 'english' && !bestDirect) bestDirect = direct;
+        else if (!fallbackDirect) fallbackDirect = direct;
+        continue;
+      }
 
-      videoList.push({
-        embedId,
-        url: realUrl,
-      });
+      const embedId = detectEmbedIdFromUrl(resolvedUrl, lang);
+      if (!embedId) continue;
+
+      embeds.push({ embedId, url: resolvedUrl });
     }
   }
 
-  return videoList;
+  const directStream = bestDirect ?? fallbackDirect ?? undefined;
+  return { embeds, ...(directStream ? { directStream } : {}) };
 }
 
 async function fetchTitleSubstitutes(): Promise<Record<string, string>> {
@@ -128,6 +182,7 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
     });
 
   let embeds: { embedId: string; url: string }[] = [];
+  let directStream: { type: 'hls' | 'file'; url: string } | undefined;
 
   if (script) {
     let jsonData: any;
@@ -144,14 +199,41 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
     if (mediaType === 'movie') {
       const movieData = jsonData.props.pageProps.thisMovie as MovieData;
       if (movieData?.videos) {
-        embeds = (await extractVideos(ctx, movieData.videos)) ?? [];
+        const extracted = await extractVideos(ctx, movieData.videos);
+        embeds = extracted.embeds ?? [];
+        directStream = extracted.directStream;
       }
     } else {
       const episodeData = jsonData.props.pageProps.episode as EpisodeData;
       if (episodeData?.videos) {
-        embeds = (await extractVideos(ctx, episodeData.videos)) ?? [];
+        const extracted = await extractVideos(ctx, episodeData.videos);
+        embeds = extracted.embeds ?? [];
+        directStream = extracted.directStream;
       }
     }
+  }
+
+  if (embeds.length === 0 && directStream) {
+    return {
+      embeds: [],
+      stream: [
+        directStream.type === 'hls'
+          ? {
+              id: 'primary',
+              type: 'hls',
+              flags: [],
+              playlist: directStream.url,
+              captions: [],
+            }
+          : {
+              id: 'primary',
+              type: 'file',
+              flags: [],
+              qualities: { unknown: { type: 'mp4', url: directStream.url } },
+              captions: [],
+            },
+      ],
+    };
   }
 
   if (embeds.length === 0) {
@@ -192,15 +274,42 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
       if (mediaType === 'movie') {
         const movieData = jsonData.props.pageProps.thisMovie as MovieData;
         if (movieData?.videos) {
-          embeds = (await extractVideos(ctx, movieData.videos)) ?? [];
+        const extracted = await extractVideos(ctx, movieData.videos);
+        embeds = extracted.embeds ?? [];
+        directStream = extracted.directStream;
         }
       } else {
         const episodeData = jsonData.props.pageProps.episode as EpisodeData;
         if (episodeData?.videos) {
-          embeds = (await extractVideos(ctx, episodeData.videos)) ?? [];
+        const extracted = await extractVideos(ctx, episodeData.videos);
+        embeds = extracted.embeds ?? [];
+        directStream = extracted.directStream;
         }
       }
     }
+
+  if (embeds.length === 0 && directStream) {
+    return {
+      embeds: [],
+      stream: [
+        directStream.type === 'hls'
+          ? {
+              id: 'primary',
+              type: 'hls',
+              flags: [],
+              playlist: directStream.url,
+              captions: [],
+            }
+          : {
+              id: 'primary',
+              type: 'file',
+              flags: [],
+              qualities: { unknown: { type: 'mp4', url: directStream.url } },
+              captions: [],
+            },
+      ],
+    };
+  }
   }
 
   if (embeds.length === 0) {

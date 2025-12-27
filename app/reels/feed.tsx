@@ -2,12 +2,16 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Dimensions,
+  Easing,
   FlatList,
+  GestureResponderEvent,
   Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
+  Pressable,
   StatusBar,
   StyleSheet,
   Text,
@@ -15,29 +19,36 @@ import {
   TouchableOpacity,
   View,
   ViewToken,
-  Animated,
-  Easing,
-  Pressable,
-  GestureResponderEvent,
 } from 'react-native'
 
 import { Feather, Ionicons } from '@expo/vector-icons'
-import { Video, ResizeMode } from 'expo-av'
+import { Video } from 'expo-av'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 
 import {
   addDoc,
   collection,
+  deleteField,
   doc,
+  limit,
   increment,
+  onSnapshot,
+  orderBy,
+  query,
   serverTimestamp,
   updateDoc,
 } from 'firebase/firestore'
 import { firestore } from '../../constants/firebase'
-import { logInteraction } from '../../lib/algo'
-import { useUser } from '../../hooks/use-user'
 import { useActiveProfilePhoto } from '../../hooks/use-active-profile-photo'
+import { useUser } from '../../hooks/use-user'
+import { logInteraction } from '../../lib/algo'
+import { getProfileScopedKey } from '../../lib/profileStorage'
+import { useSubscription } from '../../providers/SubscriptionProvider'
+import { injectAdsWithPattern } from '../../lib/ads/sequence'
+import ReelAdSlide from '../../components/ads/ReelAdSlide'
+import { usePromotedProducts } from '../../hooks/use-promoted-products'
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window')
 
@@ -56,9 +67,38 @@ type FeedReelItem = {
   music?: string | null
 }
 
+type ReelItem = FeedReelItem | { type: 'ad'; id: string; productId: string }
+
 export default function FeedReelsScreen() {
   const params = useLocalSearchParams()
+
+  const [autoPlayReels, setAutoPlayReels] = useState(true)
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      try {
+        const key = await getProfileScopedKey('socialSettings:autoPlayReels')
+        const raw = await AsyncStorage.getItem(key)
+        if (!mounted) return
+        if (raw == null) return
+        try {
+          const parsed = JSON.parse(raw)
+          if (typeof parsed === 'boolean') setAutoPlayReels(parsed)
+        } catch {
+          if (raw === 'true') setAutoPlayReels(true)
+          if (raw === 'false') setAutoPlayReels(false)
+        }
+      } catch {
+        // ignore
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
   const router = useRouter()
+  const { currentPlan } = useSubscription()
+  const { products: promoted } = usePromotedProducts({ placement: 'feed', limit: 30 })
 
   // ✅ extract ONLY primitives so memo deps are stable (fixes max update depth)
   const id = typeof params.id === 'string' ? params.id : undefined
@@ -116,32 +156,104 @@ export default function FeedReelsScreen() {
     return []
   }, [list, id, titleParam, musicParam])
 
+  const adPatternStartRef = useRef(Math.floor(Math.random() * 3))
+
+  const queueWithAds: ReelItem[] = useMemo(() => {
+    if (currentPlan !== 'free') return queue
+    if (!promoted.length) return queue
+    return injectAdsWithPattern(queue, {
+      pattern: [3, 2, 4],
+      startPatternIndex: adPatternStartRef.current,
+      isCountedItem: () => true,
+      createAdItem: (seq) => ({ type: 'ad', id: `ad-${seq}`, productId: String(promoted[seq % promoted.length].id || '') }),
+    })
+  }, [queue, currentPlan, promoted])
+
   const initialIndex = useMemo(() => {
-    const idx = queue.findIndex((q) => String(q.id) === String(id))
+    const idx = queueWithAds.findIndex((q: any) => String(q.id) === String(id))
     return idx >= 0 ? idx : 0
-  }, [queue, id])
+  }, [queueWithAds, id])
 
   const [currentIndex, setCurrentIndex] = useState(initialIndex)
-  const [items, setItems] = useState<FeedReelItem[]>(queue)
+  const currentIndexRef = useRef(initialIndex)
+  useEffect(() => {
+    currentIndexRef.current = currentIndex
+  }, [currentIndex])
+  const [items, setItems] = useState<ReelItem[]>(queueWithAds)
 
   // ✅ only update state when queue actually changes (prevents render loops)
   useEffect(() => {
-    setItems(queue)
-  }, [queue])
+    setItems(queueWithAds)
+  }, [queueWithAds])
 
   useEffect(() => {
     setCurrentIndex(initialIndex)
   }, [initialIndex])
 
-  const listRef = useRef<FlatList<FeedReelItem>>(null)
+  const listRef = useRef<FlatList<ReelItem>>(null)
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 80 }).current
 
+  const rafRef = useRef<ReturnType<typeof requestAnimationFrame> | null>(null)
   const onViewableItemsChanged = useRef(
     ({ viewableItems }: { viewableItems: Array<ViewToken> }) => {
       const first = viewableItems?.[0]?.index
-      if (typeof first === 'number') setCurrentIndex(first)
-    }
+      if (typeof first !== 'number') return
+      if (first === currentIndexRef.current) return
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        currentIndexRef.current = first
+        setCurrentIndex(first)
+      })
+    },
   ).current
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [])
+
+  const renderItem = useCallback(
+    ({ item, index }: { item: ReelItem; index: number }) => {
+      if ((item as any)?.type === 'ad') {
+        const ad = item as any
+        const product = promoted.find((p) => String(p.id) === String(ad.productId))
+        if (!product) return null
+        return (
+          <ReelAdSlide
+            product={product as any}
+            onPress={() => router.push((`/marketplace/${product.id}`) as any)}
+          />
+        )
+      }
+
+      const distance = Math.abs(index - currentIndex)
+      const mounted = distance <= 1
+      return (
+        <FeedSlide
+          item={item as FeedReelItem}
+          active={index === currentIndex}
+          mounted={mounted}
+          autoPlayReels={autoPlayReels}
+          onAutoPlayNext={() => {
+            const next = index + 1
+            if (index === currentIndex && next < items.length) {
+              setCurrentIndex(next)
+              listRef.current?.scrollToIndex({ index: next, animated: true })
+            }
+          }}
+        />
+      )
+    },
+    [autoPlayReels, currentIndex, items.length, promoted, router],
+  )
 
   return (
     <View style={styles.wrapper}>
@@ -149,23 +261,18 @@ export default function FeedReelsScreen() {
         ref={listRef}
         data={items}
         keyExtractor={(it) => String(it.id)}
-        renderItem={({ item, index }) => (
-          <FeedSlide
-            item={item}
-            active={index === currentIndex}
-            onAutoPlayNext={() => {
-              const next = index + 1
-              if (index === currentIndex && next < items.length) {
-                setCurrentIndex(next)
-                listRef.current?.scrollToIndex({ index: next, animated: true })
-              }
-            }}
-          />
-        )}
+        renderItem={renderItem}
         pagingEnabled
+        snapToInterval={SCREEN_HEIGHT}
         showsVerticalScrollIndicator={false}
         snapToAlignment="start"
         decelerationRate="fast"
+        overScrollMode={Platform.OS === 'android' ? 'never' : undefined}
+        removeClippedSubviews
+        windowSize={3}
+        initialNumToRender={2}
+        maxToRenderPerBatch={2}
+        updateCellsBatchingPeriod={50}
         viewabilityConfig={viewabilityConfig}
         onViewableItemsChanged={onViewableItemsChanged}
         getItemLayout={(_, idx) => ({
@@ -183,18 +290,23 @@ export default function FeedReelsScreen() {
   )
 }
 
-function FeedSlide({
+const FeedSlide = React.memo(function FeedSlide({
   item,
   active,
+  mounted,
+  autoPlayReels,
   onAutoPlayNext,
 }: {
   item: FeedReelItem
   active: boolean
+  mounted: boolean
+  autoPlayReels: boolean
   onAutoPlayNext: () => void
 }) {
   const router = useRouter()
   const [loading, setLoading] = useState(true)
   const [muted, setMuted] = useState(true)
+  const mutedKeyRef = useRef<string | null>(null)
 
   const [liked, setLiked] = useState(false)
   const [likesCount, setLikesCount] = useState<number>(item.likes ?? 0)
@@ -209,6 +321,9 @@ function FeedSlide({
 
   const [commentsVisible, setCommentsVisible] = useState(false)
   const [commentText, setCommentText] = useState('')
+  const [commentsLoading, setCommentsLoading] = useState(false)
+  const [comments, setComments] = useState<any[]>([])
+  const [replyTo, setReplyTo] = useState<{ id: string; userDisplayName?: string } | null>(null)
 
   // ✅ spinning disc
   const spinningAnim = useRef(new Animated.Value(0)).current
@@ -239,6 +354,45 @@ function FeedSlide({
   })
 
   useEffect(() => setLikesCount(item.likes ?? 0), [item.likes])
+
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      try {
+        const key = await getProfileScopedKey('socialSettings:reelsMuted')
+        if (!alive) return
+        mutedKeyRef.current = key
+        const raw = await AsyncStorage.getItem(key)
+        if (!alive) return
+        if (raw == null) return
+        if (raw === 'true') setMuted(true)
+        else if (raw === 'false') setMuted(false)
+        else {
+          try {
+            const parsed = JSON.parse(raw)
+            if (typeof parsed === 'boolean') setMuted(parsed)
+          } catch {
+            // ignore
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const key = mutedKeyRef.current
+    if (!key) return
+    try {
+      void AsyncStorage.setItem(key, JSON.stringify(muted))
+    } catch {
+      // ignore
+    }
+  }, [muted])
 
   const handleLike = useCallback(async () => {
     const next = !liked
@@ -280,14 +434,19 @@ function FeedSlide({
         const commentsRef = collection(reviewRef, 'comments')
         await addDoc(commentsRef, {
           userDisplayName: (user as any)?.displayName || 'You',
+          avatar: (user as any)?.photoURL ?? activeProfilePhoto ?? null,
           text: trimmed,
           spoiler: false,
+          parentId: replyTo?.id ?? null,
+          likesCount: 0,
+          likedBy: {},
           createdAt: serverTimestamp(),
         })
         await updateDoc(reviewRef, {
           commentsCount: increment(1),
           updatedAt: serverTimestamp(),
         })
+        setReplyTo(null)
       } catch (err) {
         console.warn('Failed to persist comment', err)
       }
@@ -302,6 +461,86 @@ function FeedSlide({
       })
     } catch {}
   }
+
+  useEffect(() => {
+    if (!commentsVisible) return
+    if (!item.docId) return
+
+    setCommentsLoading(true)
+    const reviewRef = doc(firestore, 'reviews', String(item.docId))
+    const commentsRef = collection(reviewRef, 'comments')
+    const q = query(commentsRef, orderBy('createdAt', 'asc'), limit(250))
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const uid = (user as any)?.uid ? String((user as any).uid) : null
+        const next = snap.docs.map((d) => {
+          const data = d.data() as any
+          const likedBy = data?.likedBy && typeof data.likedBy === 'object' ? data.likedBy : {}
+          return {
+            id: d.id,
+            ...data,
+            liked: uid ? !!likedBy?.[uid] : false,
+            likesCount: typeof data?.likesCount === 'number' ? data.likesCount : 0,
+            parentId: data?.parentId ?? null,
+          }
+        })
+        setComments(next)
+        setCommentsLoading(false)
+      },
+      () => {
+        setComments([])
+        setCommentsLoading(false)
+      },
+    )
+
+    return () => {
+      unsub()
+    }
+  }, [commentsVisible, item.docId, user])
+
+  const threadedComments = useMemo(() => {
+    const byParent = new Map<string, any[]>()
+    const roots: any[] = []
+    comments.forEach((c) => {
+      const parent = c?.parentId ? String(c.parentId) : null
+      if (!parent) roots.push(c)
+      else {
+        const list = byParent.get(parent) ?? []
+        list.push(c)
+        byParent.set(parent, list)
+      }
+    })
+    const flattened: any[] = []
+    roots.forEach((root) => {
+      flattened.push({ ...root, __depth: 0 })
+      const replies = byParent.get(String(root.id)) ?? []
+      replies.forEach((r) => flattened.push({ ...r, __depth: 1, __parent: root.id }))
+    })
+    return flattened
+  }, [comments])
+
+  const toggleCommentLike = useCallback(
+    async (comment: any) => {
+      if (!item.docId) return
+      const uid = (user as any)?.uid ? String((user as any).uid) : null
+      if (!uid) return
+
+      const nextLiked = !comment?.liked
+      try {
+        const reviewRef = doc(firestore, 'reviews', String(item.docId))
+        const commentRef = doc(collection(reviewRef, 'comments'), String(comment.id))
+        await updateDoc(commentRef, {
+          likesCount: increment(nextLiked ? 1 : -1),
+          [`likedBy.${uid}`]: nextLiked ? true : deleteField(),
+        } as any)
+      } catch (err) {
+        console.warn('Failed to like comment', err)
+      }
+    },
+    [item.docId, user],
+  )
 
   useEffect(() => {
     if (!active) return
@@ -328,7 +567,7 @@ function FeedSlide({
     )
   }
 
-  // ✅ TikTok double-tap like + heart burst
+  // ✅ Double-tap like + heart burst
   const lastTapRef = useRef(0)
   const tapTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const heartAnim = useRef(new Animated.Value(0)).current
@@ -385,6 +624,8 @@ function FeedSlide({
     router.push(`/profile?from=social-feed&userId=${encodeURIComponent(String(item.user))}`)
   }
 
+  const canRenderVideo = mounted && !!item.videoUrl
+
   if (!item.videoUrl) {
     return (
       <View style={styles.slide}>
@@ -395,23 +636,45 @@ function FeedSlide({
     )
   }
 
+  useEffect(() => {
+    // Reset loading state when we unmount the heavy video surface
+    if (!canRenderVideo) {
+      setLoading(true)
+    }
+  }, [canRenderVideo])
+
+  const handleStatusUpdate = useCallback(
+    (status: any) => {
+      if (!active) return
+      if (status?.didJustFinish) onAutoPlayNext()
+    },
+    [active, onAutoPlayNext],
+  )
+
+  const handleLoadStart = useCallback(() => setLoading(true), [])
+  const handleLoad = useCallback(() => setLoading(false), [])
+
   return (
     <View style={styles.slide}>
       <Pressable style={StyleSheet.absoluteFill} onPress={handleTap} />
 
-      <Video
-        source={{ uri: item.videoUrl }}
-        style={styles.video}
-        resizeMode={ResizeMode.COVER}
-        shouldPlay={active}
-        isLooping
-        isMuted={muted}
-        onLoadStart={() => setLoading(true)}
-        onLoad={() => setLoading(false)}
-        onPlaybackStatusUpdate={(status: any) => {
-          if (status?.didJustFinish) onAutoPlayNext()
-        }}
-      />
+      {canRenderVideo ? (
+        <Video
+          source={{ uri: item.videoUrl }}
+          style={styles.video}
+          resizeMode="cover"
+          shouldPlay={active && autoPlayReels}
+          isLooping
+          isMuted={muted}
+          volume={muted ? 0 : 1}
+          progressUpdateIntervalMillis={active ? 250 : 1000}
+          onLoadStart={handleLoadStart}
+          onLoad={handleLoad}
+          onPlaybackStatusUpdate={handleStatusUpdate}
+        />
+      ) : (
+        <View style={styles.videoPlaceholder} />
+      )}
 
       {/* ❤️ heart burst */}
       <Animated.View
@@ -502,13 +765,22 @@ function FeedSlide({
         visible={commentsVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setCommentsVisible(false)}
+        onRequestClose={() => {
+          setCommentsVisible(false)
+          setReplyTo(null)
+        }}
       >
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
         >
-          <TouchableOpacity style={styles.modalBackdrop} onPress={() => setCommentsVisible(false)} />
+          <TouchableOpacity
+            style={styles.modalBackdrop}
+            onPress={() => {
+              setCommentsVisible(false)
+              setReplyTo(null)
+            }}
+          />
           <View style={styles.commentSheet}>
             <View style={styles.sheetHeader}>
               <Text style={styles.sheetTitle}>{item.commentsCount} Comments</Text>
@@ -518,21 +790,54 @@ function FeedSlide({
             </View>
 
             <FlatList
-              data={item.comments}
-              keyExtractor={(_, i) => i.toString()}
+              data={threadedComments}
+              keyExtractor={(c) => String(c.id)}
               renderItem={({ item: comment }) => (
-                <View style={styles.commentRow}>
-                  <Image
-                    source={{ uri: comment.avatar || undefined }}
-                    style={styles.commentAvatar}
-                  />
+                <View style={[styles.commentRow, comment.__depth ? styles.commentRowReply : undefined]}>
+                  <Image source={{ uri: comment.avatar || undefined }} style={styles.commentAvatar} />
                   <View style={styles.commentTextContainer}>
-                    <Text style={styles.commentUser}>{comment.userDisplayName}</Text>
+                    <View style={styles.commentTopRow}>
+                      <Text style={styles.commentUser}>{comment.userDisplayName}</Text>
+                      <View style={styles.commentActionsInline}>
+                        <TouchableOpacity
+                          onPress={() => toggleCommentLike(comment)}
+                          style={styles.commentLikeBtn}
+                          activeOpacity={0.85}
+                        >
+                          <Ionicons
+                            name={comment.liked ? 'heart' : 'heart-outline'}
+                            size={16}
+                            color={comment.liked ? '#ff2d55' : 'rgba(255,255,255,0.9)'}
+                          />
+                          <Text style={styles.commentLikeCount}>{comment.likesCount || 0}</Text>
+                        </TouchableOpacity>
+                        {comment.__depth ? null : (
+                          <TouchableOpacity
+                            onPress={() => setReplyTo({ id: String(comment.id), userDisplayName: comment.userDisplayName })}
+                            style={styles.commentReplyBtn}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.commentReplyText}>Reply</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
                     <Text style={styles.commentText}>{comment.text}</Text>
                   </View>
                 </View>
               )}
               style={styles.commentList}
+              ListEmptyComponent={
+                commentsLoading ? (
+                  <View style={{ paddingVertical: 24 }}>
+                    <ActivityIndicator color="#fff" />
+                  </View>
+                ) : (
+                  <Text style={{ color: 'rgba(255,255,255,0.7)', paddingVertical: 24, textAlign: 'center' }}>
+                    No comments yet.
+                  </Text>
+                )
+              }
             />
 
             <View style={styles.commentInputContainer}>
@@ -540,12 +845,22 @@ function FeedSlide({
                 style={styles.commentInput}
                 value={commentText}
                 onChangeText={setCommentText}
-                placeholder="Add a comment..."
+                placeholder={replyTo ? `Reply to ${replyTo.userDisplayName ?? 'comment'}...` : 'Add a comment...'}
                 placeholderTextColor="#888"
               />
-              <TouchableOpacity style={styles.emojiButton}>
-                <Text>😊</Text>
-              </TouchableOpacity>
+              {replyTo ? (
+                <TouchableOpacity
+                  style={styles.emojiButton}
+                  onPress={() => setReplyTo(null)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={{ color: '#fff', fontWeight: '700' }}>×</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity style={styles.emojiButton}>
+                  <Text>😊</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity onPress={submitComment} style={styles.sendButton}>
                 <Ionicons name="arrow-up-circle" size={32} color="#7dd8ff" />
               </TouchableOpacity>
@@ -555,7 +870,23 @@ function FeedSlide({
       </Modal>
     </View>
   )
-}
+}, (prev, next) => {
+  if (prev.active !== next.active) return false
+  if (prev.mounted !== next.mounted) return false
+  if (prev.autoPlayReels !== next.autoPlayReels) return false
+  const a = prev.item
+  const b = next.item
+  return (
+    a.id === b.id &&
+    a.videoUrl === b.videoUrl &&
+    a.title === b.title &&
+    a.user === b.user &&
+    a.avatar === b.avatar &&
+    a.likes === b.likes &&
+    a.commentsCount === b.commentsCount &&
+    a.music === b.music
+  )
+})
 
 const styles = StyleSheet.create({
   wrapper: { flex: 1, backgroundColor: 'black' },
@@ -579,6 +910,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   video: { width: '100%', height: '100%' },
+  videoPlaceholder: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#000',
+  },
 
   overlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-end' },
   bottomGradient: {
@@ -669,8 +1005,15 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   commentTextContainer: { flex: 1, gap: 4 },
+  commentTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  commentActionsInline: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  commentLikeBtn: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  commentLikeCount: { color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: '700' },
+  commentReplyBtn: { paddingVertical: 2, paddingHorizontal: 6 },
+  commentReplyText: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: '700' },
   commentUser: { color: '#aaa', fontWeight: '600', fontSize: 12 },
   commentText: { color: '#fff', fontSize: 14 },
+  commentRowReply: { paddingLeft: 18, opacity: 0.98 },
   commentInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',

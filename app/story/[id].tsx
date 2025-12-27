@@ -16,7 +16,9 @@ import {
     View,
 } from 'react-native';
 import { firestore } from '../../constants/firebase';
+import { getAccentFromPosterPath } from '../../constants/theme';
 import { useUser } from '../../hooks/use-user';
+import { useAccent } from '../components/AccentContext';
 import { findOrCreateConversation, sendMessage, type Profile } from '../messaging/controller';
 
 interface StoryDoc {
@@ -43,6 +45,7 @@ const StoryScreen = () => {
   const animationRef = useRef<Animated.CompositeAnimation | null>(null);
   const viewerId = (user as any)?.uid ?? null;
   const STORY_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const { setAccentColor } = useAccent();
 
   useEffect(() => {
     const fetchStories = async () => {
@@ -131,6 +134,15 @@ const StoryScreen = () => {
       animationRef.current?.stop();
     };
   }, []);
+
+  useEffect(() => {
+    if (currentStory?.photoURL) {
+      const accent = getAccentFromPosterPath(currentStory.photoURL);
+      if (accent) {
+        setAccentColor(accent);
+      }
+    }
+  }, [currentStory?.photoURL, setAccentColor]);
 
   const handleNext = () => {
     if (currentIndex < stories.length - 1) {

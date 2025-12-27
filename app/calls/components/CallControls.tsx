@@ -91,6 +91,8 @@ const styles = StyleSheet.create({
   },
   hangup: {
     backgroundColor: '#E50914',
+    borderWidth: 1,
+    borderColor: '#ff748b',
   },
 });
 

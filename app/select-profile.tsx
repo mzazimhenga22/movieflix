@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { decode } from 'base64-arraybuffer'
 import * as FileSystem from 'expo-file-system/legacy'
 import * as ImagePicker from 'expo-image-picker'
+import { LinearGradient } from 'expo-linear-gradient'
 import { useFocusEffect, useRouter } from 'expo-router'
 import { onAuthStateChanged, type User } from 'firebase/auth'
 import {
@@ -22,8 +23,11 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
     ActivityIndicator,
     Alert,
+    Animated,
+    Easing,
     FlatList,
     Image,
+    Keyboard,
     KeyboardAvoidingView,
     Platform,
     StyleSheet,
@@ -33,10 +37,12 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import ScreenWrapper from '../components/ScreenWrapper'
 import { authPromise, firestore } from '../constants/firebase'
 import { supabase, supabaseConfigured } from '../constants/supabase'
+import { useSubscription } from '../providers/SubscriptionProvider'
 import { useAccent } from './components/AccentContext'
 
 type PlanTier = 'free' | 'plus' | 'premium'
@@ -49,6 +55,7 @@ type HouseholdProfile = {
   photoPath?: string | null
   isKids?: boolean
   hiddenDueToPlan?: boolean
+  pin?: string | null
 }
 
 const PROFILE_LIMITS: Record<PlanTier, number> = {
@@ -74,7 +81,9 @@ const PROFILES_BUCKET = 'profiles'
 
 const SelectProfileScreen = () => {
   const router = useRouter()
+  const insets = useSafeAreaInsets()
   const { accentColor } = useAccent()
+  const { refresh: refreshSubscription } = useSubscription()
 
   const [authChecked, setAuthChecked] = useState(false)
   const [currentUser, setCurrentUser] = useState<User | null>(null)
@@ -90,23 +99,37 @@ const SelectProfileScreen = () => {
   // UI state
   const [savingProfile, setSavingProfile] = useState(false)
   const [showCreateCard, setShowCreateCard] = useState(false)
+  const [selectedProfile, setSelectedProfile] = useState<HouseholdProfile | null>(null)
+  const [sheetVisible, setSheetVisible] = useState(false)
+  const sheetTranslateY = React.useRef(new Animated.Value(1)).current
   const [newProfileName, setNewProfileName] = useState('')
   const [isKidsProfile, setIsKidsProfile] = useState(false)
   const [selectedColor, setSelectedColor] = useState(palette[0])
   const [errorCopy, setErrorCopy] = useState<string | null>(null)
+  const [profilePin, setProfilePin] = useState('')
+  const [pinEntry, setPinEntry] = useState('')
+  const [pinError, setPinError] = useState<string | null>(null)
+  const [keyboardVisible, setKeyboardVisible] = useState(false)
+  const [pinEntryFocused, setPinEntryFocused] = useState(false)
+  const [profilePinFocused, setProfilePinFocused] = useState(false)
+  const gradientFade = React.useRef(new Animated.Value(0)).current
+  const [gradientIndex, setGradientIndex] = useState(0)
+
+  const gradientPalettes = useMemo(() => {
+    const accent = accentColor || '#e50914'
+    return [
+      [accent, '#150a1f', '#050509'],
+      ['#0f0c29', '#302b63', '#24243e'],
+      ['#ff512f', '#dd2476', '#0b0411'],
+    ]
+  }, [accentColor])
 
   // Avatar upload/edit
   const [avatarUri, setAvatarUri] = useState<string | null>(null)
   const [avatarUploading, setAvatarUploading] = useState(false)
   const [editingProfile, setEditingProfile] = useState<HouseholdProfile | null>(null)
 
-  // Fake subscription flow
-  const [showSubscriptionForm, setShowSubscriptionForm] = useState(false)
-  const [selectedPurchaseTier, setSelectedPurchaseTier] = useState<PlanTier | null>(null)
-  const [cardNumber, setCardNumber] = useState('')
-  const [cardExp, setCardExp] = useState('')
-  const [cardCVC, setCardCVC] = useState('')
-  const [subscriptionSaving, setSubscriptionSaving] = useState(false)
+  // Subscription flow: handled in the Premium screen
 
   const profileLimit = PROFILE_LIMITS[planTier]
   const planLabel = PLAN_LABELS[planTier]
@@ -118,6 +141,34 @@ const SelectProfileScreen = () => {
 
   const profileCacheKey = currentUser ? `profileCache:${currentUser.uid}` : null
   const planCacheKey = currentUser ? `planCache:${currentUser.uid}` : null
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide'
+    const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true))
+    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false))
+    return () => {
+      showSub.remove()
+      hideSub.remove()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (gradientPalettes.length <= 1) return
+    const interval = setInterval(() => {
+      gradientFade.setValue(0)
+      Animated.timing(gradientFade, {
+        toValue: 1,
+        duration: 1400,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      }).start(() => {
+        setGradientIndex((prev) => (prev + 1) % gradientPalettes.length)
+        gradientFade.setValue(0)
+      })
+    }, 9000)
+    return () => clearInterval(interval)
+  }, [gradientFade, gradientPalettes.length])
 
   const handleUpgrade = useCallback(() => {
     router.push('/premium?source=profiles')
@@ -169,15 +220,26 @@ const SelectProfileScreen = () => {
   // Auth
   useEffect(() => {
     let unsub: Unsubscribe | undefined
-    authPromise.then((auth) => {
-      setAuthChecked(true)
-      setCurrentUser(auth.currentUser ?? null)
-      unsub = onAuthStateChanged(auth, (u) => setCurrentUser(u ?? null))
-    }).catch(() => {
-      setAuthChecked(true)
-      setCurrentUser(null)
-    })
-    return () => unsub?.()
+    let resolved = false
+
+    authPromise
+      .then((auth) => {
+        unsub = onAuthStateChanged(auth, (user) => {
+          setCurrentUser(user ?? null)
+          if (!resolved) {
+            setAuthChecked(true)
+            resolved = true
+          }
+        })
+      })
+      .catch(() => {
+        setCurrentUser(null)
+        setAuthChecked(true)
+      })
+
+    return () => {
+      unsub?.()
+    }
   }, [])
 
   useEffect(() => {
@@ -244,6 +306,7 @@ const SelectProfileScreen = () => {
             photoPath: data.photoPath as string | null | undefined,
             isKids: Boolean(data.isKids),
             hiddenDueToPlan: Boolean(data.hiddenDueToPlan),
+            pin: typeof data.pin === 'string' && data.pin.length > 0 ? data.pin : null,
           }
         })
 
@@ -302,6 +365,7 @@ const SelectProfileScreen = () => {
     setNewProfileName('')
     setIsKidsProfile(false)
     setSelectedColor(palette[0])
+    setProfilePin('')
     setAvatarUri(null)
     setEditingProfile(null)
     setShowCreateCard(false)
@@ -318,6 +382,7 @@ const SelectProfileScreen = () => {
     setNewProfileName(profile.name)
     setSelectedColor(profile.avatarColor || palette[0])
     setIsKidsProfile(profile.isKids ?? false)
+    setProfilePin(profile.pin ?? '')
     setAvatarUri(null)
     setShowCreateCard(true)
   }
@@ -413,6 +478,12 @@ const SelectProfileScreen = () => {
       return
     }
 
+    const normalizedPin = profilePin.trim()
+    if (normalizedPin && !/^\d{4}$/.test(normalizedPin)) {
+      Alert.alert('Invalid PIN', 'PIN must be exactly 4 digits or left blank.')
+      return
+    }
+
     setSavingProfile(true)
     let uploadResult: { url: string; path: string } | null = null
 
@@ -427,6 +498,7 @@ const SelectProfileScreen = () => {
         name: trimmedName,
         avatarColor: chosenColor,
         isKids: isKidsProfile,
+        pin: normalizedPin.length === 4 ? normalizedPin : null,
       }
 
       if (!editingProfile) {
@@ -481,78 +553,11 @@ const SelectProfileScreen = () => {
 
   const handleChoosePlan = (tier: PlanTier) => {
     if (tier === planTier) return
-    if (tier === 'free') {
-      void applySubscription('free')
-      return
-    }
-    setSelectedPurchaseTier(tier)
-    setShowSubscriptionForm(true)
+    // Redirect to the Premium screen which handles upgrades/cancellations
+    router.push(`/premium?source=profiles&requested=${tier}`)
   }
 
-  const processPaymentAndApply = async () => {
-    if (!selectedPurchaseTier) return
-    if (!cardNumber || !cardExp || !cardCVC) {
-      Alert.alert('Payment required', 'Please enter valid card details to complete the purchase.')
-      return
-    }
-
-    setSubscriptionSaving(true)
-    try {
-      await new Promise((res) => setTimeout(res, 1000))
-      await applySubscription(selectedPurchaseTier)
-    } catch (err) {
-      console.error('[select-profile] payment processing failed', err)
-      Alert.alert('Payment failed', 'Unable to process payment. Please verify details and try again.')
-    } finally {
-      setSubscriptionSaving(false)
-    }
-  }
-
-  const applySubscription = async (tier: PlanTier) => {
-    if (!currentUser) {
-      Alert.alert('Sign in required', 'Please sign in to change your plan.')
-      return
-    }
-
-    setSubscriptionSaving(true)
-    try {
-      const userRef = doc(firestore, 'users', currentUser.uid)
-      const price = PLAN_PRICES[tier] ?? 0
-
-      const cardLast4 = cardNumber ? cardNumber.replace(/\s+/g, '').slice(-4) : null
-
-      await updateDoc(userRef, {
-        planTier: tier,
-        subscription: {
-          tier,
-          priceKSH: price,
-          updatedAt: serverTimestamp(),
-          cardLast4: cardLast4 ?? null,
-          source: 'fake-card-test',
-        },
-      })
-
-      setPlanTier(tier)
-      if (planCacheKey) {
-        AsyncStorage.setItem(planCacheKey, tier).catch(() => {})
-      }
-
-      Alert.alert('Success', `Subscription updated to ${PLAN_LABELS[tier]} (${price} KSH)`)
-      setShowSubscriptionForm(false)
-      setSelectedPurchaseTier(null)
-      setCardNumber('')
-      setCardExp('')
-      setCardCVC('')
-    } catch (err) {
-      console.error('[select-profile] failed to apply subscription', err)
-      Alert.alert(
-        'Error',
-        'Unable to update subscription (offline?). Please try again when connected.',
-      )
-    } finally {
-      setSubscriptionSaving(false)
-    }
-  }
+  // Subscription handling moved to `premium.tsx`.
 
   const profileData = useMemo(() => profiles, [profiles])
 
@@ -575,7 +580,17 @@ const SelectProfileScreen = () => {
             )
             return
           }
-          void handleSelectProfile(item)
+          // Open bottom sheet with details instead of immediate selection
+          setSelectedProfile(item)
+          setPinEntry('')
+          setPinError(null)
+          setSheetVisible(true)
+          Animated.timing(sheetTranslateY, {
+            toValue: 0,
+            duration: 260,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }).start()
         }}
       >
         {!locked && (
@@ -613,14 +628,46 @@ const SelectProfileScreen = () => {
     )
   }
 
+  const paletteCount = gradientPalettes.length || 1
+  const nextGradientIndex = (gradientIndex + 1) % paletteCount
+
   return (
-    <ScreenWrapper>
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+    <ScreenWrapper disableTopInset>
+      <View style={styles.flex}>
+        <View style={styles.glassyBackground} pointerEvents="none">
+          <LinearGradient
+            colors={gradientPalettes[gradientIndex]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.gradientLayer}
+          />
+          <Animated.View style={[styles.gradientLayer, { opacity: gradientFade }]}>
+            <LinearGradient
+              colors={gradientPalettes[nextGradientIndex]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.gradientLayer}
+            />
+          </Animated.View>
+          <LinearGradient
+            colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.1, y: 0 }}
+            end={{ x: 0.9, y: 1 }}
+            style={styles.bgOrbPrimary}
+          />
+          <LinearGradient
+            colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.8, y: 0 }}
+            end={{ x: 0.2, y: 1 }}
+            style={styles.bgOrbSecondary}
+          />
+        </View>
+        <KeyboardAvoidingView
+          style={[styles.container, { paddingTop: insets.top + 12 }]}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
         <View style={styles.header}>
-          <Text style={styles.title}>Who's watching?</Text>
+          <Text style={styles.title}>{`Who's watching?`}</Text>
           <Text style={styles.subtitle}>
             Pick a profile to load personalized recommendations.
           </Text>
@@ -654,60 +701,7 @@ const SelectProfileScreen = () => {
           ))}
         </View>
 
-        {showSubscriptionForm && selectedPurchaseTier && (
-          <View style={styles.subscriptionCard}>
-            <Text style={styles.subscriptionTitle}>Enter payment details (fake)</Text>
-
-            <TextInput
-              placeholder="Card number"
-              placeholderTextColor="rgba(255,255,255,0.5)"
-              style={styles.input}
-              value={cardNumber}
-              onChangeText={setCardNumber}
-              keyboardType="number-pad"
-            />
-
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              <TextInput
-                placeholder="MM/YY"
-                placeholderTextColor="rgba(255,255,255,0.5)"
-                style={[styles.input, { flex: 1 }]}
-                value={cardExp}
-                onChangeText={setCardExp}
-              />
-              <TextInput
-                placeholder="CVC"
-                placeholderTextColor="rgba(255,255,255,0.5)"
-                style={[styles.input, { flex: 1 }]}
-                value={cardCVC}
-                onChangeText={setCardCVC}
-                keyboardType="number-pad"
-              />
-            </View>
-
-            <View style={styles.createActions}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => {
-                  setShowSubscriptionForm(false)
-                  setSelectedPurchaseTier(null)
-                }}
-              >
-                <Text style={styles.cancelText}>Cancel</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.saveButton, { backgroundColor: accentColor }]}
-                onPress={processPaymentAndApply}
-                disabled={subscriptionSaving}
-              >
-                <Text style={styles.saveText}>
-                  {subscriptionSaving ? 'Processing…' : `Pay ${PLAN_PRICES[selectedPurchaseTier]} KSH`}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+        {/* Subscription sheet removed; purchases handled in /premium */}
 
         {!profilesHydrated ? (
           <View style={styles.loaderRow}>
@@ -765,6 +759,23 @@ const SelectProfileScreen = () => {
               onChangeText={setNewProfileName}
               maxLength={20}
             />
+
+            <TextInput
+              placeholder="4-digit PIN (optional)"
+              placeholderTextColor="rgba(255,255,255,0.5)"
+              style={[styles.pinInput, profilePinFocused && keyboardVisible && styles.pinInputKeyboard]}
+              value={profilePin}
+              onChangeText={(text) => {
+                const sanitized = text.replace(/[^0-9]/g, '').slice(0, 4)
+                setProfilePin(sanitized)
+              }}
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={4}
+              onFocus={() => setProfilePinFocused(true)}
+              onBlur={() => setProfilePinFocused(false)}
+            />
+            <Text style={styles.pinHelper}>Leave blank to skip the PIN.</Text>
 
             <View style={styles.uploadRow}>
               <TouchableOpacity
@@ -827,12 +838,187 @@ const SelectProfileScreen = () => {
             </View>
           </View>
         )}
-      </KeyboardAvoidingView>
+
+        {/* Bottom sheet for profile details */}
+        {selectedProfile && (
+          <>
+            {sheetVisible && (
+              <TouchableOpacity
+                style={styles.sheetBackdrop}
+                activeOpacity={1}
+                onPress={() => {
+                  Animated.timing(sheetTranslateY, {
+                    toValue: 1,
+                    duration: 200,
+                    useNativeDriver: true,
+                  }).start(() => {
+                    setSheetVisible(false)
+                    setSelectedProfile(null)
+                    setPinEntry('')
+                    setPinError(null)
+                  })
+                }}
+              />
+            )}
+
+            <Animated.View
+              pointerEvents={sheetVisible ? 'auto' : 'none'}
+              style={[
+                styles.sheet,
+                {
+                  transform: [
+                    {
+                      translateY: sheetTranslateY.interpolate({ inputRange: [0, 1], outputRange: [0, 500] }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeader}>
+                <View style={[styles.sheetAvatar, !selectedProfile.photoURL && { backgroundColor: selectedProfile.avatarColor }]}>
+                  {selectedProfile.photoURL ? (
+                    <Image source={{ uri: selectedProfile.photoURL }} style={styles.sheetAvatarImage} />
+                  ) : (
+                    <Text style={styles.sheetInitial}>{selectedProfile.name.charAt(0).toUpperCase()}</Text>
+                  )}
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.sheetName}>{selectedProfile.name}</Text>
+                  {selectedProfile.isKids && <Text style={styles.sheetPill}>Kids</Text>}
+                </View>
+              </View>
+
+            {selectedProfile.pin ? (
+              <View style={styles.pinEntryBlock}>
+                <Text style={styles.pinEntryLabel}>Enter PIN to unlock</Text>
+                <TextInput
+                  value={pinEntry}
+                  onChangeText={(text) => {
+                    setPinEntry(text.replace(/[^0-9]/g, '').slice(0, 4))
+                    setPinError(null)
+                  }}
+                  placeholder="••••"
+                  placeholderTextColor="rgba(255,255,255,0.3)"
+                  keyboardType="number-pad"
+                  secureTextEntry
+                  maxLength={4}
+                  style={[styles.pinEntryInput, pinEntryFocused && keyboardVisible && styles.pinEntryInputKeyboard]}
+                  onFocus={() => setPinEntryFocused(true)}
+                  onBlur={() => setPinEntryFocused(false)}
+                />
+                {pinError ? <Text style={styles.pinEntryError}>{pinError}</Text> : null}
+              </View>
+            ) : null}
+
+              <View style={styles.sheetActions}>
+                <TouchableOpacity
+                  style={[styles.sheetButton, { backgroundColor: accentColor }]}
+                  onPress={async () => {
+                    if (selectedProfile.pin) {
+                      if (pinEntry.trim().length === 0) {
+                        setPinError('Enter PIN to continue')
+                        return
+                      }
+                      if (pinEntry !== selectedProfile.pin) {
+                        setPinError('Incorrect PIN')
+                        return
+                      }
+                    }
+
+                    try {
+                      await handleSelectProfile(selectedProfile)
+                    } finally {
+                      Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                        setSheetVisible(false)
+                        setSelectedProfile(null)
+                        setPinEntry('')
+                        setPinError(null)
+                      })
+                    }
+                  }}
+                >
+                  <Text style={styles.sheetButtonText}>Use profile</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.sheetButton, styles.sheetButtonOutline]}
+                  onPress={() => {
+                    // Edit: open create/edit form and close sheet
+                    setEditingProfile(selectedProfile)
+                    setNewProfileName(selectedProfile.name)
+                    setSelectedColor(selectedProfile.avatarColor || palette[0])
+                    setIsKidsProfile(selectedProfile.isKids ?? false)
+                    setProfilePin(selectedProfile.pin ?? '')
+                    setShowCreateCard(true)
+                    Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                      setSheetVisible(false)
+                      setSelectedProfile(null)
+                      setPinEntry('')
+                      setPinError(null)
+                    })
+                  }}
+                >
+                  <Text style={[styles.sheetButtonText, { color: accentColor }]}>Edit</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.sheetButton, styles.sheetButtonDanger]}
+                  onPress={() => {
+                    Alert.alert('Delete profile', `Delete ${selectedProfile.name}?`, [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: () => {
+                        handleDeleteProfile(selectedProfile)
+                        Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                          setSheetVisible(false)
+                          setSelectedProfile(null)
+                          setPinEntry('')
+                          setPinError(null)
+                        })
+                      } }
+                    ])
+                  }}
+                >
+                  <Text style={[styles.sheetButtonText, { color: '#fff' }]}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            </Animated.View>
+          </>
+        )}
+        </KeyboardAvoidingView>
+      </View>
     </ScreenWrapper>
   )
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  glassyBackground: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  gradientLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    top: -60,
+    left: -40,
+    opacity: 0.5,
+    transform: [{ rotate: '12deg' }],
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    bottom: -80,
+    right: -30,
+    opacity: 0.45,
+    transform: [{ rotate: '-14deg' }],
+  },
   container: { flex: 1, padding: 20 },
   header: { marginBottom: 12 },
   title: { fontSize: 28, fontWeight: '700', color: '#fff', marginBottom: 4 },
@@ -1011,6 +1197,19 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     marginBottom: 12,
   },
+  pinInput: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    color: '#fff',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 6,
+  },
+  pinHelper: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    marginBottom: 12,
+  },
 
   colorRow: { flexDirection: 'row', marginBottom: 12 },
   colorSwatch: { width: 32, height: 32, borderRadius: 16, marginRight: 10 },
@@ -1035,6 +1234,20 @@ const styles = StyleSheet.create({
   },
   subscriptionTitle: { color: '#fff', fontWeight: '700', marginBottom: 8 },
 
+  freqBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  freqBtnActive: {
+    backgroundColor: '#e50914',
+  },
+  freqText: { color: 'rgba(255,255,255,0.8)', fontWeight: '700' },
+  freqTextActive: { color: '#fff' },
+
   cancelButton: {
     paddingVertical: 10,
     paddingHorizontal: 16,
@@ -1046,6 +1259,74 @@ const styles = StyleSheet.create({
 
   saveButton: { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 999, marginLeft: 12 },
   saveText: { color: '#05060f', fontWeight: '700' },
+  sheetBackdrop: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  sheet: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 24,
+    borderRadius: 16,
+    padding: 16,
+    backgroundColor: 'rgba(6,6,10,0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    elevation: 20,
+  },
+  sheetHandle: {
+    width: 48,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  sheetAvatar: { width: 72, height: 72, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  sheetAvatarImage: { width: '100%', height: '100%', borderRadius: 16 },
+  sheetInitial: { color: '#fff', fontSize: 28, fontWeight: '800' },
+  sheetName: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  sheetPill: { marginTop: 6, color: 'rgba(255,255,255,0.8)', fontSize: 12 },
+  pinEntryBlock: { marginBottom: 12 },
+  pinEntryLabel: { color: 'rgba(255,255,255,0.8)', fontWeight: '600', marginBottom: 6 },
+  pinEntryInput: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 18,
+    letterSpacing: 4,
+  },
+  pinEntryInputKeyboard: {
+    fontSize: 24,
+    letterSpacing: 8,
+    paddingVertical: 14,
+  },
+  pinInputKeyboard: {
+    fontSize: 18,
+    letterSpacing: 4,
+    paddingVertical: 14,
+  },
+  pinEntryError: { color: '#ff6b6b', fontSize: 12, marginTop: 4 },
+  sheetActions: { marginTop: 8, flexDirection: 'row', gap: 8 },
+  sheetButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)'
+  },
+  sheetButtonText: { color: '#fff', fontWeight: '700' },
+  sheetButtonOutline: { backgroundColor: 'transparent', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  sheetButtonDanger: { backgroundColor: '#e53935' },
 })
 
 export default SelectProfileScreen

@@ -8,7 +8,6 @@ import {
   GestureResponderEvent,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { useRouter } from 'expo-router';
 import { Conversation, Profile } from '../controller';
 import { doc, getDoc } from 'firebase/firestore';
 import { firestore } from '../../../constants/firebase';
@@ -23,6 +22,7 @@ interface MessageItemProps {
   onLongPress?: (item: Conversation, rect: { x: number; y: number; width: number; height: number }) => void;
   onStartCall?: (conversation: Conversation, type: CallType) => void;
   callDisabled?: boolean;
+  isVerified?: boolean;
 }
 
 const MessageItem = ({
@@ -32,20 +32,26 @@ const MessageItem = ({
   onLongPress,
   onStartCall,
   callDisabled,
+  isVerified = false,
 }: MessageItemProps) => {
   const [otherUser, setOtherUser] = useState<Profile | null>(null);
   const rowRef = useRef<View | null>(null);
-  const router = useRouter();
   const time = item.updatedAt?.toDate ? item.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const isPendingRequest = item.status === 'pending';
 
   useEffect(() => {
+    let isActive = true;
+
     const fetchOtherUser = async () => {
       if (item.isGroup) {
         setOtherUser(null);
         return;
       }
 
-      if (!item.members || !currentUser) return;
+      if (!item.members || !currentUser) {
+        setOtherUser(null);
+        return;
+      }
 
       const otherMemberId = item.members.find((memberId: string) => memberId !== currentUser.uid);
       if (!otherMemberId) return;
@@ -53,6 +59,7 @@ const MessageItem = ({
       try {
         const userDoc = await getDoc(doc(firestore, 'users', otherMemberId));
         if (userDoc.exists()) {
+          if (!isActive) return;
           setOtherUser({ ...userDoc.data(), id: userDoc.id } as Profile);
         }
       } catch (error) {
@@ -61,7 +68,19 @@ const MessageItem = ({
     };
 
     fetchOtherUser();
+
+    return () => {
+      isActive = false;
+    };
   }, [item.members, currentUser, item.isGroup]);
+
+  const avatarInitials = (otherUser?.displayName || 'U')
+    .split(' ')
+    .filter(Boolean)
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 
   const handleLongPress = () => {
     if (!onLongPress || !rowRef.current) return;
@@ -100,7 +119,13 @@ const MessageItem = ({
             </Text>
           </View>
         ) : (
-          <Image source={{ uri: otherUser?.photoURL }} style={styles.messageAvatar} />
+          otherUser?.photoURL ? (
+            <Image source={{ uri: otherUser.photoURL }} style={styles.messageAvatar} />
+          ) : (
+            <View style={styles.avatarFallback}>
+              <Text style={styles.avatarFallbackText}>{avatarInitials}</Text>
+            </View>
+          )
         )}
         <View style={styles.messageContent}>
           <View style={styles.row}>
@@ -109,8 +134,18 @@ const MessageItem = ({
                 <View style={[styles.statusDot, otherUser?.status === 'online' && styles.statusDotOnline]} />
               )}
               <Text numberOfLines={1} style={styles.userName}>
-                {item.isGroup ? item.name || 'Group' : otherUser?.displayName}
+                {item.isGroup ? item.name || 'Group' : otherUser?.displayName || 'Unknown'}
               </Text>
+              {isVerified && (
+                <View style={styles.verifiedChip}>
+                  <Ionicons name="checkmark" size={10} color="#fff" />
+                </View>
+              )}
+              {isPendingRequest && (
+                <View style={styles.requestPill}>
+                  <Text style={styles.requestPillText}>Pending</Text>
+                </View>
+              )}
               {item.pinned && (
                 <Ionicons
                   name="pin"
@@ -123,7 +158,14 @@ const MessageItem = ({
             <Text style={styles.time}>{time}</Text>
           </View>
           <View style={styles.row}>
-            <Text numberOfLines={1} style={styles.lastMessage}>{item.lastMessage}</Text>
+            <Text
+              numberOfLines={1}
+              style={[styles.lastMessage, isPendingRequest && styles.pendingText]}
+            >
+              {isPendingRequest
+                ? item.requestPreview || 'Request sent — waiting for approval'
+                : item.lastMessage}
+            </Text>
             {item.unread ? (
               <View style={styles.unreadBadge}>
                 <Text style={styles.unreadText}>{item.unread}</Text>
@@ -131,24 +173,26 @@ const MessageItem = ({
             ) : null}
           </View>
         </View>
-        <View style={styles.trailingActions}>
-          <TouchableOpacity
-            style={[styles.callAction, callDisabled && styles.callActionDisabled]}
-            accessibilityLabel="Start voice call"
-            onPress={(event) => handleCallPress(event, 'voice')}
-            disabled={callDisabled}
-          >
-            <Ionicons name="call" size={16} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.callAction, callDisabled && styles.callActionDisabled]}
-            accessibilityLabel="Start video call"
-            onPress={(event) => handleCallPress(event, 'video')}
-            disabled={callDisabled}
-          >
-            <Ionicons name="videocam" size={18} color="#fff" />
-          </TouchableOpacity>
-        </View>
+        {!isPendingRequest && (
+          <View style={styles.trailingActions}>
+            <TouchableOpacity
+              style={[styles.callAction, callDisabled && styles.callActionDisabled]}
+              accessibilityLabel="Start voice call"
+              onPress={(event) => handleCallPress(event, 'voice')}
+              disabled={callDisabled}
+            >
+              <Ionicons name="call" size={16} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.callAction, callDisabled && styles.callActionDisabled]}
+              accessibilityLabel="Start video call"
+              onPress={(event) => handleCallPress(event, 'video')}
+              disabled={callDisabled}
+            >
+              <Ionicons name="videocam" size={18} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
       </BlurView>
     </TouchableOpacity>
   );
@@ -180,6 +224,23 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     marginRight: 12,
     backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  avatarFallback: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    marginRight: 12,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarFallbackText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
+    letterSpacing: 0.4,
   },
   groupAvatar: {
     width: 56,
@@ -258,6 +319,33 @@ const styles = StyleSheet.create({
   },
   pinIcon: {
     marginLeft: 6,
+  },
+  requestPill: {
+    marginLeft: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  requestPillText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  pendingText: {
+    color: 'rgba(255,255,255,0.85)',
+    fontStyle: 'italic',
+  },
+  verifiedChip: {
+    marginLeft: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: '#0d6efd',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   statusDot: {
     width: 8,

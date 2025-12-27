@@ -4,8 +4,8 @@ import { View, Text, StyleSheet } from 'react-native';
 const WalkthroughStep3 = () => {
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>You're All Set!</Text>
-      <Text style={styles.subtitle}>Click "Finish" to start exploring.</Text>
+      <Text style={styles.title}>{`You're All Set!`}</Text>
+      <Text style={styles.subtitle}>{`Click "Finish" to start exploring.`}</Text>
     </View>
   );
 };

@@ -189,7 +189,7 @@ const LiveRoomScreen = () => {
                 </View>
               )}
 
-              {/* TikTok-like live overlay */}
+              {/* Full-screen live overlay */}
               {viewerStream && (
                 <View style={styles.liveOverlay}>
                   {/* Viewer count badge */}

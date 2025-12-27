@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, StyleSheet, Alert } from 'react-native';
 import MediaPicker from './components/post-review/MediaPicker';
+// eslint-disable-next-line import/namespace, import/no-named-as-default, import/no-named-as-default-member
 import MediaPreview from './components/post-review/MediaPreview';
 import { supabase, supabaseConfigured } from '../constants/supabase';
 
@@ -10,6 +11,8 @@ import { useUser } from '../hooks/use-user';
 import { useRouter } from 'expo-router';
 import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
 import { firestore } from '../constants/firebase';
+import ScreenWrapper from '../components/ScreenWrapper';
+import { notifyPush } from '../lib/pushApi';
 
 if (typeof atob === 'undefined') {
   // @ts-ignore
@@ -146,6 +149,9 @@ export default function PostReviewScreen() {
           commentsCount: 0,
         });
 
+        // Push notify followers
+        void notifyPush({ kind: 'reel', reviewId: newReviewDoc.id });
+
         // Notify followers
         const profileRef = doc(firestore, 'users', effectiveUser.uid);
         const profileSnap = await getDoc(profileRef);
@@ -184,32 +190,37 @@ export default function PostReviewScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      {!media ? (
-        <MediaPicker
-          onMediaPicked={handleMediaPick}
-          // Do not navigate away when the picker closes; just stay here
-          // so selecting/cancelling media never kicks you back to the feed.
-          onClose={() => setMedia(null)}
-        />
-      ) : (
-        <MediaPreview
-          media={media}
-          onPost={handlePost}
-          onClose={() => {
-            // When closing from the preview, clear media and go back once.
-            setMedia(null);
-            router.back();
-          }}
-        />
-      )}
-    </View>
+    <ScreenWrapper style={styles.wrapper}>
+      <View style={styles.container}>
+        {!media ? (
+          <MediaPicker
+            onMediaPicked={handleMediaPick}
+            // Do not navigate away when the picker closes; just stay here
+            // so selecting/cancelling media never kicks you back to the feed.
+            onClose={() => setMedia(null)}
+          />
+        ) : (
+          <MediaPreview
+            media={media}
+            onPost={handlePost}
+            onClose={() => {
+              // When closing from the preview, clear media and go back once.
+              setMedia(null);
+              router.back();
+            }}
+          />
+        )}
+      </View>
+    </ScreenWrapper>
   );
 }
 
 const styles = StyleSheet.create({
+  wrapper: {
+    paddingTop: 0,
+  },
   container: {
     flex: 1,
-    backgroundColor: '#111',
+    backgroundColor: 'transparent',
   },
 });

@@ -1,0 +1,6 @@
+{
+  "latestVersion": "1.0.0",
+  "mandatory": false,
+  "url": "https://YOUR_NETLIFY_SITE.netlify.app/updates/MovieFlix-latest.apk",
+  "message": "A new version is available. Please update to continue."
+}

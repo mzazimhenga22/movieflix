@@ -1,57 +1,244 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import React from 'react';
-import { Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useRouter } from 'expo-router';
+import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-const { width } = Dimensions.get('window');
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../constants/api';
+import { getProfileScopedKey } from '../../../lib/profileStorage';
+import type { Media } from '../../../types';
 
-type RecommendedMovie = {
-  id: string;
-  title: string;
-  genre: string;
-  rating: number;
-  matchPercentage: number;
+type RankedRecommendation = Media & {
+  score: number;
+  reason: string;
 };
 
-// Mock data - replace with real data from your API
-const RECOMMENDED_MOVIES: RecommendedMovie[] = [
-  { id: '1', title: 'Inception', genre: 'Sci-Fi', rating: 4.8, matchPercentage: 95 },
-  { id: '2', title: 'The Dark Knight', genre: 'Action', rating: 4.9, matchPercentage: 92 },
-  { id: '3', title: 'Interstellar', genre: 'Sci-Fi', rating: 4.7, matchPercentage: 88 },
-];
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
+const toTitle = (m: Media) => m.title || m.name || 'Untitled';
+
+const stableMediaKey = (m: Media) => `${m.media_type ?? 'movie'}:${m.id}`;
+
+const buildPreferenceWeights = (continueWatching: Media[], myList: Media[]) => {
+  const weights = new Map<number, number>();
+
+  const add = (genreId: number, value: number) => {
+    if (!Number.isFinite(genreId)) return;
+    weights.set(genreId, (weights.get(genreId) ?? 0) + value);
+  };
+
+  const addFromList = (
+    items: Media[],
+    baseWeight: number,
+    opts?: { progressBoost?: boolean },
+  ) => {
+    const count = Math.min(items.length, 14);
+    for (let idx = 0; idx < count; idx++) {
+      const item = items[idx];
+      const genres = (item.genre_ids || []) as number[];
+      if (!genres.length) continue;
+
+      const recency = 1 - idx / Math.max(1, count) * 0.55;
+      const progress = item.watchProgress?.progress;
+      const progressIsMid =
+        typeof progress === 'number' && progress >= 0.05 && progress <= 0.95;
+      const progressFactor = opts?.progressBoost && progressIsMid ? 1.25 : 1;
+      const rating = typeof item.vote_average === 'number' ? item.vote_average : 0;
+      const ratingFactor = clamp(0.9 + rating / 20, 0.9, 1.35);
+      const weight = baseWeight * recency * progressFactor * ratingFactor;
+      genres.forEach((genreId) => add(genreId, weight));
+    }
+  };
+
+  addFromList(continueWatching, 2.2, { progressBoost: true });
+  addFromList(myList, 1.6);
+
+  const sorted = [...weights.entries()].sort((a, b) => b[1] - a[1]);
+  const topGenreIds = sorted.slice(0, 6).map(([id]) => id);
+  return { weights, topGenreIds };
+};
+
+const scoreCandidate = (candidate: Media, weights: Map<number, number>) => {
+  const genres = (candidate.genre_ids || []) as number[];
+  if (!genres.length || weights.size === 0) return 0;
+  let raw = 0;
+  genres.forEach((g) => {
+    raw += weights.get(g) ?? 0;
+  });
+  const max = Math.max(...[...weights.values()]);
+  if (!Number.isFinite(max) || max <= 0) return 0;
+  // normalize: more matching genres + stronger preferences => higher score
+  const normalized = (raw / (max * 3.2)) * 100;
+  return clamp(Math.round(normalized), 0, 100);
+};
 
 export default function RecommendedView() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [recommendations, setRecommendations] = useState<RankedRecommendation[]>([]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [watchKey, myListKey] = await Promise.all([
+        getProfileScopedKey('watchHistory'),
+        getProfileScopedKey('myList'),
+      ]);
+
+      const [watchRaw, myListRaw] = await Promise.all([
+        AsyncStorage.getItem(watchKey).catch(() => null),
+        AsyncStorage.getItem(myListKey).catch(() => null),
+      ]);
+
+      const continueWatching: Media[] = watchRaw ? JSON.parse(watchRaw) : [];
+      const myList: Media[] = myListRaw ? JSON.parse(myListRaw) : [];
+
+      const { weights, topGenreIds } = buildPreferenceWeights(continueWatching, myList);
+      const seedIds = new Set<number>([
+        ...continueWatching.map((m) => m.id),
+        ...myList.map((m) => m.id),
+      ]);
+
+      const fetchCandidates = async (): Promise<Media[]> => {
+        // If we have no profile signals, fall back to trending.
+        if (!topGenreIds.length) {
+          const res = await fetch(`${API_BASE_URL}/trending/movie/week?api_key=${API_KEY}`);
+          const json = await res.json();
+          return (json?.results || []) as Media[];
+        }
+
+        const genreOr = encodeURIComponent(topGenreIds.join('|'));
+        const base = `${API_BASE_URL}/discover/movie?api_key=${API_KEY}&sort_by=popularity.desc&include_adult=false&with_genres=${genreOr}`;
+        const [p1, p2] = await Promise.all([
+          fetch(`${base}&page=1`).then((r) => r.json()).catch(() => null),
+          fetch(`${base}&page=2`).then((r) => r.json()).catch(() => null),
+        ]);
+        const all = [...((p1?.results || []) as Media[]), ...((p2?.results || []) as Media[])];
+        return all;
+      };
+
+      const candidatesRaw = await fetchCandidates();
+      const dedup = new Map<string, Media>();
+      candidatesRaw.forEach((m) => {
+        if (!m || typeof m.id !== 'number') return;
+        if (seedIds.has(m.id)) return;
+        if (!m.poster_path) return;
+        dedup.set(stableMediaKey(m), { ...m, media_type: m.media_type ?? 'movie' });
+      });
+
+      const ranked = [...dedup.values()]
+        .map((m) => {
+          const score = scoreCandidate(m, weights);
+          const rating = typeof m.vote_average === 'number' ? m.vote_average : 0;
+          const blended = clamp(Math.round(score * 0.75 + rating * 5), 0, 100);
+          return {
+            ...m,
+            score: blended,
+            reason:
+              topGenreIds.length > 0
+                ? 'Based on Continue Watching + My List'
+                : 'Trending now',
+          };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 24);
+
+      setRecommendations(ranked);
+    } catch (e: any) {
+      setRecommendations([]);
+      setError(e?.message || 'Failed to load recommendations');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const headerCopy = useMemo(() => {
+    if (loading) return { title: 'Recommended', subtitle: 'Tuning your picks…' };
+    if (error) return { title: 'Recommended', subtitle: 'Could not load picks' };
+    if (!recommendations.length)
+      return { title: 'Recommended', subtitle: 'Add items to Continue Watching or My List' };
+    return { title: 'Your Picks', subtitle: 'Based on Continue Watching + My List' };
+  }, [error, loading, recommendations.length]);
+
   return (
     <View style={styles.container}>
       <LinearGradient
         colors={['rgba(255, 75, 75, 0.15)', 'rgba(255, 75, 75, 0.05)']}
         style={StyleSheet.absoluteFill}
       />
-      <ScrollView style={styles.content}>
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <Text style={styles.title}>Your Match</Text>
-          <Text style={styles.subtitle}>Movies picked just for you</Text>
+          <Text style={styles.title}>{headerCopy.title}</Text>
+          <Text style={styles.subtitle}>{headerCopy.subtitle}</Text>
         </View>
 
-        {RECOMMENDED_MOVIES.map((movie) => (
-          <TouchableOpacity key={movie.id} style={styles.movieCard}>
-            <BlurView intensity={30} tint="dark" style={styles.cardContent}>
-              <View style={styles.movieInfo}>
-                <Text style={styles.movieTitle}>{movie.title}</Text>
-                <Text style={styles.movieGenre}>{movie.genre}</Text>
-                <View style={styles.ratingContainer}>
-                  <Ionicons name="star" size={16} color="#FFD700" />
-                  <Text style={styles.rating}>{movie.rating}</Text>
+        {error ? (
+          <View style={styles.stateBox}>
+            <Text style={styles.stateText}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => void load()}>
+              <Text style={styles.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : loading ? (
+          <View style={styles.stateBox}>
+            <Text style={styles.stateText}>Loading recommendations…</Text>
+          </View>
+        ) : recommendations.length === 0 ? (
+          <View style={styles.stateBox}>
+            <Text style={styles.stateText}>
+              Start watching something or add a few titles to My List to personalize this.
+            </Text>
+          </View>
+        ) : (
+          recommendations.map((movie) => (
+            <TouchableOpacity
+              key={stableMediaKey(movie)}
+              style={styles.movieCard}
+              activeOpacity={0.9}
+              onPress={() =>
+                router.push(`/details/${movie.id}?mediaType=${movie.media_type || 'movie'}`)
+              }
+            >
+              <BlurView intensity={30} tint="dark" style={styles.cardContent}>
+                <Image
+                  source={{ uri: `${IMAGE_BASE_URL}${movie.poster_path}` }}
+                  style={styles.poster}
+                />
+
+                <View style={styles.movieInfo}>
+                  <Text style={styles.movieTitle} numberOfLines={1}>
+                    {toTitle(movie)}
+                  </Text>
+                  <Text style={styles.movieGenre} numberOfLines={1}>
+                    {movie.reason}
+                  </Text>
+                  <View style={styles.ratingContainer}>
+                    <Ionicons name="star" size={16} color="#FFD700" />
+                    <Text style={styles.rating}>
+                      {typeof movie.vote_average === 'number'
+                        ? movie.vote_average.toFixed(1)
+                        : '—'}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-              <View style={styles.matchContainer}>
-                <Text style={styles.matchPercentage}>{movie.matchPercentage}%</Text>
-                <Text style={styles.matchLabel}>match</Text>
-              </View>
-            </BlurView>
-          </TouchableOpacity>
-        ))}
+
+                <View style={styles.matchContainer}>
+                  <Text style={styles.matchPercentage}>{movie.score}%</Text>
+                  <Text style={styles.matchLabel}>match</Text>
+                </View>
+              </BlurView>
+            </TouchableOpacity>
+          ))
+        )}
       </ScrollView>
     </View>
   );
@@ -92,6 +279,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  poster: {
+    width: 56,
+    height: 84,
+    borderRadius: 10,
+    marginRight: 12,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
   movieInfo: {
     flex: 1,
   },
@@ -120,6 +314,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 75, 75, 0.15)',
     padding: 12,
     borderRadius: 12,
+    marginLeft: 12,
   },
   matchPercentage: {
     fontSize: 24,
@@ -129,5 +324,31 @@ const styles = StyleSheet.create({
   matchLabel: {
     fontSize: 12,
     color: 'rgba(255, 255, 255, 0.7)',
+  },
+  stateBox: {
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  stateText: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  retryBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 75, 75, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 75, 75, 0.35)',
+  },
+  retryText: {
+    color: '#fff',
+    fontWeight: '700',
   },
 });

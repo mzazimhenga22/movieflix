@@ -56,9 +56,13 @@ function embed(provider: { id: string; name: string; rank: number }) {
       }
 
       // Create proxy URL with headers if provided
+      const streamHeaders: Record<string, string> | undefined =
+        streamData.headers && typeof streamData.headers === 'object' ? streamData.headers : undefined;
+
       let playlistUrl = streamData.link;
-      if (streamData.headers && Object.keys(streamData.headers).length > 0) {
-        playlistUrl = createM3U8ProxyUrl(streamData.link, streamData.headers);
+      if (streamHeaders && Object.keys(streamHeaders).length > 0) {
+        // In native targets this will return the original URL; in browser targets it will proxy.
+        playlistUrl = createM3U8ProxyUrl(streamData.link, ctx.features, streamHeaders);
       }
 
       return {
@@ -67,6 +71,7 @@ function embed(provider: { id: string; name: string; rank: number }) {
             id: 'primary',
             type: streamData.type || 'hls',
             playlist: playlistUrl,
+            headers: streamHeaders,
             flags: [flags.CORS_ALLOWED],
             captions: [],
           },

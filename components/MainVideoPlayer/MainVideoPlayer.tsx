@@ -1,29 +1,28 @@
 // MainVideoPlayer.tsx
-import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
-  View,
-  StyleSheet,
-  useWindowDimensions,
-  StatusBar,
-  Platform,
-} from 'react-native';
-import {
-  Video,
-  ResizeMode,
-  AVPlaybackStatus,
-  AVPlaybackStatusSuccess,
+    AVPlaybackStatus,
+    AVPlaybackStatusSuccess,
+    Video,
 } from 'expo-av';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+    Platform,
+    StatusBar,
+    StyleSheet,
+    useWindowDimensions,
+    View,
+} from 'react-native';
 
 // Import your control components (assumed to exist in same folder)
-import { Timer } from './Timer';
-import { ProgressBar } from './ProgressBar';
-import { PlayPauseButton } from './PlayPauseButton';
-import { PipButton } from './PipButton';
-import { PlaybackSpeedButton } from './PlaybackSpeedButton';
 import { FullscreenButton } from './FullscreenButton';
 import { MuteButton } from './MuteButton';
+import { PipButton } from './PipButton';
+import { PlaybackSpeedButton } from './PlaybackSpeedButton';
+import { PlayPauseButton } from './PlayPauseButton';
+import { ProgressBar } from './ProgressBar';
 import { SeekButton } from './SeekButton';
+import { Timer } from './Timer';
 
 export interface MainVideoPlayerProps {
   videoSource: string;
@@ -182,6 +181,42 @@ export function MainVideoPlayer({ videoSource }: MainVideoPlayerProps) {
     setIsFullscreen(typeof fullscreenUpdate === 'number' ? fullscreenUpdate < 2 : false);
   }, []);
 
+  // Probe the video source to help diagnose format/content-type issues on Android (ExoPlayer)
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async (url: string) => {
+      try {
+        console.log('[MainVideoPlayer] Probing URL:', url);
+        // Try a HEAD first (may be blocked by some servers)
+        try {
+          const head = await fetch(url, { method: 'HEAD' });
+          console.log('[MainVideoPlayer] HEAD status', head.status, 'content-type', head.headers.get('content-type'));
+        } catch (e) {
+          console.log('[MainVideoPlayer] HEAD failed:', (e as Error).message);
+        }
+
+        // Fetch the first chunk to inspect content (use Range if server supports it)
+        try {
+          const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-8191' } });
+          console.log('[MainVideoPlayer] GET status', res.status, 'content-type', res.headers.get('content-type'));
+          const text = await res.text();
+          if (!cancelled) {
+            console.log('[MainVideoPlayer] probe snippet:', text.slice(0, 512));
+          }
+        } catch (e) {
+          console.log('[MainVideoPlayer] GET probe failed:', (e as Error).message);
+        }
+      } catch (e) {
+        console.log('[MainVideoPlayer] probe overall failed:', (e as Error).message);
+      }
+    };
+
+    if (videoSource) probe(videoSource);
+    return () => {
+      cancelled = true;
+    };
+  }, [videoSource]);
+
   // Helpers to safely extract duration and position
   const durationMillis =
     (status && status.isLoaded && (status as AVPlaybackStatusSuccess).durationMillis) || 0;
@@ -197,7 +232,7 @@ export function MainVideoPlayer({ videoSource }: MainVideoPlayerProps) {
         }}
         style={styles.video} // Changed: removed dynamic width/height
         source={{ uri: videoSource }}
-        resizeMode={ResizeMode.COVER}
+        resizeMode="cover"
         shouldPlay={false}
         isLooping
         onPlaybackStatusUpdate={onPlaybackStatusUpdate}

@@ -1,4 +1,5 @@
 import { updateStreakForContext } from '@/lib/streaks/streakManager';
+import { notifyPush } from '@/lib/pushApi';
 
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
@@ -7,12 +8,16 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { addDoc, collection, serverTimestamp, Timestamp, doc, getDoc } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
 import { Alert, Image, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import ScreenWrapper from '../components/ScreenWrapper';
 import { firestore } from '../constants/firebase';
 import { supabase, supabaseConfigured } from '../constants/supabase';
 import { useUser } from '../hooks/use-user';
 
 export default function StoryUpload() {
+  const insets = useSafeAreaInsets();
   const [image, setImage] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [caption, setCaption] = useState('');
@@ -46,7 +51,18 @@ export default function StoryUpload() {
       });
 
       if (!result.canceled) {
-        setImage(result.assets[0].uri);
+        const uri = result.assets[0].uri;
+        if (uri.startsWith('file://')) {
+          // Copy the image to a safe location to avoid Android cache issues
+          const safeDir = FileSystem.documentDirectory + 'uploads/';
+          await FileSystem.makeDirectoryAsync(safeDir, { intermediates: true });
+          const fileName = `picked-${Date.now()}.jpg`;
+          const safeUri = safeDir + fileName;
+          await FileSystem.copyAsync({ from: uri, to: safeUri });
+          setImage(safeUri);
+        } else {
+          setImage(uri);
+        }
       }
     } catch (error) {
       console.error('Error picking image:', error);
@@ -67,25 +83,13 @@ export default function StoryUpload() {
     try {
       setIsUploading(true);
 
-      let finalUri = image;
-      if (image.startsWith('file://')) {
-        // Copy the image to a temporary location to avoid Android cache issues
-        const tempDir = FileSystem.cacheDirectory + 'temp/';
-        await FileSystem.makeDirectoryAsync(tempDir, { intermediates: true });
-        const tempFileName = `temp-image-${Date.now()}.jpg`;
-        const tempUri = tempDir + tempFileName;
-        await FileSystem.copyAsync({ from: image, to: tempUri });
-
-        const manipResult = await manipulateAsync(
-          tempUri,
-          [{ resize: { width: 900 } }],
-          { compress: 0.7, format: SaveFormat.JPEG }
-        );
-        finalUri = manipResult.uri;
-
-        // Clean up temp file
-        await FileSystem.deleteAsync(tempUri, { idempotent: true });
-      }
+      // Manipulate the image (resize and compress)
+      const manipResult = await manipulateAsync(
+        image,
+        [{ resize: { width: 900 } }],
+        { compress: 0.7, format: SaveFormat.JPEG }
+      );
+      const finalUri = manipResult.uri;
 
       const base64Data = await FileSystem.readAsStringAsync(finalUri, { encoding: 'base64' });
       const binary = atob(base64Data);
@@ -117,6 +121,9 @@ export default function StoryUpload() {
         createdAt: serverTimestamp(),
         expiresAt,
       });
+
+      // Push notify followers
+      void notifyPush({ kind: 'story', storyId: newStoryDoc.id });
 
       // Notify followers
       const profileRef = doc(firestore, 'users', effectiveUser.uid);
@@ -175,93 +182,210 @@ export default function StoryUpload() {
   };
 
   return (
-    <View style={styles.container}>
+    <ScreenWrapper style={styles.wrapper}>
       <LinearGradient
         colors={['#e50914', '#150a13', '#05060f']}
         start={[0, 0]}
         end={[1, 1]}
-        style={StyleSheet.absoluteFillObject}
+        style={styles.gradient}
       />
-      <ScrollView contentContainerStyle={styles.inner}>
-        <TouchableOpacity style={styles.pickCard} onPress={pickImage} activeOpacity={0.9}>
+      <LinearGradient
+        colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.1, y: 0 }}
+        end={{ x: 0.9, y: 1 }}
+        style={styles.bgOrbPrimary}
+      />
+      <LinearGradient
+        colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.8, y: 0 }}
+        end={{ x: 0.2, y: 1 }}
+        style={styles.bgOrbSecondary}
+      />
+
+      <View style={styles.container}>
+        <View style={[styles.headerWrap, { marginTop: Platform.OS === 'ios' ? Math.max(12, insets.top + 6) : 12 }]}>
           <LinearGradient
-            colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.9)']}
+            colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={StyleSheet.absoluteFillObject}
+            style={styles.headerGlow}
           />
-          <Text style={styles.pickTitle}>{image ? 'Change story image' : 'Pick story image'}</Text>
-          <Text style={styles.pickSubtitle}>Choose a photo from your gallery</Text>
-        </TouchableOpacity>
-
-        {image && (
-          <View style={styles.previewWrap}>
-            <Image source={{ uri: image }} style={styles.image} />
-            {overlayText ? (
-              <View style={styles.overlayTextChip}>
-                <Text style={styles.overlayTextPreview}>{overlayText}</Text>
-              </View>
-            ) : null}
+          <View style={styles.headerBar}>
+            <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} accessibilityLabel="Back">
+              <Ionicons name="chevron-back" size={22} color="#fff" />
+            </TouchableOpacity>
+            <View style={styles.headerTitleWrap}>
+              <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">Share to stories</Text>
+              <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">New Story</Text>
+            </View>
+            <View style={styles.iconBtnPlaceholder} />
           </View>
-        )}
-
-        <View style={styles.inputsWrap}>
-          <Text style={styles.label}>Overlay text (supports emojis)</Text>
-          <TextInput
-            style={styles.textInput}
-            placeholder="Add a short phrase on top of your story…"
-            placeholderTextColor="rgba(255,255,255,0.5)"
-            value={overlayText}
-            onChangeText={setOverlayText}
-          />
-
-          <Text style={[styles.label, { marginTop: 12 }]}>Caption</Text>
-          <TextInput
-            style={[styles.textInput, styles.captionInput]}
-            placeholder="Write a caption for your story…"
-            placeholderTextColor="rgba(255,255,255,0.5)"
-            multiline
-            value={caption}
-            onChangeText={setCaption}
-          />
         </View>
 
-        <TouchableOpacity
-          style={[styles.uploadButton, !image && styles.uploadButtonDisabled]}
-          disabled={!image || isUploading}
-          onPress={handleUpload}
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: 140 + Math.max(0, insets.bottom) }]}
         >
-          <LinearGradient
-            colors={['#ff5f6d', '#e50914']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.uploadGradient}
+          <TouchableOpacity style={styles.pickCard} onPress={pickImage} activeOpacity={0.9}>
+            <LinearGradient
+              colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.9)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={StyleSheet.absoluteFillObject}
+            />
+            <Text style={styles.pickTitle}>{image ? 'Change story image' : 'Pick story image'}</Text>
+            <Text style={styles.pickSubtitle}>Choose a photo from your gallery</Text>
+          </TouchableOpacity>
+
+          {image && (
+            <View style={styles.previewWrap}>
+              <Image source={{ uri: image }} style={styles.image} />
+              {overlayText ? (
+                <View style={styles.overlayTextChip}>
+                  <Text style={styles.overlayTextPreview} numberOfLines={2} ellipsizeMode="tail">
+                    {overlayText}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          )}
+
+          <View style={styles.inputsWrap}>
+            <Text style={styles.label}>Overlay text</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="Add a short phrase on top of your story…"
+              placeholderTextColor="rgba(255,255,255,0.5)"
+              value={overlayText}
+              onChangeText={setOverlayText}
+              returnKeyType="done"
+            />
+
+            <Text style={[styles.label, { marginTop: 12 }]}>Caption</Text>
+            <TextInput
+              style={[styles.textInput, styles.captionInput]}
+              placeholder="Write a caption for your story…"
+              placeholderTextColor="rgba(255,255,255,0.5)"
+              multiline
+              value={caption}
+              onChangeText={setCaption}
+            />
+          </View>
+        </ScrollView>
+
+        <View style={[styles.bottomBar, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
+          <TouchableOpacity
+            style={[styles.uploadButton, (!image || isUploading) && styles.uploadButtonDisabled]}
+            disabled={!image || isUploading}
+            onPress={handleUpload}
+            activeOpacity={0.92}
           >
-            <Text style={styles.uploadText}>
-              {isUploading ? 'Uploading…' : 'Post Story'}
-            </Text>
-          </LinearGradient>
-        </TouchableOpacity>
-      </ScrollView>
-    </View>
+            <LinearGradient
+              colors={['#ff8a00', '#e50914']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.uploadGradient}
+            >
+              <Text style={styles.uploadText}>{isUploading ? 'Uploading…' : 'Post Story'}</Text>
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </ScreenWrapper>
   );
 }
 
 const styles = StyleSheet.create({
+  wrapper: {
+    paddingTop: 0,
+  },
+  gradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 360,
+    height: 360,
+    borderRadius: 180,
+    top: -60,
+    left: -60,
+    opacity: 0.6,
+    transform: [{ rotate: '15deg' }],
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    bottom: -90,
+    right: -40,
+    opacity: 0.55,
+    transform: [{ rotate: '-12deg' }],
+  },
   container: {
     flex: 1,
   },
-  inner: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 40,
+  headerWrap: {
+    marginHorizontal: 12,
+    marginBottom: 12,
+    borderRadius: 18,
+    overflow: 'hidden',
+  },
+  headerGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.7,
+  },
+  headerBar: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingBottom: 40,
+    justifyContent: 'space-between',
+  },
+  headerTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  headerEyebrow: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    letterSpacing: 0.6,
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  iconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  iconBtnPlaceholder: {
+    width: 40,
+    height: 40,
+  },
+  scrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 6,
   },
   pickCard: {
     width: '100%',
     borderRadius: 18,
-    paddingVertical: 18,
+    paddingVertical: 16,
     paddingHorizontal: 16,
     overflow: 'hidden',
     borderWidth: 1,
@@ -349,5 +473,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
+  },
+  bottomBar: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 0,
+    paddingTop: 10,
   },
 });

@@ -1,172 +1,168 @@
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import {
-  StyleSheet,
-  View,
-  Text,
-  ScrollView,
-  TouchableOpacity,
-  Platform,
-  Animated,
-  Image,
-  Easing,
-} from 'react-native';
-import { Ionicons, FontAwesome } from '@expo/vector-icons';
-import { Link, useRouter, useFocusEffect } from 'expo-router';
-import { doc, getDoc } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
-import { LinearGradient } from 'expo-linear-gradient';
-
-import { API_KEY, API_BASE_URL, IMAGE_BASE_URL } from '../../constants/api';
-import ScreenWrapper from '../../components/ScreenWrapper';
-import Story from '../../components/Story';
-import FeaturedMovie from '../../components/FeaturedMovie';
-import SongList from '../../components/SongList';
-import MovieList from '../../components/MovieList';
-import { Media, Genre } from '../../types/index';
-import { authPromise, firestore } from '../../constants/firebase';
+import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { onAuthStateChanged } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Animated,
+  Easing,
+  Image,
+  InteractionManager,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import FeaturedMovie from '../../components/FeaturedMovie';
+import MovieList from '../../components/MovieList';
+import MovieTrailerCarousel from '../../components/MovieTrailerCarousel';
+import ScreenWrapper from '../../components/ScreenWrapper';
+import SongList from '../../components/SongList';
+import Story from '../../components/Story';
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../constants/api';
+import { authPromise, firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
-import { useAccent } from '../components/AccentContext';
-import { buildProfileScopedKey } from '../../lib/profileStorage';
+import AdBanner from '../../components/ads/AdBanner';
+import { pushWithOptionalInterstitial } from '../../lib/ads/navigate';
+import { getFavoriteGenre, type FavoriteGenre } from '../../lib/favoriteGenreStorage';
 import { useSubscription } from '../../providers/SubscriptionProvider';
+import { Media } from '../../types/index';
+import { useAccent } from '../components/AccentContext';
+import { onConversationsUpdate, type Conversation } from '../messaging/controller';
+import InAppBanner from './movies/components/InAppBanner';
+import LoadingSkeleton from './movies/components/LoadingSkeleton';
+import { useMoviesData } from './movies/hooks/useMoviesData';
 
-const shuffleArray = <T,>(array: T[] | undefined): T[] => {
-  if (!array) return [];
-  const arr = [...array];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-};
-
-const KIDS_GENRE_IDS = [10751, 16, 10762];
-
-const LoadingSkeleton = () => (
-  <View style={styles.skeletonContainer}>
-    {/* Glassy header hero */}
-    <View style={[styles.skeletonBlock, styles.skeletonHeader]}>
-      <View style={styles.skeletonHeaderLeft}>
-        <View style={styles.skeletonAccentDot} />
-        <View>
-          <View style={styles.skeletonLineShort} />
-          <View style={[styles.skeletonLine, { width: '70%', marginTop: 6 }]} />
-        </View>
-      </View>
-      <View style={styles.skeletonIconRow} />
-    </View>
-
-    {/* Meta pills under header */}
-    <View style={[styles.skeletonBlock, styles.skeletonMetaPills]}>
-      <View style={styles.skeletonPill} />
-      <View style={styles.skeletonPill} />
-      <View style={[styles.skeletonPill, { width: 80 }]} />
-    </View>
-
-    {/* Stories strip */}
-    <View style={[styles.skeletonBlock, styles.skeletonStory]}>
-      <View style={styles.skeletonStoryRow}>
-        <View style={styles.skeletonStoryAvatar} />
-        <View style={styles.skeletonStoryAvatar} />
-        <View style={styles.skeletonStoryAvatar} />
-        <View style={styles.skeletonStoryAvatar} />
-      </View>
-    </View>
-
-    {/* Filter chips + browse-by-genre row */}
-    <View style={[styles.skeletonBlock, styles.skeletonFilters]}>
-      <View style={styles.skeletonChipRow}>
-        <View style={styles.skeletonChip} />
-        <View style={styles.skeletonChip} />
-        <View style={styles.skeletonChip} />
-        <View style={[styles.skeletonChip, { width: 70 }]} />
-      </View>
-      <View style={[styles.skeletonLineShort, { marginTop: 10, width: 120 }]} />
-    </View>
-
-    {/* Featured movie card */}
-    <View style={[styles.skeletonBlock, styles.skeletonFeatured]}>
-      <View style={styles.skeletonFeaturedPoster} />
-      <View style={styles.skeletonFeaturedMeta}>
-        <View style={styles.skeletonLineLarge} />
-        <View style={[styles.skeletonLine, { width: '60%', marginTop: 6 }]} />
-        <View style={styles.skeletonPillRow}>
-          <View style={styles.skeletonPill} />
-          <View style={styles.skeletonPill} />
-        </View>
-      </View>
-    </View>
-
-    {/* Song list / horizontal carousels */}
-    <View style={[styles.skeletonBlock, styles.skeletonList]}>
-      <View style={styles.skeletonLineShort} />
-      <View style={styles.skeletonCarouselRow}>
-        <View style={styles.skeletonPosterSmall} />
-        <View style={styles.skeletonPosterSmall} />
-        <View style={styles.skeletonPosterSmall} />
-      </View>
-    </View>
-
-    {/* Extra movie rows */}
-    <View style={[styles.skeletonBlock, styles.skeletonListRow]}>
-      <View style={styles.skeletonLineShort} />
-      <View style={styles.skeletonRow} />
-    </View>
-    <View style={[styles.skeletonBlock, styles.skeletonListRow]}>
-      <View style={styles.skeletonLineShort} />
-      <View style={styles.skeletonRow} />
-    </View>
-  </View>
-);
+const PULSE_PALETTES: [string, string][] = [
+  ['#ff9966', '#ff5e62'],
+  ['#70e1f5', '#ffd194'],
+  ['#c471f5', '#fa71cd'],
+];
 
 const HomeScreen: React.FC = () => {
   const { currentPlan } = useSubscription();
-  const [trending, setTrending] = useState<Media[]>([]);
-  const [movieReels, setMovieReels] = useState<Media[]>([]);
-  const [recommended, setRecommended] = useState<Media[]>([]);
-  const [songs, setSongs] = useState<Media[]>([]);
-  const [trendingMoviesOnly, setTrendingMoviesOnly] = useState<Media[]>([]);
-  const [trendingTvOnly, setTrendingTvOnly] = useState<Media[]>([]);
-  const [genres, setGenres] = useState<Genre[]>([]);
-  const [featuredMovie, setFeaturedMovie] = useState<Media | null>(null);
-  const [stories, setStories] = useState<any[]>([]);
-  const [storyIndex, setStoryIndex] = useState(0);
-  const [netflix, setNetflix] = useState<Media[]>([]);
-  const [amazon, setAmazon] = useState<Media[]>([]);
-  const [hbo, setHbo] = useState<Media[]>([]);
   const [accountName, setAccountName] = useState('watcher');
+  const [userId, setUserId] = useState<string | null>(null);
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [isKidsProfile, setIsKidsProfile] = useState(false);
   const [profileReady, setProfileReady] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [continueWatching, setContinueWatching] = useState<Media[]>([]);
-  const [lastWatched, setLastWatched] = useState<Media | null>(null);
   const [activeFilter, setActiveFilter] = useState<'All' | 'TopRated' | 'New' | 'ForYou'>('All');
   const [activeGenreId, setActiveGenreId] = useState<number | null>(null);
+  const [favoriteGenre, setFavoriteGenre] = useState<FavoriteGenre | null>(null);
+  const [favoriteGenreMovies, setFavoriteGenreMovies] = useState<Media[]>([]);
+  const [favoriteGenreLoading, setFavoriteGenreLoading] = useState(false);
   const [fabExpanded, setFabExpanded] = useState(false);
-
-  const router = useRouter();
   const [previewVisible, setPreviewVisible] = useState(false);
   const previewTranslate = useRef(new Animated.Value(320)).current;
+  const [storyIndex, setStoryIndex] = useState(0);
+  const [unreadMessageCount, setUnreadMessageCount] = useState(0);
 
-  const filterForKids = useCallback(
-    (items: Media[] | undefined | null): Media[] => {
-      if (!items || items.length === 0) {
-        return [];
-      }
-      if (!isKidsProfile) {
-        return items;
-      }
-      return items.filter((item) => {
-        const ids = (item.genre_ids || []) as number[];
-        const hasKidsGenre = ids.some((id) => KIDS_GENRE_IDS.includes(id));
-        return !item.adult && hasKidsGenre;
+  // Use the custom hook for data fetching
+  const {
+    trending,
+    movieReels,
+    movieTrailers,
+    recommended,
+    songs,
+    trendingMoviesOnly,
+    trendingTvOnly,
+    genres,
+    featuredMovie,
+    setFeaturedMovie,
+    stories,
+    setStories,
+    netflix,
+    amazon,
+    hbo,
+    loading,
+    error,
+    continueWatching,
+    lastWatched,
+    filterForKids,
+  } = useMoviesData(activeProfileId, isKidsProfile, profileReady);
+
+  const router = useRouter();
+
+  const navInFlightRef = useRef(false);
+  const deferNav = useCallback((action: () => void) => {
+    if (navInFlightRef.current) return;
+    navInFlightRef.current = true;
+    requestAnimationFrame(() => {
+      InteractionManager.runAfterInteractions(() => {
+        try {
+          action();
+        } finally {
+          navInFlightRef.current = false;
+        }
+      });
+    });
+  }, []);
+
+  // notification queue (toasts)
+  type ToastItem = {
+    id: string;
+    message: string;
+    actionLabel?: string;
+    action?: () => void;
+    duration?: number;
+  };
+
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [lastToastTime, setLastToastTime] = useState<number>(0);
+  const TOAST_COOLDOWN_MS = 3 * 60 * 1000; // 3 minutes
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearToastTimer = useCallback(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+  }, []);
+
+  const dismissToast = useCallback(
+    (id?: string) => {
+      clearToastTimer();
+      setToasts((prev) => {
+        if (!id) return [];
+        return prev.filter((item) => item.id !== id);
       });
     },
-    [isKidsProfile],
+    [clearToastTimer],
   );
+
+  const pushToast = useCallback(
+    (message: string, actionLabel?: string, action?: () => void, duration = 5000) => {
+      const now = Date.now();
+      const timeSinceLastToast = now - lastToastTime;
+
+      if (timeSinceLastToast < TOAST_COOLDOWN_MS) {
+        console.log(
+          `Toast skipped - cooldown active. ${Math.ceil((TOAST_COOLDOWN_MS - timeSinceLastToast) / 1000)}s remaining`,
+        );
+        return;
+      }
+
+      setLastToastTime(now);
+      const id = `${now}-${Math.random().toString(36).slice(2, 9)}`;
+      const item: ToastItem = { id, message, actionLabel, action, duration };
+      clearToastTimer();
+      setToasts([item]);
+
+      toastTimerRef.current = setTimeout(() => {
+        dismissToast(id);
+      }, duration);
+    },
+    [TOAST_COOLDOWN_MS, clearToastTimer, dismissToast, lastToastTime],
+  );
+
+  useEffect(() => clearToastTimer, [clearToastTimer]);
+
+  
 
   useEffect(() => {
     let unsubAuth: (() => void) | null = null;
@@ -177,6 +173,7 @@ const HomeScreen: React.FC = () => {
         // initial fetch
         const user = auth.currentUser;
         if (user) {
+          setUserId(user.uid);
           try {
             const userDoc = await getDoc(doc(firestore, 'users', user.uid));
             if (userDoc.exists()) {
@@ -190,6 +187,7 @@ const HomeScreen: React.FC = () => {
         // subscribe to auth changes after auth is ready
         unsubAuth = onAuthStateChanged(auth, async (u) => {
           if (u) {
+            setUserId(u.uid);
             try {
               const userDoc = await getDoc(doc(firestore, 'users', u.uid));
               if (userDoc.exists()) {
@@ -202,6 +200,7 @@ const HomeScreen: React.FC = () => {
               setAccountName('watcher');
             }
           } else {
+            setUserId(null);
             setAccountName('watcher');
           }
         });
@@ -217,54 +216,54 @@ const HomeScreen: React.FC = () => {
     };
   }, []);
 
-  const homeFeedCacheScope = useMemo(
-    () => `${activeProfileId ?? 'global'}${isKidsProfile ? ':kids' : ''}`,
-    [activeProfileId, isKidsProfile],
-  );
-  const homeFeedCacheKey = useMemo(
-    () => `homeFeedCache:${homeFeedCacheScope}`,
-    [homeFeedCacheScope],
-  );
-
-  const buildKidsUrl = useCallback(
-    (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
-      if (!isKidsProfile) return input;
-      const url = new URL(input);
-      url.searchParams.set('include_adult', 'false');
-      url.searchParams.set('with_genres', '10751');
-      if (type === 'movie' || type === 'discover') {
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'G');
-      } else if (type === 'tv') {
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'TV-Y');
-      } else if (type === 'all') {
-        // when mixing media, prefer the most restrictive rating
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'TV-Y');
+  useFocusEffect(
+    useCallback(() => {
+      if (!userId) {
+        setUnreadMessageCount(0);
+        return;
       }
-      return url.toString();
-    },
-    [isKidsProfile],
-  );
 
-  const fetchWithKids = useCallback(
-    async (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
-      const response = await fetch(buildKidsUrl(input, type));
-      return response.json();
-    },
-    [buildKidsUrl],
-  );
+      let alive = true;
+      const unsub = onConversationsUpdate((conversations: Conversation[]) => {
+        if (!alive) return;
+        const uid = userId;
+        if (!uid) {
+          setUnreadMessageCount(0);
+          return;
+        }
 
-  const fetchProviderMovies = useCallback(
-    async (providerId: number): Promise<Media[]> => {
-      const url = `${API_BASE_URL}/discover/movie?api_key=${API_KEY}&with_watch_providers=${providerId}&watch_region=US&with_watch_monetization_types=flatrate`;
-      const json = await fetchWithKids(url, 'discover');
-      return json?.results || [];
-    },
-    [fetchWithKids],
-  );
+        const totalUnread = conversations.reduce((acc, c) => {
+          const hasLastMessage = Boolean(c.lastMessage);
+          const lastSenderIsNotMe = Boolean(c.lastMessageSenderId) && c.lastMessageSenderId !== uid;
 
+          const lastRead = (c as any)?.lastReadAtBy?.[uid];
+          const lastReadMs =
+            lastRead && typeof lastRead?.toMillis === 'function' ? lastRead.toMillis() : null;
+
+          const updatedAt = (c as any)?.updatedAt;
+          const updatedAtMs =
+            updatedAt && typeof updatedAt?.toMillis === 'function'
+              ? updatedAt.toMillis()
+              : typeof updatedAt === 'number'
+                ? updatedAt
+                : null;
+
+          const readCoversLatest =
+            lastReadMs && updatedAtMs ? lastReadMs >= updatedAtMs - 500 /* small clock skew */ : false;
+
+          const unread = hasLastMessage && lastSenderIsNotMe && (lastReadMs ? !readCoversLatest : true);
+          return acc + (unread ? 1 : 0);
+        }, 0);
+
+        setUnreadMessageCount(totalUnread);
+      });
+
+      return () => {
+        alive = false;
+        unsub?.();
+      };
+    }, [userId]),
+  );
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
@@ -306,212 +305,63 @@ const HomeScreen: React.FC = () => {
     }, [])
   );
 
-  const loadWatchHistory = useCallback(() => {
-    let isActive = true;
-    const run = async () => {
-      if (!profileReady) {
-        if (isActive) {
-          setContinueWatching([]);
-          setLastWatched(null);
-        }
-        return;
-      }
-      try {
-        const key = buildProfileScopedKey('watchHistory', activeProfileId);
-        const stored = await AsyncStorage.getItem(key);
-        if (!isActive) return;
-        if (stored) {
-          const parsed: Media[] = JSON.parse(stored);
-          setContinueWatching(parsed);
-          setLastWatched(parsed[0] || null);
-        } else {
-          setContinueWatching([]);
-          setLastWatched(null);
-        }
-      } catch (err) {
-        if (isActive) {
-          console.error('Failed to load watch history', err);
-          setContinueWatching([]);
-          setLastWatched(null);
-        }
-      }
-    };
-    run();
-    return () => {
-      isActive = false;
-    };
-  }, [activeProfileId, profileReady]);
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
 
-  useFocusEffect(loadWatchHistory);
+      InteractionManager.runAfterInteractions(() => {
+        void (async () => {
+          const stored = await getFavoriteGenre();
+          if (!alive) return;
+          setFavoriteGenre(stored);
+        })();
+      });
+
+      return () => {
+        alive = false;
+      };
+    }, [activeProfileId]),
+  );
 
   useEffect(() => {
-    if (!profileReady) return;
-    const loadFromCache = async () => {
+    let cancelled = false;
+
+    if (!profileReady || !favoriteGenre?.id) {
+      setFavoriteGenreMovies([]);
+      setFavoriteGenreLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const run = async () => {
+      setFavoriteGenreLoading(true);
       try {
-        const cached = await AsyncStorage.getItem(homeFeedCacheKey);
-        if (!cached) return false;
+        const withGenres = isKidsProfile
+          ? favoriteGenre.id === 10751
+            ? '10751'
+            : `10751,${favoriteGenre.id}`
+          : String(favoriteGenre.id);
 
-        const parsed = JSON.parse(cached) as {
-          netflix: Media[];
-          amazon: Media[];
-          hbo: Media[];
-          movieStoriesData: any;
-          tvStoriesData: any;
-          trendingData: any;
-          movieReelsData: any;
-          recommendedData: any;
-          songsData: any;
-          genresData: any;
-        };
-
-        const cachedMovieStories = filterForKids(
-          (parsed.movieStoriesData?.results || []) as Media[],
-        );
-        const cachedTvStories = filterForKids((parsed.tvStoriesData?.results || []) as Media[]);
-        const combinedStories = [...cachedMovieStories, ...cachedTvStories].map((item: any) => ({
-          id: item.id,
-          title: item.title || item.name || 'Untitled',
-          image: item.poster_path
-            ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
-            : null,
-          media_type: item.media_type,
-        }));
-
-        const trendingResults = filterForKids((parsed.trendingData?.results || []) as Media[]);
-        const netflixSafe = filterForKids((parsed.netflix as Media[]) || []);
-        const amazonSafe = filterForKids((parsed.amazon as Media[]) || []);
-        const songsSafe = filterForKids((parsed.songsData?.results || []) as Media[]);
-        const movieReelsSafe = filterForKids((parsed.movieReelsData?.results || []) as Media[]);
-        const recommendedSafe = filterForKids((parsed.recommendedData?.results || []) as Media[]);
-        const hboSource =
-          parsed.hbo && parsed.hbo.length > 0
-            ? (parsed.hbo as Media[])
-            : trendingResults.filter((m) => m.media_type === 'tv');
-        const hboSafe = filterForKids(hboSource);
-
-        setNetflix(netflixSafe);
-        setAmazon(amazonSafe);
-        setHbo(hboSafe);
-        setStories(shuffleArray(combinedStories));
-        setTrending(trendingResults);
-        setFeaturedMovie(trendingResults[0] || null);
-        setTrendingMoviesOnly(cachedMovieStories);
-        setTrendingTvOnly(cachedTvStories);
-        setSongs(songsSafe);
-        setMovieReels(movieReelsSafe);
-        setRecommended(recommendedSafe);
-        setGenres((parsed.genresData?.genres || []) as Genre[]);
-
-        setLoading(false);
-        return true;
+        const url = `${API_BASE_URL}/discover/movie?api_key=${API_KEY}&with_genres=${withGenres}&sort_by=popularity.desc&include_adult=false`;
+        const res = await fetch(url);
+        const json = await res.json();
+        const results = (json?.results || []) as Media[];
+        if (!cancelled) setFavoriteGenreMovies(results);
       } catch (err) {
-        console.error('Failed to load home feed cache', err);
-        return false;
-      }
-    };
-
-    const fetchData = async () => {
-      setError(null);
-      try {
-        const [
-          netflixMovies,
-          amazonMovies,
-          hboMovies,
-          movieStoriesData,
-          tvStoriesData,
-          trendingData,
-          movieReelsData,
-          recommendedData,
-          songsData,
-          genresData,
-        ] = await Promise.all([
-          fetchProviderMovies(8),
-          fetchProviderMovies(9),
-          fetchProviderMovies(384),
-          fetchWithKids(`${API_BASE_URL}/trending/movie/day?api_key=${API_KEY}`, 'movie'),
-          fetchWithKids(`${API_BASE_URL}/trending/tv/day?api_key=${API_KEY}`, 'tv'),
-          fetchWithKids(`${API_BASE_URL}/trending/all/day?api_key=${API_KEY}`, 'all'),
-          fetchWithKids(`${API_BASE_URL}/movie/upcoming?api_key=${API_KEY}`, 'movie'),
-          fetchWithKids(`${API_BASE_URL}/movie/top_rated?api_key=${API_KEY}`, 'movie'),
-          fetchWithKids(`${API_BASE_URL}/movie/popular?api_key=${API_KEY}`, 'movie'),
-          fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`).then((r) => r.json()),
-        ]);
-
-        const movieStoriesList = filterForKids((movieStoriesData?.results || []) as Media[]);
-        const tvStoriesList = filterForKids((tvStoriesData?.results || []) as Media[]);
-        const combinedStories = [...movieStoriesList, ...tvStoriesList].map((item: any) => ({
-          id: item.id,
-          title: item.title || item.name || 'Untitled',
-          image: item.poster_path
-            ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
-            : null,
-          media_type: item.media_type,
-        }));
-
-        const trendingRaw = (trendingData?.results || []) as Media[];
-        const trendingResults = filterForKids(trendingRaw);
-        const netflixSafe = filterForKids(netflixMovies || []);
-        const amazonSafe = filterForKids(amazonMovies || []);
-        const songsSafe = filterForKids((songsData?.results || []) as Media[]);
-        const movieReelsSafe = filterForKids((movieReelsData?.results || []) as Media[]);
-        const recommendedSafe = filterForKids((recommendedData?.results || []) as Media[]);
-        const hboSource =
-          hboMovies && hboMovies.length > 0
-            ? hboMovies
-            : trendingRaw.filter((m) => m.media_type === 'tv');
-        const hboSafe = filterForKids(hboSource);
-
-        setNetflix(netflixSafe || []);
-        setAmazon(amazonSafe || []);
-        setHbo(hboSafe);
-        setStories(shuffleArray(combinedStories));
-        setTrending(trendingResults);
-        setFeaturedMovie(trendingResults[0] || null);
-        setTrendingMoviesOnly(movieStoriesList);
-        setTrendingTvOnly(tvStoriesList);
-        setSongs(songsSafe);
-        setMovieReels(movieReelsSafe);
-        setRecommended(recommendedSafe);
-        setGenres((genresData?.genres || []) as Genre[]);
-
-        try {
-          await AsyncStorage.setItem(
-            homeFeedCacheKey,
-            JSON.stringify({
-              netflix: netflixSafe,
-              amazon: amazonSafe,
-              hbo: hboSafe,
-              movieStoriesData,
-              tvStoriesData,
-              trendingData,
-              movieReelsData,
-              recommendedData,
-              songsData,
-              genresData,
-            })
-          );
-        } catch (err) {
-          console.error('Failed to write home feed cache', err);
-        }
-      } catch (error) {
-        console.error('Error fetching data:', error);
-        setError('Failed to load content. Please try again later.');
+        if (!cancelled) setFavoriteGenreMovies([]);
       } finally {
-        setLoading(false);
+        if (!cancelled) setFavoriteGenreLoading(false);
       }
     };
 
-    const init = async () => {
-      setLoading(true);
-      const hadCache = await loadFromCache();
-      fetchData();
-      if (!hadCache) {
-        return;
-      }
+    void run();
+    return () => {
+      cancelled = true;
     };
+  }, [favoriteGenre?.id, isKidsProfile, profileReady]);
 
-    init();
-  }, [fetchProviderMovies, fetchWithKids, homeFeedCacheKey, filterForKids, profileReady]);
+  
 
   const handleOpenDetails = useCallback(
     (item: Media) => {
@@ -519,6 +369,42 @@ const HomeScreen: React.FC = () => {
       router.push(`/details/${item.id}?mediaType=${mediaType}`);
     },
     [router]
+  );
+
+  const handleResumePlayback = useCallback(
+    (item: Media) => {
+      const mediaType = item.media_type === 'tv' ? 'tv' : 'movie';
+      const resumeMillis = item.watchProgress?.positionMillis;
+      const releaseDate = (item.release_date || item.first_air_date || '') as string;
+
+      const params = {
+        title: item.title || item.name || 'Now Playing',
+        mediaType,
+        tmdbId: String(item.id),
+        imdbId: item.imdb_id ?? undefined,
+        posterPath: item.poster_path ?? undefined,
+        backdropPath: item.backdrop_path ?? undefined,
+        overview: item.overview ?? undefined,
+        releaseDate: releaseDate || undefined,
+        genreIds: Array.isArray(item.genre_ids) ? item.genre_ids.join(',') : undefined,
+        voteAverage: typeof item.vote_average === 'number' ? item.vote_average.toString() : undefined,
+        seasonNumber: mediaType === 'tv' && typeof item.seasonNumber === 'number' ? String(item.seasonNumber) : undefined,
+        episodeNumber: mediaType === 'tv' && typeof item.episodeNumber === 'number' ? String(item.episodeNumber) : undefined,
+        seasonTitle: mediaType === 'tv' ? item.seasonTitle ?? undefined : undefined,
+        resumeMillis:
+          typeof resumeMillis === 'number' && Number.isFinite(resumeMillis) && resumeMillis > 0
+            ? String(Math.floor(resumeMillis))
+            : undefined,
+      };
+
+      pushWithOptionalInterstitial(
+        router as any,
+        currentPlan,
+        { pathname: '/video-player', params },
+        { placement: 'movies_resume', seconds: 30 },
+      );
+    },
+    [router, currentPlan],
   );
 
   const applyFilter = useCallback(
@@ -562,6 +448,22 @@ const HomeScreen: React.FC = () => {
     });
   }, [lastWatched, recommended]);
 
+  const cinematicPulse = useMemo(() => {
+    const stats = [
+      { label: 'Trending now', value: trending.length },
+      { label: 'Continue queue', value: continueWatching?.length ?? 0 },
+      { label: 'Fresh trailers', value: movieTrailers?.length ?? 0 },
+    ];
+
+    const peak = Math.max(...stats.map((s) => s.value), 1);
+
+    return stats.map((stat, index) => ({
+      ...stat,
+      progress: peak ? Math.min(1, stat.value / peak) : 0,
+      palette: PULSE_PALETTES[index % PULSE_PALETTES.length],
+    }));
+  }, [continueWatching, movieTrailers, trending.length]);
+
   // rotate featured movie every 20s
   useEffect(() => {
     if (trending.length <= 1) return;
@@ -577,6 +479,9 @@ const HomeScreen: React.FC = () => {
 
     return () => clearInterval(interval);
   }, [trending]);
+
+  // NOTE: removed automatic featured-movie toasts to avoid frequent notifications.
+  // Use `pushToast` to display important notifications from anywhere in this screen.
 
   // rotate stories in blocks of 4 every 8s
   useEffect(() => {
@@ -608,6 +513,35 @@ const HomeScreen: React.FC = () => {
     }
   };
 
+  // Beautiful love-themed toast notifications
+  useEffect(() => {
+    if (movieTrailers && movieTrailers.length > 0) {
+      pushToast(
+        `✨ Magical trailers just arrived! (${movieTrailers.length}) cinematic dreams await`,
+        'Watch Now',
+        () => {
+          if (movieTrailers[0]) router.push(`/details/${movieTrailers[0].id}?mediaType=movie`);
+        },
+        6000
+      );
+    }
+  }, [movieTrailers, pushToast, router]);
+
+  // Welcome toast for first-time users
+  useEffect(() => {
+    if (profileReady && !loading) {
+      const timer = setTimeout(() => {
+        pushToast(
+          `💖 Welcome to MovieFlix! Your cinematic journey begins with love and wonder`,
+          'Explore',
+          () => router.push('/search'),
+          8000
+        );
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [profileReady, loading, pushToast, router]);
+
   const displayedStories = stories.slice(storyIndex, storyIndex + 4);
   const showStoriesSection = !isKidsProfile && stories.length > 0;
   const trendingCount = trending.length;
@@ -617,6 +551,77 @@ const HomeScreen: React.FC = () => {
     () => getAccentFromPosterPath(featuredMovie?.poster_path),
     [featuredMovie?.poster_path]
   );
+
+  // Animation values for cinematic entrance
+  const headerFadeAnim = React.useRef(new Animated.Value(0)).current;
+  const metaRowAnim = React.useRef(new Animated.Value(0)).current;
+  const fabScaleAnim = React.useRef(new Animated.Value(0)).current;
+  const genreSectionAnim = React.useRef(new Animated.Value(0)).current;
+  const storiesAnim = React.useRef(new Animated.Value(0)).current;
+  const filtersAnim = React.useRef(new Animated.Value(0)).current;
+  const sectionsAnim = React.useRef(new Animated.Value(0)).current;
+
+  // Start animations when data loads
+  React.useEffect(() => {
+    if (profileReady && !loading) {
+      // Header content fade in
+      Animated.timing(headerFadeAnim, {
+        toValue: 1,
+        duration: 600,
+        delay: 200,
+        useNativeDriver: true,
+      }).start();
+
+      // Meta row slide up
+      Animated.timing(metaRowAnim, {
+        toValue: 1,
+        duration: 500,
+        delay: 400,
+        useNativeDriver: true,
+      }).start();
+
+      // FAB buttons scale in
+      Animated.spring(fabScaleAnim, {
+        toValue: 1,
+        tension: 50,
+        friction: 7,
+        delay: 600,
+        useNativeDriver: true,
+      }).start();
+
+      // Genre section slide up
+      Animated.timing(genreSectionAnim, {
+        toValue: 1,
+        duration: 500,
+        delay: 700,
+        useNativeDriver: true,
+      }).start();
+
+      // Stories section fade in
+      Animated.timing(storiesAnim, {
+        toValue: 1,
+        duration: 600,
+        delay: 800,
+        useNativeDriver: true,
+      }).start();
+
+      // Filters slide up
+      Animated.timing(filtersAnim, {
+        toValue: 1,
+        duration: 500,
+        delay: 900,
+        useNativeDriver: true,
+      }).start();
+
+      // Content sections stagger animation
+      Animated.timing(sectionsAnim, {
+        toValue: 1,
+        duration: 800,
+        delay: 1000,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [profileReady, loading, headerFadeAnim, metaRowAnim, fabScaleAnim, genreSectionAnim, storiesAnim, filtersAnim, sectionsAnim]);
 
   useEffect(() => {
     if (featuredAccent) {
@@ -686,8 +691,17 @@ const HomeScreen: React.FC = () => {
           style={styles.bgOrbSecondary}
         />
           <View style={styles.container}>
+            {/* Toast notification */}
+            {toasts.length > 0 && (
+              <InAppBanner
+                key={toasts[0].id}
+                item={toasts[0]}
+                accent={featuredAccent}
+                onDismiss={() => dismissToast(toasts[0].id)}
+              />
+            )}
           {/* Header (glassy hero) */}
-          <View style={styles.headerWrap}>
+          <Animated.View style={[styles.headerWrap, { opacity: headerFadeAnim }]}>
             <LinearGradient
               colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
               start={{ x: 0, y: 0 }}
@@ -698,54 +712,55 @@ const HomeScreen: React.FC = () => {
               <View style={styles.titleRow}>
                 <View style={styles.accentDot} />
                 <View>
-                  <Text style={styles.headerEyebrow}>Tonight&apos;s picks</Text>
-                  <Text style={styles.headerText}>
+                  <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">{`Tonight's picks`}</Text>
+                  <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
                     Welcome, {activeProfileName ?? accountName}
                   </Text>
                 </View>
               </View>
 
               <View style={styles.headerIcons}>
-                <Link href="/marketplace" asChild>
-                  <TouchableOpacity style={styles.iconBtn}>
+                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
                     <LinearGradient
                       colors={['#e50914', '#b20710']}
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 1 }}
                       style={styles.iconBg}
                     >
-                      <Ionicons name="storefront" size={22} color="#ffffff" style={styles.iconMargin} />
+                      <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                      {unreadMessageCount > 0 ? (
+                        <View style={styles.messageBadge}>
+                          <Text style={styles.messageBadgeText}>
+                            {unreadMessageCount > 99 ? '99+' : unreadMessageCount > 9 ? '9+' : String(unreadMessageCount)}
+                          </Text>
+                        </View>
+                      ) : null}
                     </LinearGradient>
                   </TouchableOpacity>
-                </Link>
-                <Link href="/search" asChild>
-                  <TouchableOpacity style={styles.iconBtn}>
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconBg}
-                    >
-                      <Ionicons name="search" size={22} color="#ffffff" style={styles.iconMargin} />
-                    </LinearGradient>
-                  </TouchableOpacity>
-                </Link>
 
-                <Link href="/my-list" asChild>
-                  <TouchableOpacity style={styles.iconBtn}>
+                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/marketplace'))}>
                     <LinearGradient
                       colors={['#e50914', '#b20710']}
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 1 }}
                       style={styles.iconBg}
                     >
-                      <Ionicons name="list-sharp" size={22} color="#ffffff" style={styles.iconMargin} />
+                      <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
                     </LinearGradient>
                   </TouchableOpacity>
-                </Link>
 
-                <Link href="/profile" asChild>
-                  <TouchableOpacity style={styles.iconBtn}>
+                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/social-feed'))}>
+                    <LinearGradient
+                      colors={['#e50914', '#b20710']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      <Ionicons name="camera-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                    </LinearGradient>
+                  </TouchableOpacity>
+
+                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/profile'))}>
                     <LinearGradient
                       colors={['#e50914', '#b20710']}
                       start={{ x: 0, y: 0 }}
@@ -755,11 +770,10 @@ const HomeScreen: React.FC = () => {
                       <FontAwesome name="user-circle" size={24} color="#ffffff" />
                     </LinearGradient>
                   </TouchableOpacity>
-                </Link>
               </View>
             </View>
 
-            <View style={styles.headerMetaRow}>
+            <Animated.View style={[styles.headerMetaRow, { transform: [{ translateY: metaRowAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }], opacity: metaRowAnim }]}>
               <View style={styles.metaPill}>
                 <Ionicons name="flame" size={14} color="#fff" />
                 <Text style={styles.metaText}>{trendingCount} trending</Text>
@@ -772,7 +786,25 @@ const HomeScreen: React.FC = () => {
                 <Ionicons name="star" size={14} color="#fff" />
                 <Text style={styles.metaText}>Fresh drops</Text>
               </View>
-            </View>
+            </Animated.View>
+          </Animated.View>
+
+          <View style={styles.pulseRow}>
+            {cinematicPulse.map((stat) => (
+              <LinearGradient
+                key={stat.label}
+                colors={stat.palette}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.pulseCard}
+              >
+                <Text style={styles.pulseValue}>{stat.value}</Text>
+                <Text style={styles.pulseLabel}>{stat.label}</Text>
+                <View style={styles.pulseMeter}>
+                  <View style={[styles.pulseMeterFill, { width: `${Math.max(stat.progress * 100, 8)}%` }]} />
+                </View>
+              </LinearGradient>
+            ))}
           </View>
 
           {currentPlan === 'free' && (
@@ -802,6 +834,10 @@ const HomeScreen: React.FC = () => {
             </View>
           )}
 
+          <View style={{ marginHorizontal: 12, marginBottom: 12 }}>
+            <AdBanner placement="feed" />
+          </View>
+
             <ScrollView contentContainerStyle={styles.scrollViewContent}>
               {stories.length === 0 && recommended.length === 0 && trending.length === 0 ? (
                 <View style={styles.centered}>
@@ -811,7 +847,7 @@ const HomeScreen: React.FC = () => {
                 <>
                   {/* Browse by genre above stories */}
                   {genres.length > 0 && (
-                    <View style={styles.genreSection}>
+                    <Animated.View style={[styles.genreSection, { transform: [{ translateY: genreSectionAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }], opacity: genreSectionAnim }]}>
                       <Text style={styles.genreLabel}>Browse by genre</Text>
                       <ScrollView
                         horizontal
@@ -850,17 +886,17 @@ const HomeScreen: React.FC = () => {
                           </TouchableOpacity>
                         ))}
                       </ScrollView>
-                    </View>
+                    </Animated.View>
                   )}
 
                   {showStoriesSection && (
-                    <View style={[styles.sectionBlock, styles.storiesSection]}>
+                    <Animated.View style={[styles.sectionBlock, styles.storiesSection, { opacity: storiesAnim }]}>
                       <Story stories={displayedStories} />
-                    </View>
+                    </Animated.View>
                   )}
 
                   {/* Main filter chips below stories */}
-                  <View style={styles.filterRow}>
+                  <Animated.View style={[styles.filterRow, { transform: [{ translateY: filtersAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }], opacity: filtersAnim }]}>
                     {['All', 'TopRated', 'New', 'ForYou'].map((key) => {
                       const labelMap: Record<string, string> = {
                         All: 'All',
@@ -883,185 +919,205 @@ const HomeScreen: React.FC = () => {
                         </TouchableOpacity>
                       );
                     })}
-                  </View>
+                  </Animated.View>
 
-                {featuredMovie && (
+                <Animated.View style={[{ opacity: sectionsAnim }]}>
+                  {featuredMovie && (
+                    <View style={styles.sectionBlock}>
+                      <FeaturedMovie
+                        movie={featuredMovie}
+                        getGenreNames={getGenreNames}
+                        onInfoPress={openQuickPreview}
+                      />
+                    </View>
+                  )}
+
+                  {continueWatching.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <MovieList
+                        title="Continue Watching"
+                        movies={continueWatching}
+                        onItemPress={handleResumePlayback}
+                        showProgress
+                      />
+                    </View>
+                  )}
+
+                  {lastWatched && becauseYouWatched.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <MovieList
+                        title={`Because you watched ${lastWatched.title || lastWatched.name}`}
+                        movies={becauseYouWatched}
+                        onItemPress={handleOpenDetails}
+                      />
+                    </View>
+                  )}
+
+                  {favoriteGenre && favoriteGenreMovies.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <MovieList
+                        title={
+                          favoriteGenreLoading
+                            ? `Loading ${favoriteGenre.name} picks…`
+                            : `${favoriteGenre.name} Picks`
+                        }
+                        movies={favoriteGenreMovies}
+                        onItemPress={handleOpenDetails}
+                      />
+                    </View>
+                  )}
+
                   <View style={styles.sectionBlock}>
-                    <FeaturedMovie
-                      movie={featuredMovie}
-                      getGenreNames={getGenreNames}
-                      onInfoPress={openQuickPreview}
+                    <SongList
+                      title="Songs of the Moment"
+                      songs={songs}
+                      onOpenAll={() => router.push('/songs')}
                     />
                   </View>
-                )}
 
-                {continueWatching.length > 0 && (
+                  {movieTrailers.length > 0 && (
+                    <MovieTrailerCarousel
+                      trailers={movieTrailers}
+                      onTrailerPress={handleOpenDetails}
+                    />
+                  )}
+
                   <View style={styles.sectionBlock}>
                     <MovieList
-                      title="Continue Watching"
-                      movies={continueWatching}
+                      title="Trending"
+                      movies={applyFilter(trending)}
                       onItemPress={handleOpenDetails}
-                      showProgress
                     />
                   </View>
-                )}
 
-                {lastWatched && becauseYouWatched.length > 0 && (
                   <View style={styles.sectionBlock}>
                     <MovieList
-                      title={`Because you watched ${lastWatched.title || lastWatched.name}`}
-                      movies={becauseYouWatched}
+                      title="Recommended"
+                      movies={applyFilter(recommended)}
                       onItemPress={handleOpenDetails}
                     />
                   </View>
-                )}
 
-                <View style={styles.sectionBlock}>
-                  <SongList title="Songs of the Moment" songs={songs} />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList title="Netflix Originals" movies={applyFilter(netflix)} onItemPress={handleOpenDetails} />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Movie Reels"
-                    movies={movieReels}
-                    onItemPress={(item) => {
-                      const queue = movieReels.slice(0, 20).map((m) => ({
-                        id: m.id,
-                        mediaType: m.media_type || 'movie',
-                        title: m.title || m.name || 'Reel',
-                        posterPath: m.poster_path || null,
-                      }));
-                      const listParam = encodeURIComponent(JSON.stringify(queue));
-                      router.push(
-                        `/reels/${item.id}?mediaType=${item.media_type || 'movie'}&title=${encodeURIComponent(
-                          item.title || item.name || 'Reel'
-                        )}&list=${listParam}`
-                      );
-                    }}
-                  />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList title="Amazon Prime Video" movies={applyFilter(amazon)} onItemPress={handleOpenDetails} />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Trending"
-                    movies={applyFilter(trending)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList title="HBO Max" movies={applyFilter(hbo)} onItemPress={handleOpenDetails} />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Recommended"
-                    movies={applyFilter(recommended)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
+                  {/* Extra curated rows for depth */}
+                  <View style={styles.sectionBlock}>
+                    <MovieList
+                      title="Top Movies Today"
+                      movies={applyFilter(trendingMoviesOnly)}
+                      onItemPress={handleOpenDetails}
+                    />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList title="Netflix Originals" movies={applyFilter(netflix)} onItemPress={handleOpenDetails} />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList
+                      title="Top TV Today"
+                      movies={applyFilter(trendingTvOnly)}
+                      onItemPress={handleOpenDetails}
+                    />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList title="Amazon Prime Video" movies={applyFilter(amazon)} onItemPress={handleOpenDetails} />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList
+                      title="Popular Movies"
+                      movies={applyFilter(songs)}
+                      onItemPress={handleOpenDetails}
+                    />
+                  </View>
 
-                <View style={styles.sectionBlock}>
-                  <MovieList title="HBO Max" movies={applyFilter(hbo)} onItemPress={handleOpenDetails} />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList
+                      title="Upcoming in Theaters"
+                      movies={applyFilter(movieReels)}
+                      onItemPress={handleOpenDetails}
+                    />
+                  </View>
 
-                {/* Extra curated rows for depth */}
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Top Movies Today"
-                    movies={applyFilter(trendingMoviesOnly)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
-
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Top TV Today"
-                    movies={applyFilter(trendingTvOnly)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
-
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Popular Movies"
-                    movies={applyFilter(songs)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
-
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Upcoming in Theaters"
-                    movies={applyFilter(movieReels)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
-
-                <View style={styles.sectionBlock}>
-                  <MovieList
-                    title="Top Rated Movies"
-                    movies={applyFilter(recommended)}
-                    onItemPress={handleOpenDetails}
-                  />
-                </View>
+                  <View style={styles.sectionBlock}>
+                    <MovieList
+                      title="Top Rated Movies"
+                      movies={applyFilter(recommended)}
+                      onItemPress={handleOpenDetails}
+                    />
+                  </View>
+                </Animated.View>
               </>
             )}
           </ScrollView>
 
             {/* Sub FABs */}
-            {fabExpanded && (
-              <>
-                <TouchableOpacity
-                  style={[styles.subFab, { bottom: 300 }]}
-                  onPress={() => {
-                    handleShuffle();
-                    setFabExpanded(false);
-                  }}
-                >
-                  <Ionicons name="shuffle" size={20} color="#FFFFFF" />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.subFab, { bottom: 240 }]}
-                  onPress={() => {
-                    router.push('/messaging');
-                    setFabExpanded(false);
-                  }}
-                >
-                  <Ionicons name="chatbubble-outline" size={20} color="#FFFFFF" />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.subFab, { bottom: 360 }]}
-                  onPress={() => {
-                    router.push('/watchparty');
-                    setFabExpanded(false);
-                  }}
-                >
-                  <Ionicons name="people-outline" size={20} color="#FFFFFF" />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.subFab, { bottom: 420 }]}
-                  onPress={() => {
-                    router.push('/social-feed');
-                    setFabExpanded(false);
-                  }}
-                >
-                  <Ionicons name="heart-outline" size={20} color="#FFFFFF" />
-                </TouchableOpacity>
-              </>
-            )}
+            {fabExpanded && (() => {
+              const MAIN_FAB_BOTTOM = 120;
+              const SUB_FAB_SIZE = 64;
+              const SUB_FAB_GAP = 12;
+              const firstOffset = SUB_FAB_SIZE + SUB_FAB_GAP;
+              const spacing = SUB_FAB_SIZE + SUB_FAB_GAP;
+              const items = [
+                { key: 'shuffle', icon: 'shuffle', onPress: async () => { await handleShuffle(); } },
+                { key: 'mylist', icon: 'list-sharp', onPress: () => router.push('/my-list') },
+                { key: 'search', icon: 'search', onPress: () => router.push('/search') },
+                { key: 'watchparty', icon: 'people-outline', onPress: () => router.push('/watchparty') },
+              ];
+
+              return (
+                <>
+                  {items.map((it, idx) => {
+                    const bottom = MAIN_FAB_BOTTOM + firstOffset + idx * spacing;
+                    return (
+                      <TouchableOpacity
+                        key={it.key}
+                        style={[styles.subFab, { bottom }]}
+                        onPress={() => {
+                          try {
+                            it.onPress();
+                          } finally {
+                            setFabExpanded(false);
+                          }
+                        }}
+                        activeOpacity={0.9}
+                      >
+                        <LinearGradient
+                          colors={['#ff8a00', '#e50914']}
+                          start={{ x: 0, y: 0 }}
+                          end={{ x: 1, y: 1 }}
+                          style={styles.subFabGradient}
+                        >
+                          <Ionicons name={it.icon as any} size={20} color="#FFFFFF" />
+                        </LinearGradient>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </>
+              );
+            })()}
 
             {/* Main FAB */}
-            <TouchableOpacity
-              style={[styles.fab, { bottom: 120 }]}
-              onPress={() => setFabExpanded(!fabExpanded)}
-            >
-              <Ionicons name="add" size={24} color="#FFFFFF" />
-            </TouchableOpacity>
+            <Animated.View style={[{ transform: [{ scale: fabScaleAnim }] }]} >
+              <TouchableOpacity
+                style={[styles.fab, { bottom: 120 }]}
+                onPress={() => setFabExpanded(!fabExpanded)}
+                activeOpacity={0.9}
+              >
+                <LinearGradient
+                  colors={['#ff8a00', '#e50914']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.fabGradient}
+                >
+                  <Ionicons name="add" size={24} color="#FFFFFF" />
+                </LinearGradient>
+              </TouchableOpacity>
+            </Animated.View>
 
             {previewVisible && featuredMovie && (
               <Animated.View
@@ -1187,6 +1243,9 @@ const HomeScreen: React.FC = () => {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
   },
   accentDot: {
     width: 12,
@@ -1212,6 +1271,7 @@ const HomeScreen: React.FC = () => {
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
   iconBtn: {
     marginLeft: 8,
@@ -1227,6 +1287,27 @@ const HomeScreen: React.FC = () => {
   iconBg: {
     padding: 10,
     borderRadius: 12,
+    position: 'relative',
+  },
+  messageBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 5,
+    borderRadius: 999,
+    backgroundColor: '#e50914',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(10,12,24,0.9)',
+  },
+  messageBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.2,
   },
   iconMargin: {
     marginRight: 4,
@@ -1234,8 +1315,47 @@ const HomeScreen: React.FC = () => {
   headerMetaRow: {
     flexDirection: 'row',
     gap: 10,
+    flexWrap: 'wrap',
+    rowGap: 10,
     paddingHorizontal: 6,
     paddingVertical: 10,
+  },
+  pulseRow: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 18,
+  },
+  pulseCard: {
+    flex: 1,
+    borderRadius: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  pulseValue: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  pulseLabel: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginTop: 2,
+  },
+  pulseMeter: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  pulseMeterFill: {
+    height: '100%',
+    backgroundColor: 'rgba(0,0,0,0.25)',
   },
   metaPill: {
     flexDirection: 'row',
@@ -1247,6 +1367,8 @@ const HomeScreen: React.FC = () => {
     backgroundColor: 'rgba(255,255,255,0.12)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.18)',
+    maxWidth: '100%',
+    flexShrink: 1,
   },
   metaPillSoft: {
     backgroundColor: 'rgba(255,255,255,0.08)',
@@ -1258,6 +1380,7 @@ const HomeScreen: React.FC = () => {
     color: '#fff',
     fontSize: 12,
     fontWeight: '700',
+    flexShrink: 1,
   },
 
   scrollViewContent: {
@@ -1340,6 +1463,14 @@ const HomeScreen: React.FC = () => {
       marginBottom: 16,
       paddingVertical: 2,
       paddingHorizontal: 2,
+    },
+    sectionTitle: {
+      color: '#f5f5f5',
+      fontSize: 18,
+      fontWeight: '800',
+      letterSpacing: 0.3,
+      marginBottom: 8,
+      paddingHorizontal: 16,
     },
     previewSheet: {
       position: 'absolute',
@@ -1465,6 +1596,20 @@ const HomeScreen: React.FC = () => {
     shadowOpacity: 0.35,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: 6 },
+  },
+  fabGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  subFabGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   centered: {
@@ -1660,6 +1805,98 @@ const HomeScreen: React.FC = () => {
     color: '#e50914',
     fontWeight: '700',
     fontSize: 13,
+  },
+  trailerContainer: {
+    paddingHorizontal: 16,
+    paddingBottom: 4,
+  },
+  trailerItem: {
+    width: 280,
+    marginRight: 12,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+  },
+  trailerVideoContainer: {
+    width: '100%',
+    height: 160,
+    position: 'relative',
+  },
+  trailerVideo: {
+    width: '100%',
+    height: '100%',
+  },
+  trailerOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: '60%',
+  },
+  bannerWrap: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    top: Platform.OS === 'ios' ? 60 : 28,
+    zIndex: 40,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  bannerInner: {
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bannerText: {
+    color: '#fff',
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    marginRight: 8,
+  },
+  bannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bannerButton: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  bannerButtonText: {
+    color: '#e50914',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  bannerClose: {
+    padding: 6,
+  },
+  trailerPlayIcon: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -24 }, { translateY: -24 }],
+    opacity: 0.8,
+  },
+  trailerInfo: {
+    padding: 12,
+  },
+  trailerTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  trailerMeta: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
   },
   });
 

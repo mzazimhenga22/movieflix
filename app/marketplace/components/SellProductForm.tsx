@@ -3,8 +3,8 @@ import { View, Text, TextInput, Button, StyleSheet, ScrollView, Alert, Touchable
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
-import { uploadFileToSupabase, addProduct, ProductCategory, ProductType } from '../api';
-import { Timestamp } from 'firebase/firestore'; // Import Timestamp
+import { uploadFileToSupabase, createMarketplaceListing, ProductCategory, ProductType } from '../api';
+import { formatKsh } from '../../../lib/money';
 
 export default function SellProductFormScreen() {
   const [name, setName] = useState('');
@@ -59,20 +59,41 @@ export default function SellProductFormScreen() {
     const sellerId = 'placeholderUserId123'; 
     const sellerName = 'Anonymous Seller'; // Placeholder
 
+    const priceValue = Number(price);
+    if (!Number.isFinite(priceValue) || priceValue <= 0) {
+      Alert.alert('Invalid price', 'Please enter a valid price greater than zero.');
+      return;
+    }
+
+    const categoryKey = (() => {
+      switch (selectedCategory) {
+        case ProductCategory.DIGITAL_GOODS:
+          return 'digital';
+        case ProductCategory.FILM_SERVICES:
+          return 'services';
+        case ProductCategory.ADVERTISING:
+          return 'promos';
+        case ProductCategory.EVENTS:
+          return 'events';
+        case ProductCategory.LIFESTYLE:
+          return 'lifestyle';
+        default:
+          return 'merch';
+      }
+    })();
+
     setUploading(true); // Use the same uploading state for form submission
     try {
-      const newProduct = {
+      await createMarketplaceListing({
         name,
         description,
-        price: parseFloat(price),
-        imageUrl,
-        sellerId,
-        sellerName,
-        category: selectedCategory,
+        price: priceValue,
+        categoryKey,
+        categoryLabel: selectedCategory,
         productType: selectedProductType,
-        createdAt: Timestamp.now(), // Use Firestore Timestamp
-      };
-      await addProduct(newProduct);
+        fallbackImageUrl: imageUrl,
+        seller: { id: sellerId, name: sellerName, contact: null, avatar: null, profileId: null },
+      });
       Alert.alert('Product Listed!', 'Your product has been successfully listed.');
       // Clear form
       setName('');
@@ -121,10 +142,10 @@ export default function SellProductFormScreen() {
         </View>
 
         <View style={styles.inputGroup}>
-          <Text style={styles.label}>Price ($)</Text>
+          <Text style={styles.label}>Price (KSh)</Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g., 50.00"
+            placeholder={`e.g., ${formatKsh(2500)}`}
             placeholderTextColor="#888"
             keyboardType="numeric"
             value={price}

@@ -1,6 +1,6 @@
 // app/reels/[...]/player.tsx (or wherever your ReelPlayerScreen lives)
 // ✅ Fixes Maximum update depth issues (stable params + safe index sync)
-// ✅ Adds TikTok-style double-tap like + heart burst
+// ✅ Adds double-tap like + heart burst
 // ✅ Single tap toggles mute
 // ✅ Adds right-side avatar + plus button that navigates to the poster profile screen
 //    (expects posterUserId/posterAvatar/posterName in the list payload; falls back gracefully)

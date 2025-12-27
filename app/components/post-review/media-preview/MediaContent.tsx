@@ -1,28 +1,28 @@
+import { Ionicons } from '@expo/vector-icons';
+import { AVPlaybackStatus, Video } from 'expo-av';
 import React, {
-  useRef,
-  useState,
-  useCallback,
-  useEffect,
-  forwardRef,
-  useImperativeHandle,
+    forwardRef,
+    useCallback,
+    useEffect,
+    useImperativeHandle,
+    useRef,
+    useState,
 } from 'react';
 import {
-  View,
-  StyleSheet,
-  Image,
-  Text,
-  TextInput,
-  ActivityIndicator,
-  Animated,
-  Pressable,
-  Dimensions,
-  PanResponder,
-  Platform,
-  Keyboard,
-  TouchableOpacity,
+    ActivityIndicator,
+    Animated,
+    Dimensions,
+    Image,
+    Keyboard,
+    PanResponder,
+    Platform,
+    Pressable,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from 'react-native';
-import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
-import { Ionicons } from '@expo/vector-icons';
 
 const { height: WINDOW_HEIGHT, width: WINDOW_WIDTH } = Dimensions.get('window');
 
@@ -149,7 +149,7 @@ export default forwardRef<MediaContentHandle | null, MediaContentProps>(function
             ref={video}
             source={{ uri: media.uri }}
             style={styles.media}
-            resizeMode={ResizeMode.COVER}
+            resizeMode="cover"
             onPlaybackStatusUpdate={(s) => {
               setStatus(s);
               setIsBuffering(!!(s as any)?.isBuffering);

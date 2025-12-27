@@ -6,6 +6,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  InteractionManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
@@ -21,6 +22,9 @@ type Props = BottomTabBarProps & {
 export default function BottomNav({ insetsBottom, isDark, state, navigation }: Props): React.ReactElement {
   const bottomOffset = Platform.OS === 'ios' ? (insetsBottom || 12) : (insetsBottom ? insetsBottom + 6 : 10);
   const { accentColor } = useAccent();
+  const navInFlightRef = React.useRef(false);
+
+  const visibleTabs = new Set(['movies', 'categories', 'search', 'downloads', 'interactive']);
 
   const iconForRoute = (routeName: string, focused: boolean) => {
     switch (routeName) {
@@ -31,9 +35,7 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
       case 'search':
         return focused ? 'search' : 'search-outline';
       case 'downloads':
-        return focused ? 'download' : 'download-outline';
-      case 'marketplace':
-        return focused ? 'storefront' : 'storefront-outline';
+        return focused ? 'cloud-download' : 'cloud-download-outline';
       case 'interactive':
         return focused ? 'sparkles' : 'sparkles-outline';
       default:
@@ -51,8 +53,6 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
         return 'Search';
       case 'downloads':
         return 'Downloads';
-      case 'marketplace':
-        return 'Marketplace';
       default:
         return routeName;
     }
@@ -78,6 +78,10 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
             const focused = state.index === idx;
             const routeName = route.name;
 
+            if (routeName === 'marketplace' || !visibleTabs.has(routeName)) {
+              return null;
+            }
+
             const onPress = () => {
               const event = navigation.emit({
                 type: 'tabPress',
@@ -85,9 +89,19 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
                 canPreventDefault: true,
               } as any);
 
-              if (!focused && !(event as any).defaultPrevented) {
-                navigation.navigate(routeName as never);
-              }
+              if (focused || (event as any).defaultPrevented) return;
+              if (navInFlightRef.current) return;
+              navInFlightRef.current = true;
+
+              requestAnimationFrame(() => {
+                InteractionManager.runAfterInteractions(() => {
+                  try {
+                    navigation.navigate(routeName as never);
+                  } finally {
+                    navInFlightRef.current = false;
+                  }
+                });
+              });
             };
 
             const onLongPress = () => {

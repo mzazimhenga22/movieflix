@@ -1,11 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { usePathname, useRouter } from 'expo-router';
 import React from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { InteractionManager, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAccent } from '../AccentContext';
 import { useUser } from '../../../hooks/use-user';
 import { NOTIFICATION_BADGE_STORAGE_PREFIX } from '../../../constants/notifications';
 
@@ -14,11 +15,31 @@ export default function BottomNav() {
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const { user } = useUser();
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+  const accentLight = lightenColor(accent, 0.25);
+  const accentGlass: [string, string] = [`${accent}33`, 'rgba(255,255,255,0.02)'];
+  const accentGradient: [string, string] = ['#e50914', '#b20710'];
   const [notificationBadge, setNotificationBadge] = React.useState(0);
   const badgeStorageKey = React.useMemo(
     () => `${NOTIFICATION_BADGE_STORAGE_PREFIX}${user?.uid ?? 'guest'}`,
     [user?.uid],
   );
+
+  const navInFlightRef = React.useRef(false);
+  const deferNav = React.useCallback((action: () => void) => {
+    if (navInFlightRef.current) return;
+    navInFlightRef.current = true;
+    requestAnimationFrame(() => {
+      InteractionManager.runAfterInteractions(() => {
+        try {
+          action();
+        } finally {
+          navInFlightRef.current = false;
+        }
+      });
+    });
+  }, []);
 
   const syncBadge = React.useCallback(async () => {
     try {
@@ -82,45 +103,60 @@ export default function BottomNav() {
 
   return (
     <View pointerEvents="box-none" style={[styles.outer, { bottom: insets.bottom }]}>
-      <BlurView intensity={95} tint="dark" style={styles.blurWrap}>
+      <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accent}55` }]}>
         <View style={[styles.overlay, { backgroundColor: 'rgba(15,15,25,0.55)' }]} />
         <LinearGradient
-          colors={['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.02)']}
+          colors={accentGlass}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.glassSheen}
         />
         <View style={styles.inner}>
           <NavItem
-            onPress={() => router.push('/social-feed')}
+            onPress={() => deferNav(() => router.push('/social-feed'))}
             icon="home"
             label="Feeds"
             active={isActive('index')}
+            accentGradient={accentGradient}
+            accentColor={accent}
+            badgeBorder={accentLight}
           />
           <NavItem
-            onPress={() => router.push('/social-feed/stories')}
+            onPress={() => deferNav(() => router.push('/social-feed/stories'))}
             icon="time"
             label="Stories"
             active={isActive('stories')}
+            accentGradient={accentGradient}
+            accentColor={accent}
+            badgeBorder={accentLight}
           />
           <NavItem
-            onPress={() => router.push('/social-feed/notifications')}
+            onPress={() => deferNav(() => router.push('/social-feed/notifications'))}
             icon="notifications"
             label="Notifications"
             active={isActive('notifications')}
             badgeCount={notificationBadge}
+            accentGradient={accentGradient}
+            accentColor={accent}
+            badgeBorder={accentLight}
           />
           <NavItem
-            onPress={() => router.push('/social-feed/streaks')}
+            onPress={() => deferNav(() => router.push('/social-feed/streaks'))}
             icon="flame"
             label="Streaks"
             active={isActive('streaks')}
+            accentGradient={accentGradient}
+            accentColor={accent}
+            badgeBorder={accentLight}
           />
           <NavItem
-            onPress={() => router.replace('/profile?from=social-feed')}
+            onPress={() => deferNav(() => router.replace('/profile?from=social-feed'))}
             icon="person"
             label="Profile"
             active={isActive('profile')}
+            accentGradient={accentGradient}
+            accentColor={accent}
+            badgeBorder={accentLight}
           />
         </View>
       </BlurView>
@@ -134,12 +170,18 @@ function NavItem({
   label,
   active,
   badgeCount,
+  accentGradient,
+  accentColor,
+  badgeBorder,
 }: {
   onPress: () => void;
   icon: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
   active?: boolean;
   badgeCount?: number;
+  accentGradient: [string, string];
+  accentColor: string;
+  badgeBorder: string;
 }) {
   const showBadge = typeof badgeCount === 'number' && badgeCount > 0;
   const badgeDisplay = badgeCount && badgeCount > 99 ? '99+' : badgeCount && badgeCount > 9 ? '9+' : badgeCount;
@@ -152,10 +194,10 @@ function NavItem({
       accessibilityRole="button"
       accessibilityState={{ selected: !!active }}
     >
-      <View style={[styles.itemInner, active && styles.itemInnerActive]}>
+      <View style={[styles.itemInner, active && [styles.itemInnerActive, { shadowColor: accentColor }]]}>
         {active && (
           <LinearGradient
-            colors={['#e50914', '#b20710']}
+            colors={accentGradient}
             start={{ x: 0.05, y: 0 }}
             end={{ x: 0.95, y: 1 }}
             style={styles.activePill}
@@ -168,7 +210,7 @@ function NavItem({
             color={active ? '#ffffff' : '#f5f5f5'}
           />
           {showBadge && (
-            <View style={styles.badge}>
+            <View style={[styles.badge, { backgroundColor: accentColor, borderColor: badgeBorder }]}>
               <Text style={styles.badgeText}>{badgeDisplay}</Text>
             </View>
           )}
@@ -180,6 +222,55 @@ function NavItem({
     </TouchableOpacity>
   );
 }
+
+type RGB = { r: number; g: number; b: number };
+
+function parseColor(color?: string): RGB | null {
+  if (!color) return null;
+  if (color.startsWith('#')) {
+    let hex = color.slice(1);
+    if (hex.length === 3) {
+      hex = hex
+        .split('')
+        .map((c) => c + c)
+        .join('');
+    }
+    if (hex.length !== 6) return null;
+    const num = Number.parseInt(hex, 16);
+    if (Number.isNaN(num)) return null;
+    return {
+      r: (num >> 16) & 255,
+      g: (num >> 8) & 255,
+      b: num & 255,
+    };
+  }
+  const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (match) {
+    return {
+      r: Number(match[1]),
+      g: Number(match[2]),
+      b: Number(match[3]),
+    };
+  }
+  return null;
+}
+
+function mixColor(base: RGB, target: RGB, amount: number) {
+  const clamp = (value: number) => Math.max(0, Math.min(255, value));
+  return {
+    r: Math.round(clamp(base.r + (target.r - base.r) * amount)),
+    g: Math.round(clamp(base.g + (target.g - base.g) * amount)),
+    b: Math.round(clamp(base.b + (target.b - base.b) * amount)),
+  };
+}
+
+function lightenColor(color: string, amount = 0.2) {
+  const rgb = parseColor(color);
+  if (!rgb) return color;
+  const mixed = mixColor(rgb, { r: 255, g: 255, b: 255 }, amount);
+  return `rgb(${mixed.r}, ${mixed.g}, ${mixed.b})`;
+}
+
 
 const styles = StyleSheet.create({
   outer: {
@@ -236,7 +327,6 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   itemInnerActive: {
-    shadowColor: '#e50914',
     shadowOpacity: 0.4,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -266,7 +356,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: -6,
     right: -10,
-    backgroundColor: '#e50914',
     borderRadius: 10,
     minWidth: 18,
     paddingHorizontal: 4,
@@ -274,7 +363,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.8)',
   },
   badgeText: {
     color: '#fff',

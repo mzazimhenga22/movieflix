@@ -10,6 +10,15 @@ import { fetchTMDBName } from '@/utils/tmdb';
 import { scrapeDoodstreamEmbed } from './doodstream';
 import { EMBED_URL, ORIGIN_HOST, getMoviePageURL, throwOnResponse } from './utils';
 
+const BROWSER_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Cache-Control': 'no-cache',
+  pragma: 'no-cache',
+};
+
 export const LOG_PREFIX = '[FSOnline]';
 
 async function getMovieID(ctx: ScrapeContext, url: string): Promise<string | undefined> {
@@ -21,6 +30,7 @@ async function getMovieID(ctx: ScrapeContext, url: string): Promise<string | und
       headers: {
         Origin: ORIGIN_HOST,
         Referer: ORIGIN_HOST,
+        ...BROWSER_HEADERS,
       },
     });
     throwOnResponse(response);
@@ -53,6 +63,7 @@ async function getMovieSources(ctx: ScrapeContext, id: string, refererHeader: st
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
         Referer: refererHeader,
         Origin: ORIGIN_HOST,
+        ...BROWSER_HEADERS,
       },
       body: `action=lazy_player&movieID=${id}`,
     });

@@ -1,17 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Linking from 'expo-linking';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, Easing, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { WebView } from 'react-native-webview';
+import { authPromise, firestore } from '../constants/firebase';
+import { useSubscription } from '../providers/SubscriptionProvider';
 import { useAccent } from './components/AccentContext';
-
-// Add these declarations so the TypeScript compiler recognizes the Firebase helpers
-declare const authPromise: Promise<any> | undefined;
-declare const firestore: any;
-declare function serverTimestamp(): any;
-declare function updateDoc(docRef: any, data: any): Promise<any>;
-declare function doc(firestoreInstance: any, collection: string, id: string): any;
 
 type PlanTier = 'free' | 'plus' | 'premium';
 
@@ -46,6 +44,11 @@ const PLAN_LIMITS: Record<PlanTier, number> = {
   free: 1,
   plus: 3,
   premium: 5,
+};
+
+const PLAN_PRICE_KSH: Record<Exclude<PlanTier, 'free'>, number> = {
+  plus: 100,
+  premium: 200,
 };
 
 const PLAN_DETAILS: Array<{
@@ -106,10 +109,44 @@ const formatUpgradeGain = (tier: PlanTier) => {
   return `Add ${diff} more profiles (${PLAN_LIMITS[tier]} total)`;
 };
 
+function classifyStripeReturnUrl(url: string): 'success' | 'cancel' | null {
+  const lower = (url || '').toLowerCase();
+  const successPrefix = (process.env.EXPO_PUBLIC_STRIPE_SUCCESS_URL_PREFIX ?? '').toLowerCase();
+  const cancelPrefix = (process.env.EXPO_PUBLIC_STRIPE_CANCEL_URL_PREFIX ?? '').toLowerCase();
+
+  if (successPrefix && lower.startsWith(successPrefix)) return 'success';
+  if (cancelPrefix && lower.startsWith(cancelPrefix)) return 'cancel';
+
+  // Heuristic fallbacks (prefer setting explicit prefixes in env for reliability)
+  if (lower.startsWith('movieflix://') || lower.startsWith('exp://')) {
+    if (lower.includes('success')) return 'success';
+    if (lower.includes('cancel')) return 'cancel';
+  }
+
+  // Common patterns for hosted success/cancel pages
+  if (/(^|[/?#])success([/?#]|$)/.test(lower) || /[?&](status|result)=success\b/.test(lower)) return 'success';
+  if (/(^|[/?#])cancel([/?#]|$)/.test(lower) || /[?&](status|result)=cancel\b/.test(lower)) return 'cancel';
+  return null;
+}
+
+function appendQueryParams(url: string, params: Record<string, string | undefined>): string {
+  const entries = Object.entries(params).filter(([, v]) => typeof v === 'string' && v.length);
+  if (!entries.length) return url;
+
+  const [base, hash] = url.split('#');
+  const hasQuery = base.includes('?');
+  const query = entries
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v as string)}`)
+    .join('&');
+  const next = `${base}${hasQuery ? '&' : '?'}${query}`;
+  return hash ? `${next}#${hash}` : next;
+}
+
 const PremiumScreen = () => {
   const router = useRouter();
-  const params = useLocalSearchParams<{ source?: string }>();
+  const params = useLocalSearchParams<{ source?: string; requested?: string }>();
   const source = params.source;
+  const requestedFromParams = params.requested as PlanTier | undefined;
   const { accentColor } = useAccent();
   const gradientColors = useMemo(() => [accentColor, '#090814', '#050509'] as const, [accentColor]);
   const badgeGradient = useMemo(() => [accentColor, 'rgba(5,5,15,0.6)'] as const, [accentColor]);
@@ -123,24 +160,331 @@ const PremiumScreen = () => {
   const [selectedPlan, setSelectedPlan] = useState<PlanTier>('free');
   const [statusCopy, setStatusCopy] = useState<string | null>(null);
   const [updatingPlan, setUpdatingPlan] = useState<PlanTier | null>(null);
+  const [showPurchaseSheet, setShowPurchaseSheet] = useState(false);
+  const [requestedTier, setRequestedTier] = useState<PlanTier | null>(null);
+  const sheetTranslateY = React.useRef(new Animated.Value(1)).current;
+  const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
+  const [stripeLoading, setStripeLoading] = useState(false);
+  const [mpesaPhone, setMpesaPhone] = useState('');
+  const [mpesaBusy, setMpesaBusy] = useState(false);
+  const [mpesaCheckoutRequestId, setMpesaCheckoutRequestId] = useState<string | null>(null);
+  const [mpesaMerchantRequestId, setMpesaMerchantRequestId] = useState<string | null>(null);
+  const [mpesaStatus, setMpesaStatus] = useState<string | null>(null);
+  const didAutoStartMpesaRef = useRef(false);
+  const didAutoOpenRequestedTier = React.useRef(false);
+  const { refresh, currentPlan } = useSubscription();
+
+  const MPESA_PHONE_CACHE_KEY = 'mpesaPhone';
+
+  const billingProvider = useMemo(() => {
+    const raw = (process.env.EXPO_PUBLIC_BILLING_PROVIDER ?? '').toLowerCase().trim();
+    if (raw === 'stripe') return 'stripe';
+    if (raw === 'daraja') return 'daraja';
+
+    const anyStripeUrl =
+      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL ||
+      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PLUS ||
+      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PREMIUM;
+    if (Platform.OS === 'android' && anyStripeUrl) return 'stripe';
+    return 'daraja';
+  }, []);
+
+  const closePurchaseSheet = useCallback(() => {
+    Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true } as any).start(() => {
+      setShowPurchaseSheet(false);
+      setRequestedTier(null);
+      setStripeCheckoutUrl(null);
+      setStripeLoading(false);
+      setMpesaBusy(false);
+      setMpesaCheckoutRequestId(null);
+      setMpesaMerchantRequestId(null);
+      setMpesaStatus(null);
+      didAutoStartMpesaRef.current = false;
+    });
+  }, [sheetTranslateY]);
 
   useEffect(() => {
-    const loadPlan = async () => {
-      try {
-        const stored = await AsyncStorage.getItem('planTierOverride');
-        const normalized: PlanTier =
-          stored === 'premium' || stored === 'plus' || stored === 'free' ? stored : 'free';
-        setSelectedPlan(normalized);
-        const gain = formatUpgradeGain(normalized);
-        setStatusCopy(`Currently on ${PLAN_LABELS[normalized]} (${gain}).`);
-      } catch (err) {
-        console.warn('[premium] failed to load stored plan', err);
-        setSelectedPlan('free');
-        setStatusCopy(`Currently on ${PLAN_LABELS.free} (${formatUpgradeGain('free')}).`);
-      }
+    if (!showPurchaseSheet) return;
+    if (billingProvider !== 'daraja') return;
+    if (mpesaPhone.trim()) return;
+
+    let mounted = true;
+    void AsyncStorage.getItem(MPESA_PHONE_CACHE_KEY)
+      .then((stored) => {
+        if (!mounted) return;
+        if (stored && stored.trim()) setMpesaPhone(stored.trim());
+      })
+      .catch(() => {});
+
+    return () => {
+      mounted = false;
     };
-    loadPlan();
+  }, [MPESA_PHONE_CACHE_KEY, billingProvider, mpesaPhone, showPurchaseSheet]);
+
+  const isLikelyKenyaPhone = useCallback((raw: string) => {
+    const cleaned = raw.trim().replace(/^[+]/, '').replace(/[\s-]/g, '');
+    if (!cleaned) return false;
+    if (!/^\d+$/.test(cleaned)) return false;
+    return cleaned.startsWith('0') || cleaned.startsWith('254') || cleaned.startsWith('7') || cleaned.startsWith('1');
   }, []);
+
+  const startMpesaPayment = useCallback(async () => {
+    if (!requestedTier || requestedTier === 'free') return;
+    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+    if (!base) {
+      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Daraja payments.');
+      return;
+    }
+
+    if (!mpesaPhone.trim() || !isLikelyKenyaPhone(mpesaPhone)) {
+      Alert.alert('Invalid phone', 'Enter a Kenya phone number (e.g. 07XXXXXXXX or 2547XXXXXXXX).');
+      return;
+    }
+
+    try {
+      setMpesaBusy(true);
+      setMpesaStatus(null);
+      setMpesaCheckoutRequestId(null);
+      setMpesaMerchantRequestId(null);
+
+      try {
+        await AsyncStorage.setItem(MPESA_PHONE_CACHE_KEY, mpesaPhone.trim());
+      } catch {
+        // ignore
+      }
+
+      const auth = await authPromise;
+      const user = auth.currentUser;
+      if (!user) {
+        Alert.alert('Sign in required', 'Please sign in to continue.');
+        return;
+      }
+      const idToken = await user.getIdToken();
+
+      const res = await fetch(`${base}/functions/v1/daraja`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          action: 'stkpush',
+          tier: requestedTier,
+          phone: mpesaPhone,
+          accountReference: `movieflix-${requestedTier}`,
+          transactionDesc: `MovieFlix ${requestedTier} plan`,
+          firebaseUid: user.uid,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to start payment');
+      }
+
+      setMpesaCheckoutRequestId(data?.checkoutRequestId ?? null);
+      setMpesaMerchantRequestId(data?.merchantRequestId ?? null);
+      setMpesaStatus(data?.customerMessage ?? 'STK Push sent. Complete payment on your phone.');
+    } catch (err: any) {
+      console.warn('[premium] mpesa stkpush failed', err);
+      Alert.alert('Payment failed', err?.message || 'Unable to start M-Pesa payment.');
+    } finally {
+      setMpesaBusy(false);
+    }
+  }, [MPESA_PHONE_CACHE_KEY, isLikelyKenyaPhone, mpesaPhone, requestedTier]);
+
+  useEffect(() => {
+    if (!showPurchaseSheet) return;
+    if (billingProvider !== 'daraja') return;
+    if (!requestedTier || requestedTier === 'free') return;
+    if (mpesaBusy) return;
+    if (mpesaCheckoutRequestId) return;
+    if (didAutoStartMpesaRef.current) return;
+    if (!mpesaPhone.trim() || !isLikelyKenyaPhone(mpesaPhone)) return;
+
+    didAutoStartMpesaRef.current = true;
+    // auto-trigger STK push so user gets the M-Pesa PIN prompt right after plan selection
+    void startMpesaPayment();
+  }, [billingProvider, isLikelyKenyaPhone, mpesaBusy, mpesaCheckoutRequestId, mpesaPhone, requestedTier, showPurchaseSheet, startMpesaPayment]);
+
+  const checkMpesaStatus = useCallback(async () => {
+    if (!requestedTier || requestedTier === 'free') return;
+    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+    if (!base) {
+      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Daraja payments.');
+      return;
+    }
+    if (!mpesaCheckoutRequestId) {
+      Alert.alert('Missing request', 'Start the payment first.');
+      return;
+    }
+
+    try {
+      setMpesaBusy(true);
+
+      const auth = await authPromise;
+      const user = auth.currentUser;
+      if (!user) {
+        Alert.alert('Sign in required', 'Please sign in to continue.');
+        return;
+      }
+      const idToken = await user.getIdToken();
+
+      const res = await fetch(`${base}/functions/v1/daraja`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          action: 'query',
+          checkoutRequestId: mpesaCheckoutRequestId,
+          tier: requestedTier,
+          merchantRequestId: mpesaMerchantRequestId,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to query payment');
+      }
+
+      const resultCode = String(data?.resultCode ?? '').trim();
+      const resultDesc = String(data?.resultDesc ?? '').trim();
+
+      if (resultCode === '0') {
+        await refresh().catch(() => {});
+        setSelectedPlan(requestedTier);
+        Alert.alert('Payment confirmed', `You're now on ${PLAN_LABELS[requestedTier]}.`);
+        closePurchaseSheet();
+        return;
+      }
+
+      const message = resultDesc || 'Payment not completed yet.';
+      setMpesaStatus(message);
+      Alert.alert('Not completed', message);
+    } catch (err: any) {
+      console.warn('[premium] mpesa query failed', err);
+      Alert.alert('Check failed', err?.message || 'Unable to check payment status.');
+    } finally {
+      setMpesaBusy(false);
+    }
+  }, [closePurchaseSheet, mpesaCheckoutRequestId, mpesaMerchantRequestId, refresh, requestedTier]);
+
+  const buildStripeCheckoutUrl = useCallback(async (tier: PlanTier) => {
+    const direct =
+      (tier === 'plus' ? process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PLUS : undefined) ||
+      (tier === 'premium' ? process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PREMIUM : undefined) ||
+      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL;
+
+    if (!direct) return null;
+
+    let uid = '';
+    try {
+      const auth = await authPromise;
+      uid = auth.currentUser?.uid || '';
+    } catch {
+      // ignore
+    }
+
+    const returnScheme = Linking.createURL('');
+    return appendQueryParams(direct, {
+      tier,
+      app_user_id: uid || undefined,
+      return_url: returnScheme || undefined,
+    });
+  }, []);
+
+  const handleStripeResult = useCallback(
+    async (result: 'success' | 'cancel') => {
+      const tier = requestedTier;
+      if (!tier) {
+        closePurchaseSheet();
+        return;
+      }
+
+      if (result === 'cancel') {
+        Alert.alert('Payment cancelled', 'You can try again anytime.');
+        closePurchaseSheet();
+        return;
+      }
+
+      try {
+        setStripeLoading(true);
+        await refresh().catch(() => {});
+
+        try {
+          const auth = await authPromise;
+          const user = auth.currentUser;
+          if (user) {
+            await updateDoc(doc(firestore, 'users', user.uid), {
+              planTier: tier,
+              subscription: {
+                tier,
+                updatedAt: serverTimestamp(),
+                source: 'stripe',
+              },
+            });
+          }
+        } catch (err) {
+          console.warn('[premium] failed to persist Stripe purchase to Firestore', err);
+        }
+
+        Alert.alert('Payment complete', 'Your subscription will activate shortly.');
+        setSelectedPlan(tier);
+      } finally {
+        setStripeLoading(false);
+        closePurchaseSheet();
+      }
+    },
+    [closePurchaseSheet, refresh, requestedTier]
+  );
+
+  useEffect(() => {
+    const __DEV__FLAG = typeof __DEV__ !== 'undefined' && __DEV__;
+    const loadPlan = async () => {
+      if (__DEV__FLAG) {
+        try {
+          const stored = await AsyncStorage.getItem('planTierOverride');
+          const normalized: PlanTier =
+            stored === 'premium' || stored === 'plus' || stored === 'free' ? stored : currentPlan;
+          setSelectedPlan(normalized);
+          setStatusCopy(`Currently on ${PLAN_LABELS[normalized]} (${formatUpgradeGain(normalized)}).`);
+          return;
+        } catch {
+          // ignore
+        }
+      }
+
+      setSelectedPlan(currentPlan);
+      setStatusCopy(`Currently on ${PLAN_LABELS[currentPlan]} (${formatUpgradeGain(currentPlan)}).`);
+    };
+
+    void loadPlan();
+  }, [currentPlan]);
+
+  const openPurchaseFor = useCallback((tier: PlanTier) => {
+    setRequestedTier(tier);
+    setShowPurchaseSheet(true);
+    setStripeCheckoutUrl(null);
+    setStripeLoading(false);
+    Animated.timing(sheetTranslateY, {
+      toValue: 0,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    } as any).start();
+  }, [sheetTranslateY]);
+
+  useEffect(() => {
+    if (!requestedFromParams) return;
+    if (requestedFromParams !== 'plus' && requestedFromParams !== 'premium') return;
+
+    // Auto-open purchase sheet once when navigated here with a requested plan
+    if (didAutoOpenRequestedTier.current) return;
+    didAutoOpenRequestedTier.current = true;
+    openPurchaseFor(requestedFromParams);
+  }, [openPurchaseFor, requestedFromParams]);
 
   const handleApplyPlan = useCallback(
     async (tier: PlanTier) => {
@@ -148,43 +492,35 @@ const PremiumScreen = () => {
       setUpdatingPlan(tier);
       try {
         if (tier === 'free') {
-          await AsyncStorage.removeItem('planTierOverride');
-        } else {
-          await AsyncStorage.setItem('planTierOverride', tier);
-        }
-        // Persist plan to Firestore for signed-in users (store non-sensitive summary only)
-        try {
-          const auth = await authPromise;
-          const user = auth.currentUser;
-          if (user) {
-            const priceMap: Record<PlanTier, number> = { free: 0, plus: 100, premium: 200 };
-            const payload: Record<string, any> = {
-              planTier: tier,
-              subscription: {
-                tier,
-                priceKSH: priceMap[tier],
-                updatedAt: serverTimestamp(),
-                source: 'premium-screen',
-              },
-            };
-            await updateDoc(doc(firestore, 'users', user.uid), payload);
+          // Save free override and instruct user to cancel in-store if they had an active purchase
+          try {
+            const auth = await authPromise;
+            const user = auth.currentUser;
+            if (user) {
+              await updateDoc(doc(firestore, 'users', user.uid), {
+                planTier: 'free',
+                subscription: { canceledByUser: true, updatedAt: serverTimestamp(), source: 'premium-screen' },
+              });
+            }
+          } catch (err) {
+            console.warn('[premium] failed to persist cancel to Firestore', err);
           }
-        } catch (err) {
-          console.warn('[premium] failed to persist plan to Firestore', err);
+          if (typeof __DEV__ !== 'undefined' && __DEV__) {
+            await AsyncStorage.removeItem('planTierOverride');
+          }
+          await refresh().catch(() => {});
+          Alert.alert(
+            'Updated',
+            'Your account is set to Free in the app.',
+          );
+        } else {
+          // Open purchase sheet to complete payment
+          openPurchaseFor(tier);
+          return;
         }
-        setSelectedPlan(tier);
-        const planName = PLAN_LABELS[tier];
-        const limitCopy = formatLimit(tier);
-        const gainCopy = formatUpgradeGain(tier);
-        const buttons =
-          source === 'profiles'
-            ? [
-                { text: 'Stay here', style: 'cancel' as const },
-                { text: 'Go to profiles', onPress: () => router.back() },
-              ]
-            : undefined;
-        Alert.alert('Plan updated', `You are now on ${planName}. Enjoy ${gainCopy}.`, buttons);
-        setStatusCopy(`Switched to ${planName} (${gainCopy}).`);
+
+        setSelectedPlan('free');
+        setStatusCopy(`Switched to Free.`);
       } catch (err) {
         console.error('[premium] failed to update plan override', err);
         Alert.alert('Plan update failed', 'Unable to save your plan. Please try again.');
@@ -192,7 +528,7 @@ const PremiumScreen = () => {
         setUpdatingPlan(null);
       }
     },
-    [router, selectedPlan, source]
+    [openPurchaseFor, refresh, selectedPlan]
   );
 
   return (
@@ -235,7 +571,7 @@ const PremiumScreen = () => {
 
         {!isWatchparty && (
           <>
-            <Text style={styles.sectionHeading}>How you'll pay</Text>
+            <Text style={styles.sectionHeading}>{`How you'll pay`}</Text>
             <View style={styles.paymentGrid}>
               {PAYMENT_HIGHLIGHTS.map((highlight) => (
                 <View key={highlight.title} style={styles.paymentCard}>
@@ -303,9 +639,210 @@ const PremiumScreen = () => {
         })}
 
         <Text style={styles.disclaimer}>
-          Upgrading is optional and can be added later with your preferred billing provider. This screen is a
-          placeholder so you can design and test your Premium flow.
+          {billingProvider === 'daraja'
+            ? 'Upgrading uses M-Pesa (Daraja STK Push). Your plan updates after payment is confirmed.'
+            : billingProvider === 'stripe'
+            ? 'Upgrading uses a secure Stripe card checkout. Your plan updates after payment is confirmed.'
+            : 'Upgrading uses M-Pesa (Daraja STK Push). Your plan updates after payment is confirmed.'}
         </Text>
+
+        {/* Purchase bottom sheet */}
+        {showPurchaseSheet && requestedTier && (
+          <>
+            <TouchableOpacity
+              style={styles.sheetBackdrop}
+              activeOpacity={1}
+              onPress={closePurchaseSheet}
+            />
+
+            <Animated.View
+              style={{
+                ...styles.sheet,
+                transform: [
+                  { translateY: sheetTranslateY.interpolate({ inputRange: [0, 1], outputRange: [0, 500] }) },
+                ],
+              }}
+            >
+              <View style={styles.sheetHandle} />
+
+              {/* Paywall header */}
+              <View style={{ marginBottom: 12 }}>
+                <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800' }}>{PLAN_LABELS[requestedTier as PlanTier]}</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.8)', marginTop: 6 }}>{PLAN_DETAILS.find((p) => p.tier === requestedTier)?.description}</Text>
+              </View>
+
+              {/* Features */}
+              <View style={{ marginBottom: 12 }}>
+                {(PLAN_DETAILS.find((p) => p.tier === requestedTier)?.features ?? []).map((f) => (
+                  <View key={f} style={{ marginBottom: 6 }}>
+                    <Text style={{ color: 'rgba(255,255,255,0.9)' }}>{f.replace(/^-/,'').trim()}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {/* Offerings / packages */}
+              <View style={{ marginTop: 6 }}>
+                {billingProvider === 'daraja' ? (
+                  <View>
+                    <Text style={{ color: 'rgba(255,255,255,0.85)', marginBottom: 10 }}>
+                      Enter your M-Pesa number to receive an STK Push (you&apos;ll be prompted for your M-Pesa PIN).
+                    </Text>
+
+                    <TextInput
+                      value={mpesaPhone}
+                      onChangeText={(t) => setMpesaPhone(t)}
+                      placeholder="07XXXXXXXX"
+                      placeholderTextColor="rgba(255,255,255,0.35)"
+                      keyboardType="phone-pad"
+                      style={{
+                        borderWidth: 1,
+                        borderColor: 'rgba(255,255,255,0.12)',
+                        borderRadius: 12,
+                        paddingHorizontal: 12,
+                        paddingVertical: 10,
+                        color: '#fff',
+                        backgroundColor: 'rgba(255,255,255,0.03)',
+                      }}
+                    />
+
+                    <Text style={{ color: 'rgba(255,255,255,0.7)', marginTop: 10 }}>
+                      Amount: {requestedTier === 'plus' ? '100' : '200'} KSH
+                    </Text>
+
+                    {mpesaCheckoutRequestId ? (
+                      <Text style={{ color: 'rgba(255,255,255,0.6)', marginTop: 8, fontSize: 12 }}>
+                        CheckoutRequestID: {mpesaCheckoutRequestId}
+                      </Text>
+                    ) : null}
+
+                    {mpesaStatus ? (
+                      <Text style={{ color: 'rgba(255,255,255,0.8)', marginTop: 8 }}>
+                        {mpesaStatus}
+                      </Text>
+                    ) : null}
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }}>
+                      <TouchableOpacity
+                        style={[styles.cancelButton, { marginLeft: 0, flex: 1, marginRight: 8 }]}
+                        disabled={mpesaBusy}
+                        onPress={checkMpesaStatus}
+                      >
+                        <Text style={styles.cancelText}>{mpesaBusy ? 'Checking…' : 'Check status'}</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.saveButton, { backgroundColor: accentColor, flex: 1 }]}
+                        disabled={mpesaBusy}
+                        onPress={startMpesaPayment}
+                      >
+                        <Text style={styles.saveText}>{mpesaBusy ? 'Sending…' : 'Pay with M-Pesa'}</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 10 }}>
+                      <TouchableOpacity style={[styles.saveButton, { backgroundColor: 'rgba(255,255,255,0.08)' }]} onPress={closePurchaseSheet}>
+                        <Text style={styles.saveText}>Close</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : billingProvider === 'stripe' ? (
+                  <View>
+                    {!stripeCheckoutUrl ? (
+                      <TouchableOpacity
+                        style={[styles.planButton, { backgroundColor: accentColor }]}
+                        disabled={stripeLoading}
+                        onPress={async () => {
+                          try {
+                            setStripeLoading(true);
+                            const url = await buildStripeCheckoutUrl(requestedTier);
+                            if (!url) {
+                              Alert.alert(
+                                'Stripe checkout not configured',
+                                'Set EXPO_PUBLIC_STRIPE_CHECKOUT_URL (and optionally *_PLUS / *_PREMIUM).'
+                              );
+                              return;
+                            }
+                            setStripeCheckoutUrl(url);
+                          } finally {
+                            setStripeLoading(false);
+                          }
+                        }}
+                      >
+                        <Text style={styles.planButtonText}>{stripeLoading ? 'Loading…' : 'Continue to payment'}</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View
+                        style={{
+                          height: 420,
+                          borderRadius: 14,
+                          overflow: 'hidden',
+                          borderWidth: 1,
+                          borderColor: 'rgba(255,255,255,0.08)',
+                          backgroundColor: 'rgba(255,255,255,0.02)',
+                        }}
+                      >
+                        <WebView
+                          source={{ uri: stripeCheckoutUrl }}
+                          startInLoadingState
+                          renderLoading={() => (
+                            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                              <ActivityIndicator color={accentColor} />
+                            </View>
+                          )}
+                          onShouldStartLoadWithRequest={(req) => {
+                            const hit = classifyStripeReturnUrl(req.url);
+                            if (hit) {
+                              void handleStripeResult(hit);
+                              return false;
+                            }
+                            return true;
+                          }}
+                        />
+                      </View>
+                    )}
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
+                      <TouchableOpacity
+                        style={styles.cancelButton}
+                        onPress={async () => {
+                          try {
+                            setStripeLoading(true);
+                            await refresh();
+                            Alert.alert('Updated', 'Refreshed your subscription status.');
+                          } catch {
+                            Alert.alert('Refresh failed', 'Please try again.');
+                          } finally {
+                            setStripeLoading(false);
+                          }
+                        }}
+                      >
+                        <Text style={styles.cancelText}>{stripeLoading ? 'Refreshing…' : 'Refresh status'}</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity style={[styles.saveButton, { backgroundColor: accentColor }]} onPress={closePurchaseSheet}>
+                        <Text style={styles.saveText}>Close</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <View>
+                    <Text style={{ color: 'rgba(255,255,255,0.8)', marginBottom: 12 }}>
+                      Billing provider is not configured for purchases on this device.
+                    </Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+                      <TouchableOpacity
+                        style={[styles.saveButton, { backgroundColor: accentColor }]}
+                        onPress={closePurchaseSheet}
+                      >
+                        <Text style={styles.saveText}>Close</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              </View>
+            </Animated.View>
+          </>
+        )}
       </ScrollView>
     </View>
   );
@@ -500,6 +1037,60 @@ const styles = StyleSheet.create({
     color: '#777777',
     fontSize: 11,
     marginTop: 4,
+  },
+  sheetBackdrop: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.45)'
+  },
+  sheet: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 24,
+    borderRadius: 16,
+    padding: 16,
+    backgroundColor: 'rgba(6,6,10,0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    elevation: 20,
+  },
+  sheetHandle: {
+    width: 48,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  subscriptionTitle: { color: '#fff', fontWeight: '700', marginBottom: 8 },
+  purchaseRow: { backgroundColor: 'rgba(255,255,255,0.02)' },
+  cancelButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    marginLeft: 8,
+  },
+  cancelText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+  },
+  saveButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  saveText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });
 

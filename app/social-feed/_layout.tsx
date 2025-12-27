@@ -23,6 +23,12 @@ export default function SocialFeedLayout() {
             title: 'Stories'
           }}
         />
+        <Stack.Screen
+          name="match-swipe"
+          options={{
+            title: 'Movie Match'
+          }}
+        />
         <Stack.Screen 
           name="notifications"
           options={{

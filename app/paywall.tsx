@@ -1,26 +1,14 @@
+import { useRouter } from 'expo-router';
 import React from 'react';
-import { Alert, Button, StyleSheet, Text, View } from 'react-native';
+import { Button, StyleSheet, Text, View } from 'react-native';
 import { useSubscription } from '../providers/SubscriptionProvider';
 
-import Purchases from 'react-native-purchases';
-
 const PaywallScreen = () => {
-  const { offerings, isSubscribed, refresh } = useSubscription();
+  const router = useRouter();
+  const { isSubscribed } = useSubscription();
 
   const handleSubscribe = async () => {
-    if (!offerings || !offerings.current || !offerings.current.availablePackages.length) {
-      Alert.alert('No subscription available', 'Please try again later.');
-      return;
-    }
-    try {
-      const pkg = offerings.current.availablePackages[0];
-      if (pkg && pkg.identifier) {
-        await Purchases.purchasePackage(pkg);
-        await refresh();
-      }
-    } catch (e: any) {
-      Alert.alert('Purchase failed', e.message || 'Please try again.');
-    }
+    router.push('/premium?requested=premium');
   };
 
   if (isSubscribed) {

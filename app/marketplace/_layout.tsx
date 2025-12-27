@@ -2,10 +2,13 @@ import { Stack } from 'expo-router';
 
 export default function MarketplaceLayout() {
   return (
-    <Stack>
-      <Stack.Screen name="index" options={{ title: 'Marketplace' }} />
-      <Stack.Screen name="sell" options={{ title: 'Sell Product' }} />
-      <Stack.Screen name="[id]" options={{ title: 'Product Details' }} />
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="index" />
+      <Stack.Screen name="cart" />
+      <Stack.Screen name="checkout" />
+      <Stack.Screen name="sell" />
+      <Stack.Screen name="promote" />
+      <Stack.Screen name="[id]" />
     </Stack>
   );
 }

@@ -152,9 +152,10 @@ function embed(provider: { id: string; name: string; rank: number; disabled?: bo
         'guxhag.com',
         'auvexiug.com',
         'xenolyzb.com',
-        'tryzendm.com',
       ];
-      ctx.url = `https://${domains[Math.floor(Math.random() * domains.length)]}${ctx.url.replace('https://streamwish.to', '')}`;
+      // Replace any streamwish domain with a working alternative
+      const urlPath = ctx.url.replace(/https?:\/\/[^/]+/, '');
+      ctx.url = `https://${domains[Math.floor(Math.random() * domains.length)]}${urlPath}`;
 
       let html: string;
       try {

@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, Image, ScrollView, Button, Alert, ActivityIndic
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { getProductById, Product } from '../api';
+import { formatKsh } from '../../../lib/money';
 
 export default function ProductDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -31,7 +32,7 @@ export default function ProductDetailScreen() {
 
   const handleBuyNow = () => {
     if (!product) return;
-    Alert.alert('Purchase', `You are about to buy ${product.name} for $${product.price.toFixed(2)}. Confirm?`, [
+    Alert.alert('Purchase', `You are about to buy ${product.name} for ${formatKsh(product.price)}. Confirm?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Buy', onPress: () => Alert.alert('Success', 'Product purchased!') }
     ]);
@@ -60,7 +61,7 @@ export default function ProductDetailScreen() {
         <Image source={{ uri: product.imageUrl }} style={styles.productImage} />
         <View style={styles.detailsContainer}>
           <Text style={styles.productName}>{product.name}</Text>
-          <Text style={styles.productPrice}>${product.price.toFixed(2)}</Text>
+          <Text style={styles.productPrice}>{formatKsh(product.price)}</Text>
           <Text style={styles.productDescription}>{product.description}</Text>
           <Text style={styles.sellerInfo}>Seller: {product.sellerName}</Text>
           {product.sellerContact && <Text style={styles.sellerInfo}>Contact: {product.sellerContact}</Text>}

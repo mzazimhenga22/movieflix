@@ -49,6 +49,16 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
   const embedIds = embeds.map((embed) => embed.id);
   let lastId = '';
 
+  // To reduce time-to-first-playback, do a fast pass over all sources first.
+  // Many sources return direct streams quickly; embed scraping is slower and is deferred
+  // until we've given all sources a chance.
+  const deferredEmbeds: Array<{
+    sourceId: string;
+    id: string;
+    embedId: string;
+    url: string;
+  }> = [];
+
   const contextBase: ScrapeContext = {
     fetcher: ops.fetcher,
     proxiedFetcher: ops.proxiedFetcher,
@@ -111,13 +121,26 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
 
     // return stream is there are any
     if (output.stream?.[0]) {
-      const playableStream = await validatePlayableStream(output.stream[0], ops, source.id);
-      if (!playableStream) throw new NotFoundError('No streams found');
+      try {
+        const playableStream = await validatePlayableStream(output.stream[0], ops, source.id);
+        if (!playableStream) throw new NotFoundError('No streams found');
 
-      return {
-        sourceId: source.id,
-        stream: playableStream,
-      };
+        return {
+          sourceId: source.id,
+          stream: playableStream,
+        };
+      } catch (error) {
+        const updateParams: UpdateEvent = {
+          id: source.id,
+          percentage: 100,
+          status: error instanceof NotFoundError ? 'notfound' : 'failure',
+          reason: error instanceof NotFoundError ? error.message : undefined,
+          error: error instanceof NotFoundError ? undefined : error,
+        };
+
+        ops.events?.update?.(updateParams);
+        continue;
+      }
     }
 
     // filter disabled and run embed scrapers on listed embeds
@@ -138,53 +161,63 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
       });
     }
 
+    // Defer embed scraping until after we've tried all sources.
     for (const [ind, embed] of sortedEmbeds.entries()) {
-      const scraper = embeds.find((v) => v.id === embed.embedId);
-      if (!scraper) throw new Error('Invalid embed returned');
+      deferredEmbeds.push({
+        sourceId: source.id,
+        id: [source.id, ind].join('-'),
+        embedId: embed.embedId,
+        url: embed.url,
+      });
+    }
+  }
 
-      // run embed scraper
-      const id = [source.id, ind].join('-');
-      ops.events?.start?.(id);
-      lastId = id;
+  // Second pass: try embed scrapers in discovered order.
+  for (const embed of deferredEmbeds) {
+    const scraper = embeds.find((v) => v.id === embed.embedId);
+    if (!scraper) continue;
 
-      let embedOutput: EmbedOutput;
-      try {
-        embedOutput = await scraper.scrape({
-          ...contextBase,
-          url: embed.url,
-        });
-        embedOutput.stream = embedOutput.stream
-          .filter(isValidStream)
-          .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
-        embedOutput.stream = embedOutput.stream.map((stream) =>
-          requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
-        );
-        if (embedOutput.stream.length === 0) {
-          throw new NotFoundError('No streams found');
-        }
-        const playableStream = await validatePlayableStream(embedOutput.stream[0], ops, embed.embedId);
-        if (!playableStream) throw new NotFoundError('No streams found');
+    ops.events?.start?.(embed.id);
+    lastId = embed.id;
 
-        embedOutput.stream = [playableStream];
-      } catch (error) {
-        const updateParams: UpdateEvent = {
-          id,
-          percentage: 100,
-          status: error instanceof NotFoundError ? 'notfound' : 'failure',
-          reason: error instanceof NotFoundError ? error.message : undefined,
-          error: error instanceof NotFoundError ? undefined : error,
-        };
-
-        ops.events?.update?.(updateParams);
-        continue;
+    let embedOutput: EmbedOutput;
+    try {
+      embedOutput = await scraper.scrape({
+        ...contextBase,
+        url: embed.url,
+      });
+      embedOutput.stream = embedOutput.stream
+        .filter(isValidStream)
+        .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
+      embedOutput.stream = embedOutput.stream.map((stream) =>
+        requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
+      );
+      if (embedOutput.stream.length === 0) {
+        throw new NotFoundError('No streams found');
       }
 
-      return {
-        sourceId: source.id,
-        embedId: scraper.id,
-        stream: embedOutput.stream[0],
+      const playableStream = await validatePlayableStream(embedOutput.stream[0], ops, embed.embedId);
+      if (!playableStream) throw new NotFoundError('No streams found');
+
+      embedOutput.stream = [playableStream];
+    } catch (error) {
+      const updateParams: UpdateEvent = {
+        id: embed.id,
+        percentage: 100,
+        status: error instanceof NotFoundError ? 'notfound' : 'failure',
+        reason: error instanceof NotFoundError ? error.message : undefined,
+        error: error instanceof NotFoundError ? undefined : error,
       };
+
+      ops.events?.update?.(updateParams);
+      continue;
     }
+
+    return {
+      sourceId: embed.sourceId,
+      embedId: scraper.id,
+      stream: embedOutput.stream[0],
+    };
   }
 
   // no providers or embeds returns streams

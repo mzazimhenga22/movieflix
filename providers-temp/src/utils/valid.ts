@@ -41,7 +41,19 @@ export function isValidStream(stream: Stream | undefined): boolean {
  * instead of proxiedFetcher
  */
 function isAlreadyProxyUrl(url: string): boolean {
-  return url.includes('/m3u8-proxy?url=') || url.includes('shegu.net');
+  if (url.includes('/m3u8-proxy?url=')) return true;
+  if (url.includes('shegu.net')) return true;
+
+  // New proxy format used by `createM3U8ProxyUrl`: `...?url=<base64(original)>&h=<base64(headers)>`
+  // If we proxy a stream URL, do NOT proxy it again during validation.
+  try {
+    const match = url.match(/[?&]url=([^&#]+)/i);
+    if (!match) return false;
+    const value = decodeURIComponent(match[1]);
+    return value.startsWith('aHR0c'); // base64("http") / base64("https")
+  } catch {
+    return false;
+  }
 }
 
 /**

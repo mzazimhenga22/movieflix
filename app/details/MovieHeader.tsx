@@ -1,22 +1,25 @@
-import React from 'react';
-import {
-  StyleSheet,
-  View,
-  Text,
-  Image,
-  TouchableOpacity,
-  Dimensions,
-  Platform,
-  ActivityIndicator,
-} from 'react-native';
-import { Ionicons, FontAwesome } from '@expo/vector-icons';
+import { FontAwesome, Ionicons } from '@expo/vector-icons';
+import { Video } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import {
+    ActivityIndicator,
+    Dimensions,
+    Image,
+    Platform,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from 'react-native';
 import { IMAGE_BASE_URL } from '../../constants/api';
 import { Media } from '../../types';
 import PulsePlaceholder from './PulsePlaceholder';
 
 const { width } = Dimensions.get('window');
 const BACKDROP_HEIGHT = 460;
+
+type StreamResult = { url: string; type: 'mp4' | 'hls' | 'dash' | 'unknown'; quality?: string };
 
 interface Props {
   movie: Media | null;
@@ -31,22 +34,27 @@ interface Props {
   onDownload?: () => void;
   downloadStatus?: 'idle' | 'preparing' | 'downloading';
   downloadProgress?: number | null;
+  trailer?: StreamResult | null;
+  trailerAutoPlay?: boolean;
 }
 
-const MovieHeader: React.FC<Props> = ({
-  movie,
-  isLoading,
-  onWatchTrailer,
-  onBack,
-  onAddToMyList,
-  onPlayMovie,
-  isPStreamPlaying,
-  accentColor,
-  isPlayLoading,
-  onDownload,
-  downloadStatus = 'idle',
-  downloadProgress = null,
-}) => {
+const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
+  const {
+    movie,
+    isLoading,
+    onWatchTrailer,
+    onBack,
+    onAddToMyList,
+    onPlayMovie,
+    isPStreamPlaying,
+    accentColor,
+    isPlayLoading,
+    onDownload,
+    downloadStatus = 'idle',
+    downloadProgress = null,
+    trailer = null,
+    trailerAutoPlay = false,
+  } = props;
   const backdropUri = movie ? `${IMAGE_BASE_URL}${movie.backdrop_path || movie.poster_path}` : null;
   const isDownloadBusy = downloadStatus !== 'idle';
   const downloadLabel = isDownloadBusy
@@ -55,27 +63,122 @@ const MovieHeader: React.FC<Props> = ({
       : 'Downloading...'
     : 'Download';
 
+  const videoRef = useRef<Video | null>(null);
+  const [isTrailerPlaying, setIsTrailerPlaying] = useState<boolean>(false);
+  const [dynamicColors, setDynamicColors] = useState<string[]>([]);
+  const colorUpdateInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastColorUpdate = useRef<number>(0);
+
+  useEffect(() => {
+    if (trailer && trailerAutoPlay) {
+      setIsTrailerPlaying(true);
+    }
+    return () => {
+      setIsTrailerPlaying(false);
+    };
+  }, [trailer, trailerAutoPlay]);
+
+  useImperativeHandle(ref, () => ({
+    pauseTrailer: async () => {
+      try {
+        setIsTrailerPlaying(false);
+        if (videoRef.current && typeof videoRef.current.pauseAsync === 'function') {
+          await videoRef.current.pauseAsync();
+        }
+      } catch {}
+    },
+    playTrailer: async () => {
+      try {
+        if (trailer) setIsTrailerPlaying(true);
+        if (videoRef.current && typeof videoRef.current.playAsync === 'function') {
+          await videoRef.current.playAsync();
+        }
+      } catch {}
+    },
+  } as any));
+
+  // Generate dynamic colors based on video playback time
+  const generateDynamicColors = useCallback((timePosition: number = 0) => {
+    const baseHue = (timePosition * 0.001) % 360; // Slow color cycling
+    const saturation = 0.4 + Math.sin(timePosition * 0.002) * 0.2; // Breathing effect
+    const lightness = 0.15 + Math.sin(timePosition * 0.003) * 0.05; // Subtle brightness variation
+
+    const color1 = `hsl(${baseHue}, ${saturation * 100}%, ${lightness * 100}%)`;
+    const color2 = `hsl(${(baseHue + 60) % 360}, ${(saturation * 0.8) * 100}%, ${(lightness * 0.8) * 100}%)`;
+    const color3 = `hsl(${(baseHue + 120) % 360}, ${(saturation * 0.6) * 100}%, ${(lightness * 0.6) * 100}%)`;
+
+    return [color1, color2, color3];
+  }, []);
+
+  const updateColors = useCallback((positionMillis: number) => {
+    const now = Date.now();
+    if (now - lastColorUpdate.current > 200) { // Update every 200ms for smooth transitions
+      const newColors = generateDynamicColors(positionMillis);
+      setDynamicColors(newColors);
+      lastColorUpdate.current = now;
+    }
+  }, [generateDynamicColors]);
+
+  const isTrailerActive = trailer && isTrailerPlaying;
+
+  useEffect(() => {
+    if (isTrailerActive) {
+      // Start color update interval
+      colorUpdateInterval.current = setInterval(() => {
+        const position = Date.now() % 10000; // Use time as position for demo
+        updateColors(position);
+      }, 100);
+
+      return () => {
+        if (colorUpdateInterval.current) {
+          clearInterval(colorUpdateInterval.current);
+          colorUpdateInterval.current = null;
+        }
+      };
+    } else {
+      setDynamicColors([]);
+      if (colorUpdateInterval.current) {
+        clearInterval(colorUpdateInterval.current);
+        colorUpdateInterval.current = null;
+      }
+    }
+  }, [isTrailerActive, updateColors]);
+
   return (
     <View style={styles.backdropContainer}>
-      <LinearGradient
-        colors={[accentColor, '#0a0f1f', '#05060f']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.baseGradient}
-        pointerEvents="none"
-      />
-      {backdropUri ? (
+      {!isTrailerActive && (
+        <LinearGradient
+          colors={[accentColor, '#0a0f1f', '#05060f']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.baseGradient}
+          pointerEvents="none"
+        />
+      )}
+      {trailer && isTrailerPlaying ? (
+        <Video
+          ref={(r) => { videoRef.current = r; }}
+          source={{ uri: trailer.url }}
+          style={styles.backdropImage}
+          resizeMode={'cover' as any}
+          shouldPlay
+          isLooping={false}
+          useNativeControls={false}
+        />
+      ) : backdropUri ? (
         <Image source={{ uri: backdropUri }} style={styles.backdropImage} />
       ) : (
         <PulsePlaceholder style={styles.backdropPlaceholder} />
       )}
-      <LinearGradient
-        colors={['rgba(5,6,15,0.12)', 'rgba(5,6,15,0.6)', 'rgba(5,6,15,0.96)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.backdropTint}
-        pointerEvents="none"
-      />
+      {!isTrailerActive && (
+        <LinearGradient
+          colors={['rgba(5,6,15,0.12)', 'rgba(5,6,15,0.6)', 'rgba(5,6,15,0.96)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.backdropTint}
+          pointerEvents="none"
+        />
+      )}
 
       <View style={styles.topBar}>
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
@@ -91,12 +194,14 @@ const MovieHeader: React.FC<Props> = ({
         )}
       </View>
 
-      <LinearGradient
-        colors={['rgba(5,6,15,0)', 'rgba(5,6,15,0.6)', '#05060f']}
-        locations={[0, 0.5, 1]}
-        style={styles.gradientOverlay}
-        pointerEvents="none"
-      />
+      {!isTrailerActive && (
+        <LinearGradient
+          colors={['rgba(5,6,15,0)', 'rgba(5,6,15,0.6)', '#05060f']}
+          locations={[0, 0.5, 1]}
+          style={styles.gradientOverlay}
+          pointerEvents="none"
+        />
+      )}
 
       <TouchableOpacity
         style={styles.mainPlayButton}
@@ -128,15 +233,20 @@ const MovieHeader: React.FC<Props> = ({
             key={i}
             style={styles.actionItem}
             disabled={btn.key === 'download' && isDownloadBusy}
-            onPress={() => {
-              if (btn.key === 'my-list') {
-                onAddToMyList();
-              } else if (btn.key === 'trailer') {
-                onWatchTrailer();
-              } else if (btn.key === 'download') {
-                onDownload?.();
-              }
-            }}
+              onPress={() => {
+                if (btn.key === 'my-list') {
+                  onAddToMyList();
+                } else if (btn.key === 'trailer') {
+                  if (trailer) {
+                    // toggle in-header trailer playback
+                    setIsTrailerPlaying((v) => !v);
+                  } else {
+                    onWatchTrailer();
+                  }
+                } else if (btn.key === 'download') {
+                  onDownload?.();
+                }
+              }}
           >
             {btn.key === 'download' && isDownloadBusy ? (
               <ActivityIndicator size="small" color="#fff" />
@@ -149,7 +259,7 @@ const MovieHeader: React.FC<Props> = ({
       </View>
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   backdropContainer: {
@@ -172,6 +282,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
   },
   baseGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  dynamicGradient: {
     ...StyleSheet.absoluteFillObject,
   },
   backdropTint: {

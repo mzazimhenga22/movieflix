@@ -6,6 +6,20 @@ import { NotFoundError } from '@/utils/errors';
 
 const baseUrl = 'https://cinehdplus.gratis';
 
+type MirrorCandidate = {
+  url: URL;
+  label: string;
+};
+
+function inferLanguage(label: string): 'english' | 'latino' | 'spanish' | undefined {
+  const lower = (label || '').toLowerCase();
+  if (lower.includes('ingles') || lower.includes('english')) return 'english';
+  if (lower.includes('latino')) return 'latino';
+  if (lower.includes('castellano') || lower.includes('español') || lower.includes('espanol') || lower.includes('spanish'))
+    return 'spanish';
+  return undefined;
+}
+
 async function comboScraper(ctx: ShowScrapeContext): Promise<SourcererOutput> {
   const searchUrl = `${baseUrl}/series/?story=${ctx.media.tmdbId}&do=search&subaction=search`;
 
@@ -44,49 +58,76 @@ async function comboScraper(ctx: ShowScrapeContext): Promise<SourcererOutput> {
   const episodeSelector = `[data-num="${ctx.media.season.number}x${ctx.media.episode.number}"]`;
 
   // Find mirror links for the specific episode
-  const mirrorUrls = $(episodeSelector)
+  const mirrorCandidates: MirrorCandidate[] = $(episodeSelector)
     .siblings('.mirrors')
     .children('[data-link]')
-    .map((_, el) => $(el).attr('data-link'))
-    .get()
-    .filter(Boolean)
-    .filter((link) => !link.match(/cinehdplus/)) // Filter out internal cinehdplus links
-    .map((link) => {
-      // Ensure URLs are properly formatted with https
-      const url = link.startsWith('http') ? link : `https://${link}`;
+    .toArray()
+    .map((el) => {
+      const link = $(el).attr('data-link');
+      if (!link) return null;
+      if (link.match(/cinehdplus/)) return null; // Filter out internal cinehdplus links
+
+      const urlStr = link.startsWith('http') ? link : `https://${link}`;
+      let url: URL;
       try {
-        return new URL(url);
+        url = new URL(urlStr);
       } catch {
         return null;
       }
-    })
-    .filter((url): url is URL => url !== null && url.hostname !== 'cinehdplus.gratis');
+      if (url.hostname === 'cinehdplus.gratis') return null;
 
-  if (!mirrorUrls.length) {
+      const labelParts = [
+        $(el).text(),
+        $(el).attr('data-lang'),
+        $(el).attr('data-title'),
+        $(el).attr('title'),
+        $(el).attr('aria-label'),
+        $(el).attr('class'),
+      ]
+        .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+        .map((v) => v.trim());
+
+      return {
+        url,
+        label: labelParts.join(' '),
+      } as MirrorCandidate;
+    })
+    .filter((v): v is MirrorCandidate => v !== null);
+
+  if (!mirrorCandidates.length) {
     throw new NotFoundError('No streaming links found for this episode');
   }
 
   ctx.progress(70);
 
   // Map URLs to appropriate embed scrapers
-  const embeds = mirrorUrls
-    .map((url) => {
+  const embeds = mirrorCandidates
+    .map(({ url, label }) => {
+      const lang = inferLanguage(label);
+      const host = url.hostname.toLowerCase();
+
       let embedId: string;
 
-      // Map hostname to embed scraper ID
-      if (url.hostname.includes('supervideo')) {
+      // Prefer language-specific embed ids when possible so the runner can prioritize them.
+      if (host.includes('streamwish')) {
+        if (lang === 'latino') embedId = 'streamwish-latino';
+        else if (lang === 'spanish') embedId = 'streamwish-spanish';
+        else embedId = 'streamwish-english';
+      } else if (host.includes('vidhide')) {
+        if (lang === 'latino') embedId = 'vidhide-latino';
+        else if (lang === 'spanish') embedId = 'vidhide-spanish';
+        else embedId = 'vidhide-english';
+      } else if (host.includes('filemoon')) {
+        embedId = 'filemoon';
+      } else if (host.includes('supervideo')) {
         embedId = 'supervideo';
-      } else if (url.hostname.includes('dropload')) {
+      } else if (host.includes('dropload')) {
         embedId = 'dropload';
       } else {
-        // Fallback for unknown hosts - skip this embed
         return null;
       }
 
-      return {
-        embedId,
-        url: url.href,
-      };
+      return { embedId, url: url.href };
     })
     .filter((embed): embed is NonNullable<typeof embed> => embed !== null);
 

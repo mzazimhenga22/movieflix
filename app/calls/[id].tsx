@@ -51,11 +51,15 @@ const CallScreen = () => {
   const [speakerOn, setSpeakerOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isHangingUp, setIsHangingUp] = useState(false);
+  const [isDialing, setIsDialing] = useState(true);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
 
   const peerConnectionRef = useRef<any>(null);
   const hasJoinedRef = useRef(false);
+  const processedOffersRef = useRef<Set<string>>(new Set());
+  const processedAnswersRef = useRef<Set<string>>(new Set());
+  const processedIceRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unsubscribe = onAuthChange((authUser) => {
@@ -69,45 +73,64 @@ const CallScreen = () => {
     const unsubscribe = listenToCall(String(id), async (session) => {
       setCall(session);
 
-        // Handle signaling updates
+      // Handle signaling updates.
+      // Signaling is stored under the sender's userId (signaling.<senderId>.*),
+      // so each client must read from other participants' buckets.
       if (session?.signaling && peerConnectionRef.current && user?.uid) {
-        const userSignaling = session.signaling[user.uid];
-        if (userSignaling) {
-          // Handle offers from other participants
-          if (userSignaling.offer && session.initiatorId !== user.uid) {
-            try {
-              const offer = new RTCSessionDescription(userSignaling.offer);
-              await setRemoteDescription(offer);
-              const answer = await createAnswer();
-              await sendAnswer(session.id, user.uid, answer);
-            } catch (err) {
-              console.warn('Failed to handle offer', err);
-            }
-          }
+        const myUid = user.uid;
+        const isInitiator = session.initiatorId === myUid;
+        const signalingEntries = Object.entries(session.signaling as Record<string, any>);
 
-          // Handle answers from other participants
-          if (userSignaling.answer && session.initiatorId === user.uid) {
-            try {
-              const answer = new RTCSessionDescription(userSignaling.answer);
-              await setRemoteDescription(answer);
-            } catch (err) {
-              console.warn('Failed to handle answer', err);
-            }
-          }
+        for (const [senderId, senderSignaling] of signalingEntries) {
+          if (!senderId || senderId === myUid || !senderSignaling) continue;
 
-          // Handle ICE candidates
-          if (userSignaling.iceCandidates) {
-            for (const candidate of userSignaling.iceCandidates) {
+          // Non-initiators only accept the initiator's offer.
+          if (!isInitiator && senderId === session.initiatorId && senderSignaling.offer) {
+            const offerKey = `${session.id}:${senderId}:offer`;
+            if (!processedOffersRef.current.has(offerKey)) {
+              processedOffersRef.current.add(offerKey);
               try {
-                const iceCandidate = new RTCIceCandidate({
-                  candidate: candidate.candidate || '',
-                  sdpMid: candidate.sdpMid || null,
-                  sdpMLineIndex: candidate.sdpMLineIndex || null,
-                });
-                await addIceCandidate(iceCandidate);
+                const offer = new RTCSessionDescription(senderSignaling.offer);
+                await setRemoteDescription(offer);
+                const answer = await createAnswer();
+                await sendAnswer(session.id, myUid, answer);
               } catch (err) {
-                console.warn('Failed to add ICE candidate', err);
+                console.warn('Failed to handle offer', err);
               }
+            }
+          }
+
+          // Initiator accepts answers from any other participant.
+          if (isInitiator && senderSignaling.answer) {
+            const answerKey = `${session.id}:${senderId}:answer`;
+            if (!processedAnswersRef.current.has(answerKey)) {
+              processedAnswersRef.current.add(answerKey);
+              try {
+                const answer = new RTCSessionDescription(senderSignaling.answer);
+                await setRemoteDescription(answer);
+              } catch (err) {
+                console.warn('Failed to handle answer', err);
+              }
+            }
+          }
+
+          // ICE candidates from other participants (dedupe because snapshots replay the full array).
+          const candidates = Array.isArray(senderSignaling.iceCandidates)
+            ? senderSignaling.iceCandidates
+            : [];
+          for (const candidate of candidates) {
+            const key = `${session.id}:${senderId}:${candidate?.candidate ?? ''}:${candidate?.sdpMid ?? ''}:${candidate?.sdpMLineIndex ?? ''}`;
+            if (processedIceRef.current.has(key)) continue;
+            processedIceRef.current.add(key);
+            try {
+              const iceCandidate = new RTCIceCandidate({
+                candidate: candidate.candidate || '',
+                sdpMid: candidate.sdpMid || null,
+                sdpMLineIndex: candidate.sdpMLineIndex || null,
+              });
+              await addIceCandidate(iceCandidate);
+            } catch (err) {
+              console.warn('Failed to add ICE candidate', err);
             }
           }
         }
@@ -130,7 +153,8 @@ const CallScreen = () => {
       if (call?.id && user?.uid) {
         try {
           await markParticipantLeft(call.id, user.uid);
-          if (endForAll) {
+          const shouldEnd = endForAll || !call?.isGroup;
+          if (shouldEnd) {
             await endCall(call.id, user.uid);
           }
         } catch (err) {
@@ -138,15 +162,22 @@ const CallScreen = () => {
         }
       }
     },
-    [call?.id, user?.uid],
+    [call?.id, call?.isGroup, user?.uid],
   );
 
   const handleHangUp = useCallback(async () => {
     if (isHangingUp) return;
     setIsHangingUp(true);
     const shouldEndForAll = call?.initiatorId === user?.uid;
-    await cleanupConnection(shouldEndForAll);
-  }, [call?.initiatorId, user?.uid, cleanupConnection, isHangingUp]);
+    try {
+      await cleanupConnection(shouldEndForAll);
+      router.back();
+    } catch (err) {
+      console.warn('Hangup failed', err);
+    } finally {
+      setIsHangingUp(false);
+    }
+  }, [call?.initiatorId, user?.uid, cleanupConnection, isHangingUp, router]);
 
   useEffect(() => {
     if (!call?.id || !call?.channelName || !call?.type || !user?.uid) return;
@@ -187,6 +218,7 @@ const CallScreen = () => {
         }
 
         setError(null);
+        setIsDialing(false);
       } catch (err) {
         if (!cancelled) {
           console.warn('Failed to join WebRTC call', err);
@@ -311,7 +343,7 @@ const CallScreen = () => {
               <Ionicons name="call" size={36} color="#fff" />
               <Text style={styles.voiceTitle}>{call.conversationName ?? 'Voice call'}</Text>
               <Text style={styles.voiceSubtitle}>
-                {remoteStream ? 'Connected' : isJoining ? 'Dialing…' : 'Waiting…'}
+                {remoteStream ? 'Connected' : isJoining || isDialing ? 'Dialing… (you can hang up)' : 'Waiting…'}
               </Text>
             </View>
           )}

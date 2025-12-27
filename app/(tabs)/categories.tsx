@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,7 +6,10 @@ import {
   ScrollView,
   ActivityIndicator,
   Platform,
+  TouchableOpacity,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import CategoryCard from '../components/categories/CategoryCard';
 import GenreSelector from '../components/categories/GenreSelector';
@@ -16,6 +19,7 @@ import { Genre, Media } from '../../types';
 import { LinearGradient } from 'expo-linear-gradient';
 import { getAccentFromPosterPath } from '../../constants/theme';
 import { useAccent } from '../components/AccentContext';
+import { getFavoriteGenre, setFavoriteGenre, type FavoriteGenre } from '../../lib/favoriteGenreStorage';
 
 const mainCategories = [
   {
@@ -32,6 +36,44 @@ const mainCategories = [
     id: 'trending',
     title: 'Trending',
     image: 'https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=800&q=80',
+  },
+];
+
+const moodFilters = [
+  {
+    key: 'comfort',
+    label: 'Comfort Classics',
+    icon: 'moon',
+    colors: ['#ff9a9e', '#fad0c4'] as const,
+    genreId: 35,
+  },
+  {
+    key: 'adrenaline',
+    label: 'Adrenaline Rush',
+    icon: 'flash',
+    colors: ['#f83600', '#f9d423'] as const,
+    genreId: 28,
+  },
+  {
+    key: 'mystic',
+    label: 'Mystic Nights',
+    icon: 'planet',
+    colors: ['#7F00FF', '#E100FF'] as const,
+    genreId: 14,
+  },
+  {
+    key: 'romance',
+    label: 'Love Stories',
+    icon: 'heart',
+    colors: ['#ff758c', '#ff7eb3'] as const,
+    genreId: 10749,
+  },
+  {
+    key: 'future',
+    label: 'Future Worlds',
+    icon: 'rocket',
+    colors: ['#43cea2', '#185a9d'] as const,
+    genreId: 878,
   },
 ];
 
@@ -55,12 +97,35 @@ const GlassSkeleton = () => (
 );
 
   const CategoriesScreen: React.FC = () => {
+  const router = useRouter();
+  const params = useLocalSearchParams<{ pickFavorite?: string }>();
+  const pickFavoriteMode = params?.pickFavorite === '1' || params?.pickFavorite === 'true';
+
   const [genres, setGenres] = useState<Genre[]>([]);
   const [genresLoading, setGenresLoading] = useState<boolean>(true);
   const [selectedGenre, setSelectedGenre] = useState<number | null>(null);
   const [moviesByGenre, setMoviesByGenre] = useState<Media[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const { setAccentColor } = useAccent();
+  const [favoriteGenre, setFavoriteGenreState] = useState<FavoriteGenre | null>(null);
+  const [savingFavorite, setSavingFavorite] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      (async () => {
+        const stored = await getFavoriteGenre();
+        if (!alive) return;
+        setFavoriteGenreState(stored);
+        if (pickFavoriteMode && stored?.id && selectedGenre == null) {
+          setSelectedGenre(stored.id);
+        }
+      })();
+      return () => {
+        alive = false;
+      };
+    }, [pickFavoriteMode, selectedGenre])
+  );
 
   useEffect(() => {
     const fetchGenres = async () => {
@@ -103,9 +168,38 @@ const GlassSkeleton = () => (
     fetchMoviesByGenre();
   }, [selectedGenre]);
 
-  const handleSelectGenre = (genreId: number) => {
-    setSelectedGenre((prev) => (prev === genreId ? null : genreId));
-  };
+  const saveAsFavorite = useCallback(
+    async (genreId: number) => {
+      const match = genres.find((g) => g.id === genreId);
+      if (!match) return;
+      const payload: FavoriteGenre = { id: match.id, name: match.name };
+      setSavingFavorite(true);
+      try {
+        await setFavoriteGenre(payload);
+        setFavoriteGenreState(payload);
+      } finally {
+        setSavingFavorite(false);
+      }
+    },
+    [genres],
+  );
+
+  const handleSelectGenre = useCallback(
+    async (genreId: number) => {
+      if (pickFavoriteMode) {
+        setSelectedGenre(genreId);
+        await saveAsFavorite(genreId);
+        try {
+          router.back();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      setSelectedGenre((prev) => (prev === genreId ? null : genreId));
+    },
+    [pickFavoriteMode, router, saveAsFavorite],
+  );
 
   const handleCategoryPress = (categoryId: string) => {
     console.log(`Category pressed: ${categoryId}`);
@@ -117,8 +211,9 @@ const GlassSkeleton = () => (
     : null;
 
   const accentColor = getAccentFromPosterPath(
-      moviesByGenre[0]?.poster_path || mainCategories[0]?.image || undefined
-    );
+    moviesByGenre[0]?.poster_path || mainCategories[0]?.image || undefined
+  );
+  const accentBase = accentColor || '#e50914';
 
     useEffect(() => {
       if (accentColor) {
@@ -126,15 +221,42 @@ const GlassSkeleton = () => (
       }
     }, [accentColor, setAccentColor]);
 
+  const heroStats = useMemo(
+    () => [
+      { label: 'Genres', value: genres.length ? `${genres.length}+` : '—' },
+      { label: 'Spotlights', value: `${mainCategories.length}` },
+      {
+        label: selectedGenreName ? selectedGenreName : 'Curations',
+        value: moviesByGenre.length ? `${moviesByGenre.length}` : '—',
+      },
+    ],
+    [genres.length, moviesByGenre.length, selectedGenreName]
+  );
+
+  const handleShuffleGenre = useCallback(() => {
+    if (!genres.length) return;
+    const random = genres[Math.floor(Math.random() * genres.length)]?.id;
+    if (random) {
+      setSelectedGenre(random);
+    }
+  }, [genres]);
+
+  const handleQuickGenre = useCallback(
+    (genreId: number | null) => {
+      if (genreId == null) return;
+      void handleSelectGenre(genreId);
+    },
+    [handleSelectGenre]
+  );
+
   return (
     <ScreenWrapper>
       <LinearGradient
-        colors={[accentColor, '#150a13', '#05060f']}
+        colors={[accentBase, '#150a13', '#05060f']}
         start={[0, 0]}
         end={[1, 1]}
         style={styles.gradient}
       >
-        {/* liquid background orbs for glassy depth */}
         <LinearGradient
           colors={['rgba(125,216,255,0.2)', 'rgba(255,255,255,0)']}
           start={{ x: 0.1, y: 0 }}
@@ -147,96 +269,179 @@ const GlassSkeleton = () => (
           end={{ x: 0.2, y: 1 }}
           style={styles.bgOrbSecondary}
         />
-        <ScrollView contentContainerStyle={styles.container}>
-          {/* Header / Title (glassy hero) */}
-          <View style={styles.headerWrap}>
+        <ScrollView contentContainerStyle={styles.content}>
+          <View style={styles.heroCard}>
             <LinearGradient
-              colors={['#e50914', '#b20710']}
+              colors={[accentBase, 'rgba(5,6,15,0.92)']}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
-              style={styles.headerGlow}
-            />
-            <View style={styles.headerGlass}>
-              <View style={styles.headerTitleRow}>
-                <View style={styles.headerAccent} />
+              style={styles.heroGradient}
+            >
+              <View style={styles.heroTopRow}>
                 <View>
-                  <Text style={styles.headerEyebrow}>Browse by vibe</Text>
-                  <Text style={styles.headerText}>Categories</Text>
+                  <Text style={styles.heroEyebrow}>Your cinema atlas</Text>
+                  <Text style={styles.heroTitle}>{pickFavoriteMode ? 'Pick a Favorite' : 'Categories'}</Text>
+                  <Text style={styles.heroSubtitle}>
+                    {pickFavoriteMode
+                      ? 'Tap a genre to save it to your profile'
+                      : 'Dive into curated realms & vibes'}
+                  </Text>
                 </View>
+                <TouchableOpacity style={styles.shuffleBtn} onPress={handleShuffleGenre}>
+                  <Ionicons name="shuffle" size={18} color="#fff" />
+                  <Text style={styles.shuffleText}>Shuffle</Text>
+                </TouchableOpacity>
               </View>
-              <View style={styles.headerMetaRow}>
-                <View style={styles.metaPill}>
-                  <Text style={styles.metaText}>Genres</Text>
-                </View>
-                <View style={[styles.metaPill, styles.metaPillAlt]}>
-                  <Text style={styles.metaText}>New & Trending</Text>
-                </View>
-                <View style={[styles.metaPill, styles.metaPillGhost]}>
-                  <Text style={styles.metaText}>Curated</Text>
-                </View>
+              <View style={styles.heroStatsRow}>
+                {heroStats.map((stat) => (
+                  <View key={stat.label} style={styles.heroStatCard}>
+                    <Text style={styles.heroStatValue}>{stat.value}</Text>
+                    <Text style={styles.heroStatLabel}>{stat.label}</Text>
+                  </View>
+                ))}
               </View>
-            </View>
+              <View style={styles.heroActions}>
+                <TouchableOpacity
+                  style={styles.heroPrimaryAction}
+                  onPress={() => handleCategoryPress('featured')}
+                >
+                  <Text style={styles.heroPrimaryText}>View spotlight</Text>
+                  <Ionicons name="arrow-forward" size={18} color="#000" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.heroGhostAction}
+                  onPress={() => setSelectedGenre(null)}
+                >
+                  <Ionicons name="sparkles-outline" size={18} color="#fff" />
+                  <Text style={styles.heroGhostText}>Reset filter</Text>
+                </TouchableOpacity>
+              </View>
+            </LinearGradient>
           </View>
 
-          {/* If genres are loading show skeleton that matches home screen */}
           {genresLoading ? (
             <GlassSkeleton />
           ) : (
             <>
-              {/* Main Categories — glass card */}
-              <View style={styles.sectionGlass}>
-                <View style={styles.sectionHeaderRow}>
-                  <Text style={styles.sectionTitle}>Spotlight</Text>
-                  <Text style={styles.sectionSubtitle}>Pick a vibe</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.moodRow}
+              >
+                {moodFilters.map((filter) => {
+                  const isActive = selectedGenre === filter.genreId;
+                  return (
+                    <TouchableOpacity
+                      key={filter.key}
+                      activeOpacity={0.9}
+                      onPress={() => handleQuickGenre(filter.genreId)}
+                    >
+                      <LinearGradient
+                        colors={filter.colors}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[styles.moodChip, isActive && styles.moodChipActive]}
+                      >
+                        <Ionicons name={filter.icon as any} size={16} color="#fff" />
+                        <Text style={styles.moodChipText}>{filter.label}</Text>
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={styles.sectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Spotlight Collections</Text>
+                  <TouchableOpacity onPress={() => handleCategoryPress('featured')}>
+                    <Text style={styles.sectionAction}>See all</Text>
+                  </TouchableOpacity>
                 </View>
-                <View style={styles.mainCategoriesSection}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.spotlightRow}
+                >
                   {mainCategories.map((category) => (
-                    <CategoryCard
-                      key={category.id}
-                      title={category.title}
-                      image={category.image}
-                      onPress={() => handleCategoryPress(category.id)}
-                    />
+                    <View key={category.id} style={styles.spotlightCard}>
+                      <CategoryCard
+                        title={category.title}
+                        image={category.image}
+                        onPress={() => handleCategoryPress(category.id)}
+                      />
+                    </View>
                   ))}
-                </View>
+                </ScrollView>
               </View>
 
-              {/* Genre selector */}
-              <View style={[styles.sectionGlass, styles.genreGlass]}>
-                <View style={styles.sectionHeaderRow}>
-                  <Text style={styles.sectionTitle}>Genres</Text>
+              <View style={styles.sectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Genre Universe</Text>
                   <Text style={styles.sectionSubtitle}>Tap to filter</Text>
                 </View>
-                <GenreSelector
-                  genres={genres}
-                  selectedGenre={selectedGenre}
-                  onSelectGenre={handleSelectGenre}
-                />
+                <View style={styles.genreSelectorWrap}>
+                  <GenreSelector
+                    genres={genres}
+                    selectedGenre={selectedGenre}
+                    onSelectGenre={handleSelectGenre}
+                  />
+                </View>
+                {!pickFavoriteMode && (
+                  <View style={styles.favoriteRow}>
+                    <View style={styles.favoriteInfo}>
+                      <Text style={styles.favoriteLabel}>Favorite genre</Text>
+                      <Text style={styles.favoriteValue} numberOfLines={1}>
+                        {favoriteGenre?.name ?? 'Not set'}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[
+                        styles.favoriteBtn,
+                        (!selectedGenre || savingFavorite) && { opacity: 0.55 },
+                      ]}
+                      disabled={!selectedGenre || savingFavorite}
+                      onPress={() => {
+                        if (selectedGenre) void saveAsFavorite(selectedGenre);
+                      }}
+                    >
+                      <Ionicons name="star" size={16} color="#fff" />
+                      <Text style={styles.favoriteBtnText}>
+                        {savingFavorite
+                          ? 'Saving…'
+                          : selectedGenre && favoriteGenre?.id === selectedGenre
+                            ? 'Favorited'
+                            : 'Set favorite'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
 
-              {/* Results / loader */}
-              {isLoading ? (
-                <View style={styles.loaderWrap}>
-                  <ActivityIndicator size="large" color="#E50914" />
+              <View style={[styles.sectionCard, styles.resultsCard]}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Curated Picks</Text>
+                  {selectedGenreName ? (
+                    <View style={styles.chip}>
+                      <Text style={styles.chipText}>{selectedGenreName}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.sectionSubtitle}>Select a genre to preview</Text>
+                  )}
                 </View>
-              ) : selectedGenre !== null ? (
-                <View style={[styles.sectionGlass, styles.resultsGlass]}>
-                  <View style={styles.sectionHeaderRow}>
-                    <Text style={styles.sectionTitle}>Results</Text>
-                    {selectedGenreName ? (
-                      <View style={styles.chip}>
-                        <Text style={styles.chipText}>{selectedGenreName}</Text>
-                      </View>
-                    ) : null}
+                {isLoading ? (
+                  <View style={styles.loaderWrap}>
+                    <ActivityIndicator size="large" color="#E50914" />
                   </View>
-                  <MovieList title="Results" movies={moviesByGenre} carousel={true} />
-                </View>
-              ) : null}
+                ) : selectedGenre !== null && moviesByGenre.length ? (
+                  <MovieList title="" movies={moviesByGenre} carousel />
+                ) : (
+                  <Text style={styles.emptyState}>Choose a genre to see curated titles.</Text>
+                )}
+              </View>
             </>
           )}
 
-          {/* bottom spacing */}
-          <View style={{ height: 90 }} />
+          <View style={{ height: 120 }} />
         </ScrollView>
       </LinearGradient>
     </ScreenWrapper>
@@ -244,9 +449,7 @@ const GlassSkeleton = () => (
 };
 
 const styles = StyleSheet.create({
-  gradient: {
-    flex: 1,
-  },
+  gradient: { flex: 1 },
   bgOrbPrimary: {
     position: 'absolute',
     width: 360,
@@ -259,209 +462,316 @@ const styles = StyleSheet.create({
   },
   bgOrbSecondary: {
     position: 'absolute',
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    bottom: -80,
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    bottom: -90,
     right: -20,
-    opacity: 0.55,
-    transform: [{ rotate: '-10deg' }],
+    opacity: 0.5,
+    transform: [{ rotate: '-12deg' }],
   },
-  container: {
+  content: {
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'ios' ? 44 : 18,
-    paddingBottom: 48,
+    paddingTop: Platform.OS === 'ios' ? 50 : 28,
+    paddingBottom: 80,
   },
-
-  // Header
-  headerWrap: {
-    marginBottom: 14,
-    borderRadius: 18,
+  heroCard: {
+    borderRadius: 24,
     overflow: 'hidden',
-  },
-  headerGlow: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.75,
-  },
-  headerGlass: {
-    borderRadius: 18,
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    marginBottom: 20,
     shadowColor: '#000',
-    shadowOpacity: 0.16,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
   },
-  headerTitleRow: {
+  heroGradient: {
+    padding: 20,
+    borderRadius: 24,
+  },
+  heroTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 16,
+  },
+  heroEyebrow: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 12,
+    letterSpacing: 0.6,
+  },
+  heroTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '900',
+  },
+  heroSubtitle: {
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 4,
+  },
+  shuffleBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-  },
-  headerAccent: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#e50914',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.6,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 0.5,
-  },
-  headerText: {
-    color: '#fefefe',
-    fontSize: 24,
-    fontWeight: '800',
-    letterSpacing: 0.3,
-  },
-  headerMetaRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 10,
-  },
-  metaPill: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.3)',
   },
-  metaPillAlt: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  metaPillGhost: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  metaText: {
+  shuffleText: {
     color: '#fff',
-    fontSize: 12,
     fontWeight: '700',
   },
-  sectionHeaderRow: {
+  heroStatsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 18,
+  },
+  heroStatCard: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  heroStatValue: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  heroStatLabel: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 12,
+    marginTop: 4,
+    textTransform: 'uppercase',
+  },
+  heroActions: {
+    flexDirection: 'row',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  heroPrimaryAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+  },
+  heroPrimaryText: {
+    color: '#000',
+    fontWeight: '800',
+  },
+  heroGhostAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  heroGhostText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  moodRow: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingBottom: 12,
+    paddingTop: 4,
+  },
+  moodChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    opacity: 0.9,
+  },
+  moodChipActive: {
+    borderColor: '#fff',
+    transform: [{ scale: 1.02 }],
+  },
+  moodChipText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  sectionCard: {
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 16,
+    backgroundColor: 'rgba(5,5,15,0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   sectionTitle: {
-    color: '#fefefe',
-    fontSize: 16,
+    color: '#fff',
+    fontSize: 18,
     fontWeight: '800',
-    letterSpacing: 0.2,
   },
   sectionSubtitle: {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 12,
   },
-
-  // Section glass card
-  sectionGlass: {
+  sectionAction: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  spotlightRow: {
+    gap: 12,
+    paddingRight: 8,
+  },
+  spotlightCard: {
+    width: 220,
+  },
+  genreSelectorWrap: {
     borderRadius: 16,
-    marginBottom: 16,
-    padding: 12,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(255,255,255,0.045)',
-    shadowColor: '#000',
-    shadowOpacity: 0.14,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
+    backgroundColor: 'rgba(255,255,255,0.02)',
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  favoriteRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  favoriteInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  favoriteLabel: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+  },
+  favoriteValue: {
+    marginTop: 4,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  favoriteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  favoriteBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  resultsCard: {
+    paddingBottom: 8,
   },
   chip: {
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.2)',
     backgroundColor: 'rgba(255,255,255,0.08)',
   },
   chipText: {
     color: '#fff',
-    fontSize: 12,
     fontWeight: '700',
+    fontSize: 12,
   },
-
-  // main categories
-  mainCategoriesSection: {
-    flexDirection: 'column',
-    gap: 12,
-  },
-
-  // genre selector glass tweaks
-  genreGlass: {
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-  },
-
-  resultsGlass: {
-    paddingVertical: 8,
-    paddingHorizontal: 6,
-  },
-
-  // Loader wrapper
   loaderWrap: {
     alignItems: 'center',
-    marginTop: 18,
+    justifyContent: 'center',
+    paddingVertical: 20,
   },
-
-  // Skeleton styles (to match homescreen look)
+  emptyState: {
+    color: 'rgba(255,255,255,0.7)',
+    paddingVertical: 16,
+    textAlign: 'center',
+  },
   skeletonWrap: {
     paddingVertical: 6,
     gap: 12,
   },
   glassCard: {
-    borderRadius: 12,
-    padding: 10,
-    backgroundColor: 'rgba(255,255,255,0.02)',
+    borderRadius: 16,
+    padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)',
     borderColor: 'rgba(255,255,255,0.06)',
     borderWidth: 1,
     marginBottom: 12,
   },
   skelHeader: {
-    height: 60,
+    height: 80,
     justifyContent: 'center',
     alignItems: 'center',
   },
   skelCategories: {
-    minHeight: 120,
+    minHeight: 140,
     paddingVertical: 16,
     paddingHorizontal: 12,
   },
   skelList: {
-    minHeight: 140,
+    minHeight: 150,
     padding: 12,
   },
   skelTitle: {
     height: 14,
-    width: '50%',
-    backgroundColor: 'rgba(255,255,255,0.03)',
+    width: '60%',
+    backgroundColor: 'rgba(255,255,255,0.05)',
     borderRadius: 8,
   },
   skelRow: {
     height: 40,
     width: '100%',
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 10,
   },
   skelLine: {
     height: 12,
     width: '85%',
-    backgroundColor: 'rgba(255,255,255,0.03)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderRadius: 8,
     marginBottom: 8,
   },
   skelLineShort: {
     height: 12,
     width: '40%',
-    backgroundColor: 'rgba(255,255,255,0.03)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderRadius: 8,
   },
 });

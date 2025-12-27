@@ -2,29 +2,27 @@ import { flags } from '@/entrypoint/utils/targets';
 import { makeEmbed } from '@/providers/base';
 import { HlsBasedStream } from '@/providers/streams';
 import { NotFoundError } from '@/utils/errors';
+import { Buffer } from 'buffer';
+import { gcm } from '@noble/ciphers/aes.js';
 
 const PASSPHRASE = 'T8c8PQlSQVU4mBuW4CbE/g57VBbM5009QHd+ym93aZZ5pEeVpToY6OdpYPvRMVYp';
 
 async function decryptVidnestData(encryptedBase64: string): Promise<any> {
-  // Decode base64 to get encrypted bytes
-  const encryptedBytes = Uint8Array.from(atob(encryptedBase64), (c) => c.charCodeAt(0));
-
-  // Extract IV (first 12 bytes), ciphertext (middle), and auth tag (last 16 bytes)
-  const iv = encryptedBytes.slice(0, 12);
-  const ciphertext = encryptedBytes.slice(12, -16);
-  const tag = encryptedBytes.slice(-16);
-
-  // Create key from passphrase (decode base64 first, then take first 32 bytes)
-  const keyData = Uint8Array.from(atob(PASSPHRASE), (c) => c.charCodeAt(0)).slice(0, 32);
-  const key = await crypto.subtle.importKey('raw', keyData, { name: 'AES-GCM' }, false, ['decrypt']);
-
-  // Combine ciphertext and tag for decryption
-  const encrypted = new Uint8Array([...ciphertext, ...tag]);
-
   try {
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, encrypted);
+    const encryptedBytes = Buffer.from(encryptedBase64, 'base64');
+    const iv = encryptedBytes.subarray(0, 12);
+    const ciphertext = encryptedBytes.subarray(12, -16);
+    const tag = encryptedBytes.subarray(-16);
 
-    const decryptedText = new TextDecoder().decode(decrypted);
+    const payload = new Uint8Array(ciphertext.length + tag.length);
+    payload.set(ciphertext, 0);
+    payload.set(tag, ciphertext.length);
+
+    const key = Buffer.from(PASSPHRASE, 'base64').subarray(0, 32);
+    const cipher = gcm(key, iv);
+    const decryptedBytes = cipher.decrypt(payload);
+    const decryptedText = Buffer.from(decryptedBytes).toString('utf-8');
+
     return JSON.parse(decryptedText);
   } catch (error) {
     throw new NotFoundError('Failed to decrypt data');

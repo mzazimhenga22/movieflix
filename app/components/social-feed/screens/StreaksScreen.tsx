@@ -1,8 +1,9 @@
 import { getAllStreaks, updateStreakForContext } from '@/lib/streaks/streakManager';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+    Animated,
     FlatList,
     Modal,
     SafeAreaView,
@@ -13,6 +14,7 @@ import {
 } from 'react-native';
 import ScreenWrapper from '../../../../components/ScreenWrapper';
 import { findOrCreateConversation, getFollowing, Profile } from '../../../messaging/controller';
+import { useAccent } from '../../AccentContext';
 
 interface Streak {
   id: string;
@@ -24,6 +26,8 @@ interface Streak {
 }
 
 type StreakRect = { x: number; y: number; width: number; height: number };
+
+type GradientPalette = [string, string, string];
 
 interface StreakRowProps {
   item: Streak;
@@ -87,6 +91,38 @@ export default function StreaksScreen() {
   const [isBootstrapping, setBootstrapping] = useState(false);
   const [spotlightStreak, setSpotlightStreak] = useState<Streak | null>(null);
   const [spotlightRect, setSpotlightRect] = useState<StreakRect | null>(null);
+  const { accentColor, setAccentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+  const gradientFade = useRef(new Animated.Value(0)).current;
+  const gradientPalettes = useMemo<GradientPalette[]>(() => (
+    [
+      [accent, '#140a21', '#050508'],
+      ['#1e0f2f', '#09040f', '#050505'],
+      ['#291239', '#100620', '#050509'],
+    ]
+  ), [accent]);
+  const [gradientIndex, setGradientIndex] = useState(0);
+  const paletteCount = gradientPalettes.length;
+  const nextGradientIndex = (gradientIndex + 1) % paletteCount;
+
+  useEffect(() => {
+    setAccentColor('#e50914');
+  }, [setAccentColor]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      gradientFade.setValue(0);
+      Animated.timing(gradientFade, {
+        toValue: 1,
+        duration: 1400,
+        useNativeDriver: true,
+      }).start(() => {
+        setGradientIndex((prev) => (prev + 1) % paletteCount);
+        gradientFade.setValue(0);
+      });
+    }, 9000);
+    return () => clearInterval(interval);
+  }, [gradientFade, paletteCount]);
 
   const loadStreaks = useCallback(async () => {
     try {
@@ -174,8 +210,8 @@ export default function StreaksScreen() {
       const conversationId = parts.length >= 3 ? parts[2] : null;
       if (conversationId) {
         router.push({
-          pathname: `/messaging/chat/${conversationId}`,
-          params: { fromStreak: '1' },
+          pathname: '/messaging/chat/[id]',
+          params: { id: conversationId, fromStreak: '1' },
         });
       }
       return;
@@ -240,8 +276,8 @@ export default function StreaksScreen() {
 
       if (firstConversationId) {
         router.push({
-          pathname: `/messaging/chat/${firstConversationId}`,
-          params: { fromStreak: '1' },
+          pathname: '/messaging/chat/[id]',
+          params: { id: firstConversationId, fromStreak: '1' },
         });
       }
 
@@ -257,149 +293,201 @@ export default function StreaksScreen() {
   );
 
   return (
-    <View style={styles.container}>
-      <ScreenWrapper>
-        <View style={styles.header}>
-          <Text style={styles.title}>Your Streaks</Text>
-          <TouchableOpacity
-            style={styles.startButton}
-            activeOpacity={0.85}
-            onPress={() => setPickerVisible(true)}
-          >
-            <Text style={styles.startButtonText}>Start streaks</Text>
-          </TouchableOpacity>
-        </View>
-        <FlatList
-          data={streaks}
-          renderItem={renderStreak}
-          keyExtractor={(item, index) => `${item.id}-${index}`}
-          contentContainerStyle={styles.list}
+    <ScreenWrapper>
+      <View style={styles.background} pointerEvents="none">
+        <LinearGradient
+          colors={gradientPalettes[gradientIndex]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradientLayer}
         />
-
-        <Modal
-          transparent
-          visible={isPickerVisible}
-          animationType="slide"
-          onRequestClose={() => setPickerVisible(false)}
+        <Animated.View pointerEvents="none" style={[styles.gradientLayer, { opacity: gradientFade }]}> 
+          <LinearGradient
+            colors={gradientPalettes[nextGradientIndex]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.gradientLayer}
+          />
+        </Animated.View>
+        <LinearGradient
+          colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.1, y: 0 }}
+          end={{ x: 0.9, y: 1 }}
+          style={styles.bgOrbPrimary}
+        />
+        <LinearGradient
+          colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.8, y: 0 }}
+          end={{ x: 0.2, y: 1 }}
+          style={styles.bgOrbSecondary}
+        />
+      </View>
+      <View style={styles.header}>
+        <Text style={styles.title}>Your Streaks</Text>
+        <TouchableOpacity
+          style={styles.startButton}
+          activeOpacity={0.85}
+          onPress={() => setPickerVisible(true)}
         >
-          <View style={styles.sheetOverlay}>
-            <TouchableOpacity
-              style={styles.sheetBackdrop}
-              activeOpacity={1}
-              onPress={() => setPickerVisible(false)}
+          <Text style={styles.startButtonText}>Start streaks</Text>
+        </TouchableOpacity>
+      </View>
+      <FlatList
+        data={streaks}
+        renderItem={renderStreak}
+        keyExtractor={(item, index) => `${item.id}-${index}`}
+        contentContainerStyle={styles.list}
+      />
+
+      <Modal
+        transparent
+        visible={isPickerVisible}
+        animationType="slide"
+        onRequestClose={() => setPickerVisible(false)}
+      >
+        <View style={styles.sheetOverlay}>
+          <TouchableOpacity
+            style={styles.sheetBackdrop}
+            activeOpacity={1}
+            onPress={() => setPickerVisible(false)}
+          />
+          <SafeAreaView style={styles.sheetContainer}>
+            <Text style={styles.sheetTitle}>Start streak with</Text>
+            <FlatList
+              data={followers}
+              keyExtractor={(item, index) => `${item.id}-${index}`}
+              contentContainerStyle={styles.sheetList}
+              renderItem={({ item }) => {
+                const selected = selectedFollowerIds.has(item.id);
+                return (
+                  <TouchableOpacity
+                    style={[styles.followerRow, selected && styles.followerRowSelected]}
+                    activeOpacity={0.85}
+                    onPress={() => toggleFollowerSelection(item.id)}
+                  >
+                    <View style={styles.followerAvatar} />
+                    <View style={styles.followerInfo}>
+                      <Text style={styles.followerName}>
+                        {item.displayName || 'User'}
+                      </Text>
+                    </View>
+                    <View style={[styles.checkbox, selected && styles.checkboxSelected]} />
+                  </TouchableOpacity>
+                );
+              }}
             />
-            <SafeAreaView style={styles.sheetContainer}>
-              <Text style={styles.sheetTitle}>Start streak with</Text>
-              <FlatList
-                data={followers}
-                keyExtractor={(item, index) => `${item.id}-${index}`}
-                contentContainerStyle={styles.sheetList}
-                renderItem={({ item }) => {
-                  const selected = selectedFollowerIds.has(item.id);
-                  return (
-                    <TouchableOpacity
-                      style={[styles.followerRow, selected && styles.followerRowSelected]}
-                      activeOpacity={0.85}
-                      onPress={() => toggleFollowerSelection(item.id)}
-                    >
-                      <View style={styles.followerAvatar} />
-                      <View style={styles.followerInfo}>
-                        <Text style={styles.followerName}>
-                          {item.displayName || 'User'}
-                        </Text>
-                      </View>
-                      <View style={[styles.checkbox, selected && styles.checkboxSelected]} />
-                    </TouchableOpacity>
-                  );
-                }}
-              />
-              <View style={styles.sheetActions}>
-                <TouchableOpacity
-                  style={[styles.sheetButton, styles.sheetButtonSecondary]}
-                  onPress={() => setPickerVisible(false)}
-                >
-                  <Text style={styles.sheetButtonSecondaryText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.sheetButton, styles.sheetButtonPrimary]}
-                  onPress={handleStartStreaks}
-                  disabled={isBootstrapping}
-                >
-                  <Text style={styles.sheetButtonPrimaryText}>
-                    {isBootstrapping ? 'Starting…' : 'Start streak'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </SafeAreaView>
-          </View>
-        </Modal>
-
-        {spotlightStreak && spotlightRect && (
-          <View style={styles.spotlightOverlay} pointerEvents="box-none">
-            <TouchableOpacity
-              style={styles.spotlightTouch}
-              activeOpacity={1}
-              onPress={closeStreakSpotlight}
-            >
-              <View style={styles.spotlightBackdrop} />
-            </TouchableOpacity>
-
-            <View
-              style={[
-                styles.spotlightRowContainer,
-                { top: spotlightRect.y + 24 },
-              ]}
-            >
-              <LinearGradient
-                colors={['#ff4b4b', '#ff8080']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.spotlightCard}
+            <View style={styles.sheetActions}>
+              <TouchableOpacity
+                style={[styles.sheetButton, styles.sheetButtonSecondary]}
+                onPress={() => setPickerVisible(false)}
               >
-                <Text style={styles.spotlightTitle}>
-                  {spotlightStreak.activity}
+                <Text style={styles.sheetButtonSecondaryText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.sheetButton, styles.sheetButtonPrimary]}
+                onPress={handleStartStreaks}
+                disabled={isBootstrapping}
+              >
+                <Text style={styles.sheetButtonPrimaryText}>
+                  {isBootstrapping ? 'Starting…' : 'Start streak'}
                 </Text>
-                <Text style={styles.spotlightSubtitle}>
-                  {spotlightStreak.days} day streak · Last {spotlightStreak.lastUpdate}
-                </Text>
-              </LinearGradient>
+              </TouchableOpacity>
             </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
 
-            <View
-              style={[
-                styles.spotlightContent,
-                { top: spotlightRect.y + spotlightRect.height + 32 },
-              ]}
+      {spotlightStreak && spotlightRect && (
+        <View style={styles.spotlightOverlay} pointerEvents="box-none">
+          <TouchableOpacity
+            style={styles.spotlightTouch}
+            activeOpacity={1}
+            onPress={closeStreakSpotlight}
+          >
+            <View style={styles.spotlightBackdrop} />
+          </TouchableOpacity>
+
+          <View
+            style={[
+              styles.spotlightRowContainer,
+              { top: spotlightRect.y + 24 },
+            ]}
+          >
+            <LinearGradient
+              colors={['#ff4b4b', '#ff8080']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.spotlightCard}
             >
-              <View style={styles.spotlightActionsRow}>
-                <TouchableOpacity
-                  style={styles.spotlightPill}
-                  onPress={() => {
-                    handleOpenStreak(spotlightStreak);
-                    closeStreakSpotlight();
-                  }}
-                >
-                  <Text style={styles.spotlightPillText}>Open chat</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.spotlightPill, styles.spotlightPillSecondary]}
-                  onPress={closeStreakSpotlight}
-                >
-                  <Text style={styles.spotlightPillSecondaryText}>Close</Text>
-                </TouchableOpacity>
-              </View>
+              <Text style={styles.spotlightTitle}>
+                {spotlightStreak.activity}
+              </Text>
+              <Text style={styles.spotlightSubtitle}>
+                {spotlightStreak.days} day streak · Last {spotlightStreak.lastUpdate}
+              </Text>
+            </LinearGradient>
+          </View>
+
+          <View
+            style={[
+              styles.spotlightContent,
+              { top: spotlightRect.y + spotlightRect.height + 32 },
+            ]}
+          >
+            <View style={styles.spotlightActionsRow}>
+              <TouchableOpacity
+                style={styles.spotlightPill}
+                onPress={() => {
+                  handleOpenStreak(spotlightStreak);
+                  closeStreakSpotlight();
+                }}
+              >
+                <Text style={styles.spotlightPillText}>Open chat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.spotlightPill, styles.spotlightPillSecondary]}
+                onPress={closeStreakSpotlight}
+              >
+                <Text style={styles.spotlightPillSecondaryText}>Close</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        )}
-      </ScreenWrapper>
-    </View>
+        </View>
+      )}
+    </ScreenWrapper>
   );
 }
 
 const styles = StyleSheet.create({
+  background: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  gradientLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 340,
+    height: 340,
+    borderRadius: 170,
+    top: -80,
+    left: -50,
+    opacity: 0.55,
+    transform: [{ rotate: '14deg' }],
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    bottom: -100,
+    right: -20,
+    opacity: 0.42,
+    transform: [{ rotate: '-12deg' }],
+  },
   container: {
     flex: 1,
-    backgroundColor: '#630303ff',
+    backgroundColor: 'transparent',
   },
   header: {
     paddingHorizontal: 16,

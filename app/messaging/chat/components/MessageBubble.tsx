@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Dimensions, GestureResponderEvent, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
+import { LinearGradient } from 'expo-linear-gradient';
+
+import { useAccent } from '../../../components/AccentContext';
+import { darkenColor, lightenColor, withAlpha } from '@/lib/colorUtils';
 
 interface MessageItem {
   id?: string;
@@ -26,7 +31,9 @@ interface MessageItem {
 interface Props {
   item: MessageItem;
   isMe: boolean;
+  groupPosition?: 'single' | 'first' | 'middle' | 'last';
   avatar?: string;
+  senderName?: string;
   onLongPress?: (
     item: MessageItem,
     rect: { x: number; y: number; width: number; height: number }
@@ -35,12 +42,56 @@ interface Props {
   onPressReaction?: (emoji: string) => void;
 }
 
-const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props) => {
-  const time = item.createdAt?.toDate
-    ? item.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : '';
+const MessageBubble = ({ item, isMe, groupPosition = 'single', avatar, senderName, onLongPress, onPressMedia, onPressReaction }: Props) => {
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+  const myGradientColors: readonly [string, string, string] = [
+    withAlpha(lightenColor(accent, 0.08), 0.98),
+    withAlpha(accent, 0.96),
+    withAlpha(darkenColor(accent, 0.28), 0.98),
+  ];
+  const otherGradientColors: readonly [string, string] = [
+    'rgba(255,255,255,0.09)',
+    'rgba(255,255,255,0.045)',
+  ];
+  const replyAccent = isMe ? 'rgba(255,255,255,0.55)' : withAlpha(accent, 0.7);
+  const replyGradientColors: readonly [string, string] = isMe
+    ? ['rgba(0,0,0,0.22)', 'rgba(0,0,0,0.10)']
+    : [
+        withAlpha(lightenColor(accent, 0.2), 0.22),
+        withAlpha(darkenColor(accent, 0.55), 0.12),
+      ];
+
+  const time = (() => {
+    const createdAt = item.createdAt;
+    try {
+      if (!createdAt) return '';
+      if (typeof createdAt === 'number') {
+        return new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      if (typeof createdAt?.toMillis === 'function') {
+        return new Date(createdAt.toMillis()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      if (typeof createdAt?.toDate === 'function') {
+        return createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      return '';
+    } catch {
+      return '';
+    }
+  })();
   const bubbleRef = useRef<View | null>(null);
   const [mediaSize, setMediaSize] = useState<{ width: number; height: number } | null>(null);
+
+  const showTail = groupPosition === 'single' || groupPosition === 'last';
+  const showAvatar = !isMe && showTail;
+  const avatarInitials = (senderName || 'U')
+    .split(' ')
+    .filter(Boolean)
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 
   const handleLongPress = (event: GestureResponderEvent) => {
     if (!onLongPress || !bubbleRef.current) return;
@@ -52,7 +103,12 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
   const isPinned = Array.isArray(item.pinnedBy) && item.pinnedBy.length > 0;
   const hasImage = !!item.mediaUrl && item.mediaType === 'image';
   const hasVideo = !!item.mediaUrl && item.mediaType === 'video';
+  const hasAudio = !!item.mediaUrl && item.mediaType === 'audio';
   const isCallMessage = !!(item.callType && item.callStatus);
+  const [audioSound, setAudioSound] = useState<Audio.Sound | null>(null);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [audioPosition, setAudioPosition] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
 
   useEffect(() => {
     if (!hasImage || !item.mediaUrl) {
@@ -87,6 +143,53 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
       },
     );
   }, [hasImage, item.mediaUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (audioSound) {
+        audioSound.unloadAsync().catch(() => {});
+      }
+    };
+  }, [audioSound]);
+
+  const toggleAudio = async () => {
+    if (!hasAudio || !item.mediaUrl) return;
+    try {
+      if (!audioSound) {
+        const { sound } = await Audio.Sound.createAsync({ uri: item.mediaUrl }, {}, (status) => {
+          if (!status.isLoaded) return;
+          setAudioDuration(status.durationMillis ?? 0);
+          setAudioPosition(status.positionMillis ?? 0);
+          if (status.didJustFinish) {
+            setIsPlayingAudio(false);
+          }
+        });
+        setAudioSound(sound);
+        await sound.playAsync();
+        setIsPlayingAudio(true);
+        return;
+      }
+
+      const status = await audioSound.getStatusAsync();
+      if (!status.isLoaded) return;
+      if (status.isPlaying) {
+        await audioSound.pauseAsync();
+        setIsPlayingAudio(false);
+      } else {
+        await audioSound.playAsync();
+        setIsPlayingAudio(true);
+      }
+    } catch (err) {
+      console.warn('audio play failed', err);
+    }
+  };
+
+  const formatMillis = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
 
   const handlePress = () => {
     if (!onPressMedia) return;
@@ -123,7 +226,7 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
           <TouchableOpacity
             key={emoji}
             style={styles.reactionBubble}
-            onPress={() => {/* TODO: handle reaction press */}}
+            onPress={() => onPressReaction?.(emoji)}
           >
             <Text style={styles.reactionEmoji}>{emoji}</Text>
             <Text style={styles.reactionCount}>{users.length}</Text>
@@ -133,13 +236,48 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
     );
   };
 
+  const bubbleShapeStyle = (() => {
+    const ROUND = 16;
+    const JOIN = 6;
+    const isFirst = groupPosition === 'single' || groupPosition === 'first';
+    const isLast = groupPosition === 'single' || groupPosition === 'last';
+
+    if (isMe) {
+      return {
+        borderTopLeftRadius: ROUND,
+        borderBottomLeftRadius: ROUND,
+        borderTopRightRadius: isFirst ? ROUND : JOIN,
+        borderBottomRightRadius: isLast ? ROUND : JOIN,
+      };
+    }
+    return {
+      borderTopRightRadius: ROUND,
+      borderBottomRightRadius: ROUND,
+      borderTopLeftRadius: isFirst ? ROUND : JOIN,
+      borderBottomLeftRadius: isLast ? ROUND : JOIN,
+    };
+  })();
+
+  const wrapSpacingStyle = (() => {
+    if (groupPosition === 'middle') return { marginTop: 1, marginBottom: 1 };
+    if (groupPosition === 'first') return { marginTop: 8, marginBottom: 1 };
+    if (groupPosition === 'last') return { marginTop: 1, marginBottom: 8 };
+    return { marginTop: 8, marginBottom: 8 };
+  })();
+
   return (
-    <View ref={bubbleRef} style={[styles.wrap, isMe ? styles.rightWrap : styles.leftWrap]}>
+    <View ref={bubbleRef} style={[styles.wrap, wrapSpacingStyle, isMe ? styles.rightWrap : styles.leftWrap]}>
       {!isMe && (
-        avatar ? (
-          <Image source={{ uri: avatar }} style={styles.leftAvatar} />
+        showAvatar ? (
+          avatar ? (
+            <Image source={{ uri: avatar }} style={styles.leftAvatar} />
+          ) : (
+            <View style={styles.leftAvatarFallback}>
+              <Text style={styles.leftAvatarFallbackText}>{avatarInitials}</Text>
+            </View>
+          )
         ) : (
-          <View style={{ width: 42 }} />
+          <View style={styles.avatarSpacer} />
         )
       )}
       <View style={styles.bubbleContainer}>
@@ -148,7 +286,30 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
           onPress={handlePress}
           onLongPress={handleLongPress}
         >
-          <View style={[styles.bubble, isMe ? styles.myBubble : styles.otherBubble]}>
+          <View style={styles.bubbleWrap}>
+            {showTail && (
+              <LinearGradient
+                colors={isMe ? myGradientColors : otherGradientColors}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={[
+                  styles.bubbleTail,
+                  isMe ? styles.bubbleTailRight : styles.bubbleTailLeft,
+                  !isMe && styles.bubbleTailOtherBorder,
+                ]}
+              />
+            )}
+
+            <LinearGradient
+              colors={isMe ? myGradientColors : otherGradientColors}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={[
+                styles.bubble,
+                isMe ? styles.myBubble : styles.otherBubble,
+                bubbleShapeStyle,
+              ]}
+            >
             {item.forwarded && (
               <View style={styles.forwardedContainer}>
                 <Ionicons name="arrow-forward" size={12} color="rgba(255,255,255,0.6)" />
@@ -156,20 +317,25 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
               </View>
             )}
             {item.replyToText && (
-              <View style={styles.replyContainer}>
-                <View style={styles.replyLine} />
+              <LinearGradient
+                colors={replyGradientColors}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={[styles.replyContainer, { borderLeftColor: replyAccent }]}
+              >
+                <View style={[styles.replyLine, { backgroundColor: replyAccent }]} />
                 <Text style={styles.replySender} numberOfLines={1}>
-                  {item.replyToSenderName || 'Someone'}
+                  {item.replyToSenderName || 'Unknown'}
                 </Text>
                 <Text style={styles.replyText} numberOfLines={1}>
                   {item.replyToText}
                 </Text>
-              </View>
+              </LinearGradient>
             )}
             {isPinned && <Text style={styles.pinnedLabel}>📌 Pinned</Text>}
             {isCallMessage ? (
               <View style={styles.callMessageContainer}>
-                <View style={styles.callIconContainer}>
+                <View style={[styles.callIconContainer, { backgroundColor: withAlpha(accent, 0.18) }]}>
                   <Ionicons
                     name={item.callType === 'video' ? 'videocam' : 'call'}
                     size={20}
@@ -201,6 +367,31 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
                     ]}
                   />
                 )}
+
+                {hasVideo && (
+                  <TouchableOpacity style={styles.videoBubble} onPress={() => onPressMedia?.(item)}>
+                    <Ionicons name="play" size={18} color="#fff" />
+                    <Text style={styles.videoText}>Play video</Text>
+                  </TouchableOpacity>
+                )}
+
+                {hasAudio && (
+                  <TouchableOpacity style={styles.audioBubble} onPress={toggleAudio}>
+                    <Ionicons name={isPlayingAudio ? 'pause' : 'play'} size={18} color="#fff" />
+                    <View style={styles.audioProgressWrap}>
+                      <View
+                        style={[
+                          styles.audioProgress,
+                          {
+                            width: `${audioDuration ? Math.min(100, (audioPosition / audioDuration) * 100) : 0}%`,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.audioTime}>{formatMillis(audioPosition || audioDuration)}</Text>
+                  </TouchableOpacity>
+                )}
+
                 {!!item.text && (
                   <Text style={[styles.text, isMe ? styles.myText : styles.otherText]}>
                     {item.text}
@@ -212,6 +403,7 @@ const MessageBubble = ({ item, isMe, avatar, onLongPress, onPressMedia }: Props)
               <Text style={styles.time}>{time}</Text>
               {renderStatusIcon()}
             </View>
+            </LinearGradient>
           </View>
         </TouchableOpacity>
         {renderReactions()}
@@ -224,7 +416,6 @@ const styles = StyleSheet.create({
   wrap: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 6,
   },
   leftWrap: {
     justifyContent: 'flex-start',
@@ -240,8 +431,55 @@ const styles = StyleSheet.create({
     marginRight: 8,
     backgroundColor: 'rgba(255,255,255,0.03)',
   },
+  leftAvatarFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    marginRight: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  leftAvatarFallbackText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 13,
+    letterSpacing: 0.4,
+  },
+  avatarSpacer: {
+    width: 42,
+    marginRight: 8,
+  },
   bubbleContainer: {
     maxWidth: '80%',
+  },
+  bubbleWrap: {
+    position: 'relative',
+  },
+  bubbleTail: {
+    position: 'absolute',
+    width: 18,
+    height: 14,
+    bottom: 6,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
+    borderBottomLeftRadius: 14,
+    borderBottomRightRadius: 4,
+    overflow: 'hidden',
+  },
+  bubbleTailLeft: {
+    left: -9,
+    transform: [{ rotate: '-18deg' }],
+  },
+  bubbleTailRight: {
+    right: -9,
+    transform: [{ scaleX: -1 }, { rotate: '-18deg' }],
+  },
+  bubbleTailOtherBorder: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   bubble: {
     paddingVertical: 10,
@@ -254,28 +492,68 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   myBubble: {
-    backgroundColor: '#e50914',
-    borderTopRightRadius: 6,
     alignSelf: 'flex-end',
+    shadowOpacity: 0.16,
+    elevation: 4,
   },
   otherBubble: {
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderTopLeftRadius: 6,
     alignSelf: 'flex-start',
     borderWidth: 1,
-    borderColor: 'rgba(229,9,20,0.18)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   mediaImage: {
     borderRadius: 12,
     marginBottom: 8,
     backgroundColor: 'rgba(255,255,255,0.06)',
   },
+  videoBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    marginBottom: 8,
+  },
+  videoText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  audioBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    marginBottom: 8,
+  },
+  audioProgressWrap: {
+    flex: 1,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  audioProgress: {
+    height: '100%',
+    backgroundColor: '#fff',
+  },
+  audioTime: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 12,
+  },
   text: {
     fontSize: 15,
     lineHeight: 20,
   },
   myText: {
-    color: 'white',
+    color: 'rgba(255,255,255,0.96)',
     fontWeight: '600',
   },
   otherText: {
@@ -309,10 +587,8 @@ const styles = StyleSheet.create({
   },
   replyContainer: {
     borderLeftWidth: 3,
-    borderLeftColor: 'rgba(229,9,20,0.6)',
     paddingLeft: 8,
     marginBottom: 8,
-    backgroundColor: 'rgba(0,0,0,0.1)',
     borderRadius: 6,
     paddingVertical: 4,
   },
@@ -322,7 +598,6 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     width: 3,
-    backgroundColor: 'rgba(229,9,20,0.6)',
   },
   replySender: {
     fontSize: 12,
@@ -369,7 +644,6 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: 'rgba(229,9,20,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,

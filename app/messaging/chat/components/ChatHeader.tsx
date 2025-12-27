@@ -1,9 +1,9 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { Profile, Conversation } from '../../controller';
+import React from 'react';
+import { Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Conversation, Profile } from '../../controller';
 
 interface ChatHeaderProps {
   recipient: Profile | null;
@@ -58,6 +58,14 @@ const ChatHeader = ({
     }
   };
 
+  const avatarInitials = (recipient?.displayName || 'U')
+    .split(' ')
+    .filter(Boolean)
+    .map((p) => p[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+
   return (
     <View style={styles.headerWrap}>
       <LinearGradient
@@ -86,7 +94,13 @@ const ChatHeader = ({
             </TouchableOpacity>
           ) : (
             <TouchableOpacity onPress={handleProfilePress}>
-              <Image source={{ uri: recipient?.photoURL }} style={styles.avatar} />
+              {recipient?.photoURL ? (
+                <Image source={{ uri: recipient.photoURL }} style={styles.avatar} />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <Text style={styles.avatarFallbackText}>{avatarInitials}</Text>
+                </View>
+              )}
             </TouchableOpacity>
           )}
 
@@ -156,7 +170,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     paddingHorizontal: 12,
     paddingBottom: 8,
-    paddingTop: Platform.OS === 'ios' ? 12 : 8,
+    paddingTop: Platform.OS === 'ios' ? 6 : 4,
   },
   headerGradient: {
     borderRadius: 18,
@@ -206,6 +220,7 @@ const styles = StyleSheet.create({
   },
   titleWrap: {
     flex: 1,
+    minWidth: 0,
   },
   headerTitle: {
     color: '#fff',
@@ -220,6 +235,7 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
   actionButton: {
     marginLeft: 12,
@@ -229,6 +245,23 @@ const styles = StyleSheet.create({
   },
   actionButtonDisabled: {
     opacity: 0.4,
+  },
+  avatarFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    marginRight: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarFallbackText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 14,
+    letterSpacing: 0.4,
   },
 });
 

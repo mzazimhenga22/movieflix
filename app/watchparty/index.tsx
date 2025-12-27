@@ -5,17 +5,16 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, Image, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { IMAGE_BASE_URL } from '../../constants/api';
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../constants/api';
 import { getAccentFromPosterPath } from '../../constants/theme';
 import { useUser } from '../../hooks/use-user';
 import { getProfileScopedKey } from '../../lib/profileStorage';
 import { usePStream } from '../../src/pstream/usePStream';
 import type { Media } from '../../types';
 
+import BottomSheet from '@gorhom/bottom-sheet';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { useAccent } from '../components/AccentContext';
-import CustomBottomSheet from '../components/post-review/BottomSheet';
-import BottomSheet from '@gorhom/bottom-sheet';
 
 
 
@@ -31,11 +30,6 @@ const WatchPartyScreen = () => {
   const { accentColor, setAccentColor } = useAccent();
   const { isSubscribed } = useSubscription();
   const bottomSheetRef = useRef<BottomSheet>(null);
-  const derivedAccent = useMemo(
-  const { accentColor, setAccentColor } = useAccent();
-    [selected?.poster_path, myList],
-  );
-  const { isSubscribed } = useSubscription();
   const derivedAccent = useMemo(
     () => getAccentFromPosterPath(selected?.poster_path ?? myList[0]?.poster_path),
     [selected?.poster_path, myList],
@@ -130,7 +124,7 @@ const WatchPartyScreen = () => {
             text: 'Start Watching',
             onPress: () =>
               router.push({
-                pathname: '/video-player',
+                pathname: '/watchparty/player',
                 params: {
                   roomCode: party.code,
                   videoUrl: party.videoUrl,
@@ -198,7 +192,7 @@ const WatchPartyScreen = () => {
       }
 
       router.push({
-        pathname: '/video-player',
+        pathname: '/watchparty/player',
         params: {
           roomCode: party.code,
           videoUrl: party.videoUrl,
@@ -267,6 +261,33 @@ const WatchPartyScreen = () => {
           Select movies to add to your list and start watch parties with them.
         </Text>
         <FlatList
+          data={trending}
+          keyExtractor={(item) => (item.id ? item.id.toString() : (item.title || item.name) as string)}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          renderItem={({ item }) => (
+            <View style={{ width: 120, marginRight: 10 }}>
+              <Image
+                source={{ uri: `${IMAGE_BASE_URL}${item.poster_path}` }}
+                style={{ width: '100%', aspectRatio: 2 / 3, borderRadius: 8 }}
+              />
+              <Text style={{ color: '#FFFFFF', fontSize: 12 }} numberOfLines={1}>
+                {item.title || item.name}
+              </Text>
+              <TouchableOpacity
+                onPress={() => addToMyList(item)}
+                style={{ marginTop: 6, paddingVertical: 6, backgroundColor: accentColor, borderRadius: 8, alignItems: 'center' }}
+              >
+                <Text style={{ color: '#FFFFFF' }}>Add</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        />
+      </View>
+    );
+  };
+
+  return (
     <View style={styles.container}>
       <LinearGradient
         colors={[accentColor, '#0b0511', '#040406']}
@@ -514,6 +535,29 @@ const styles = StyleSheet.create({
   emptyListText: {
     color: '#888888',
     fontSize: 12,
+  },
+  miniLoading: {
+    padding: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniLoadingText: {
+    color: '#CCCCCC',
+    fontSize: 13,
+  },
+  miniMoviesContainer: {
+    paddingVertical: 12,
+  },
+  miniMoviesTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  miniMoviesSubtitle: {
+    color: '#AAAAAA',
+    fontSize: 13,
+    marginBottom: 10,
   },
   codeBanner: {
     marginTop: 8,

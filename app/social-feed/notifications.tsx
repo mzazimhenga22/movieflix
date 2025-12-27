@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -8,12 +8,15 @@ import {
   Image,
   RefreshControl,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useAccent } from '../components/AccentContext';
+import { collection, doc, limit, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
+import { firestore } from '../../constants/firebase';
+import { useUser } from '../../hooks/use-user';
 
 // Enhanced notification types
 type NotificationType = 'like' | 'comment' | 'follow' | 'mention' | 'streak' | 'new_release' | 'new_post' | 'new_story' | 'message';
@@ -28,66 +31,8 @@ interface Notification {
   avatar?: string;
   timeAgo: string;
   actionUrl?: string;
+  docPath?: string;
 }
-
-// Mock data for demonstration
-const mockNotifications: Notification[] = [
-  {
-    id: '1',
-    type: 'like',
-    title: 'John Doe',
-    message: 'liked your review of "The Dark Knight"',
-    timestamp: new Date(Date.now() - 1000 * 60 * 30).toISOString(), // 30 mins ago
-    read: false,
-    avatar: 'https://randomuser.me/api/portraits/men/1.jpg',
-    timeAgo: '30m ago',
-    actionUrl: '/profile/user123',
-  },
-  {
-    id: '2',
-    type: 'comment',
-    title: 'Jane Smith',
-    message: 'commented: "Great review! I totally agree..."',
-    timestamp: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(), // 2 hours ago
-    read: false,
-    avatar: 'https://randomuser.me/api/portraits/women/2.jpg',
-    timeAgo: '2h ago',
-    actionUrl: '/social-feed/post/456',
-  },
-  {
-    id: '3',
-    type: 'follow',
-    title: 'Mike Johnson',
-    message: 'started following you',
-    timestamp: new Date(Date.now() - 1000 * 60 * 60 * 6).toISOString(), // 6 hours ago
-    read: true,
-    avatar: 'https://randomuser.me/api/portraits/men/3.jpg',
-    timeAgo: '6h ago',
-    actionUrl: '/profile/user789',
-  },
-  {
-    id: '4',
-    type: 'streak',
-    title: 'Sarah Wilson',
-    message: 'is on a 7-day streak with you!',
-    timestamp: new Date(Date.now() - 1000 * 60 * 60 * 12).toISOString(), // 12 hours ago
-    read: false,
-    avatar: 'https://randomuser.me/api/portraits/women/4.jpg',
-    timeAgo: '12h ago',
-    actionUrl: '/messaging/chat/chat123',
-  },
-  {
-    id: '5',
-    type: 'message',
-    title: 'Alex Brown',
-    message: 'sent you a message',
-    timestamp: new Date(Date.now() - 1000 * 60 * 60 * 18).toISOString(), // 18 hours ago
-    read: false,
-    avatar: 'https://randomuser.me/api/portraits/men/5.jpg',
-    timeAgo: '18h ago',
-    actionUrl: '/messaging/chat/chat456',
-  },
-];
 
 const notificationIcons: Record<NotificationType, any> = {
   like: 'heart',
@@ -115,9 +60,87 @@ const notificationColors: Record<NotificationType, string> = {
 
 export default function NotificationsScreen() {
   const router = useRouter();
-  const [notifications, setNotifications] = useState<Notification[]>(mockNotifications);
+  const { setAccentColor } = useAccent();
+  const { user } = useUser();
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAccentColor('#e50914');
+  }, [setAccentColor]);
+
+  const formatRelativeTime = useCallback((value?: Date | string) => {
+    if (!value) return 'Just now';
+    const date = typeof value === 'string' ? new Date(value) : value;
+    if (Number.isNaN(date.getTime())) return 'Just now';
+    const diff = Date.now() - date.getTime();
+    if (diff < 60000) return 'Just now';
+    if (diff < 3600000) return `${Math.round(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.round(diff / 3600000)}h ago`;
+    return `${Math.round(diff / 86400000)}d ago`;
+  }, []);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setNotifications([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    const notificationsRef = collection(firestore, 'notifications');
+    const notificationsQuery = query(
+      notificationsRef,
+      where('targetUid', '==', user.uid),
+      orderBy('createdAt', 'desc'),
+      limit(50),
+    );
+
+    const unsubscribe = onSnapshot(
+      notificationsQuery,
+      snapshot => {
+        const mapped: Notification[] = snapshot.docs.map(docSnap => {
+          const data = docSnap.data() as Record<string, any>;
+          const createdAt =
+            typeof data.createdAt?.toDate === 'function'
+              ? data.createdAt.toDate()
+              : data.createdAt
+              ? new Date(data.createdAt)
+              : new Date();
+          const actorName =
+            data.actor?.displayName || data.actorName || data.actor || data.userName || 'MovieFlix member';
+          const avatar = data.actor?.avatar || data.actorAvatar || data.avatar;
+          const actionUrl = data.targetRoute || data.link || data.href || undefined;
+          return {
+            id: docSnap.id,
+            type: (data.type as NotificationType) || 'like',
+            title: actorName,
+            message: data.message || data.body || data.content || 'New activity on your feed.',
+            timestamp: createdAt.toISOString(),
+            read: Boolean(data.read),
+            avatar,
+            timeAgo: formatRelativeTime(createdAt),
+            actionUrl,
+            docPath: docSnap.ref.path,
+          };
+        });
+        setNotifications(mapped);
+        setLoading(false);
+      },
+      err => {
+        console.warn('[notifications] subscription failed', err);
+        setError('Unable to load notifications right now.');
+        setNotifications([]);
+        setLoading(false);
+      },
+    );
+
+    return () => unsubscribe();
+  }, [formatRelativeTime, user?.uid]);
 
   const filteredNotifications = notifications.filter(n =>
     filter === 'all' || (filter === 'unread' && !n.read)
@@ -127,43 +150,54 @@ export default function NotificationsScreen() {
 
   const handleRefresh = () => {
     setRefreshing(true);
-    // Simulate API call
-    setTimeout(() => {
-      setRefreshing(false);
-      // Add a new notification for demo
-      const newNotification: Notification = {
-        id: Date.now().toString(),
-        type: 'like',
-        title: 'New User',
-        message: 'liked your recent post',
-        timestamp: new Date().toISOString(),
-        read: false,
-        avatar: 'https://randomuser.me/api/portraits/men/6.jpg',
-        timeAgo: 'now',
-        actionUrl: '/social-feed',
-      };
-      setNotifications(prev => [newNotification, ...prev]);
-    }, 1500);
+    setTimeout(() => setRefreshing(false), 600);
   };
 
-  const markAsRead = (id: string) => {
+  const markAsRead = useCallback(async (notification: Notification) => {
     setNotifications(prev =>
-      prev.map(n => n.id === id ? { ...n, read: true } : n)
+      prev.map(n => (n.id === notification.id ? { ...n, read: true } : n)),
     );
-  };
 
-  const markAllAsRead = () => {
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-  };
-
-  const handleNotificationPress = (notification: Notification) => {
-    markAsRead(notification.id);
-    if (notification.actionUrl) {
-      router.push(notification.actionUrl as any);
+    try {
+      const ref = notification.docPath
+        ? doc(firestore, notification.docPath)
+        : doc(firestore, 'notifications', notification.id);
+      await updateDoc(ref, { read: true });
+    } catch (err) {
+      console.warn('[notifications] failed to update read state', err);
     }
-  };
+  }, []);
 
-  const renderNotification = ({ item }: { item: Notification }) => (
+  const markAllAsRead = useCallback(async () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    try {
+      await Promise.all(
+        notifications
+          .filter(n => !n.read)
+          .map(n => {
+            const ref = n.docPath
+              ? doc(firestore, n.docPath)
+              : doc(firestore, 'notifications', n.id);
+            return updateDoc(ref, { read: true });
+          }),
+      );
+    } catch (err) {
+      console.warn('[notifications] failed to mark all as read', err);
+    }
+  }, [notifications]);
+
+  const handleNotificationPress = useCallback(
+    (notification: Notification) => {
+      void markAsRead(notification);
+      if (notification.actionUrl) {
+        router.push(notification.actionUrl as any);
+      }
+    },
+    [markAsRead, router],
+  );
+
+  const renderNotification = useCallback(
+    ({ item }: { item: Notification }) => (
     <TouchableOpacity
       style={[styles.notificationItem, !item.read && styles.unreadNotification]}
       onPress={() => handleNotificationPress(item)}
@@ -193,27 +227,43 @@ export default function NotificationsScreen() {
 
       {!item.read && <View style={styles.unreadDot} />}
     </TouchableOpacity>
+  ),
+    [handleNotificationPress],
+  );
+
+  const accentBackground = useMemo(
+    () => ['#e50914', '#150a13', '#05060f'] as const,
+    [],
   );
 
   return (
     <ScreenWrapper>
+      <LinearGradient colors={accentBackground} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFillObject} />
       <LinearGradient
-        colors={['#667eea', '#764ba2']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={StyleSheet.absoluteFillObject}
+        colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.1, y: 0 }}
+        end={{ x: 0.9, y: 1 }}
+        style={styles.bgOrbPrimary}
+      />
+      <LinearGradient
+        colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+        start={{ x: 0.8, y: 0 }}
+        end={{ x: 0.2, y: 1 }}
+        style={styles.bgOrbSecondary}
       />
 
       <View style={styles.container}>
-        {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Notifications</Text>
+          <View style={styles.titleBlock}>
+            <Text style={styles.headerEyebrow}>Inbox</Text>
+            <Text style={styles.headerTitle}>Notifications</Text>
+          </View>
           <TouchableOpacity onPress={markAllAsRead} style={styles.markAllButton}>
+            <Ionicons name="checkmark-done" size={16} color="#fff" />
             <Text style={styles.markAllText}>Mark all read</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Filter Tabs */}
         <View style={styles.filterTabs}>
           <TouchableOpacity
             style={[styles.filterTab, filter === 'all' && styles.activeFilterTab]}
@@ -246,17 +296,35 @@ export default function NotificationsScreen() {
               colors={['#667eea']}
             />
           }
+          ListHeaderComponent={
+            loading ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color="#fff" />
+                <Text style={styles.loadingText}>Syncing notifications…</Text>
+              </View>
+            ) : error ? (
+              <TouchableOpacity style={styles.errorBanner} onPress={handleRefresh}>
+                <Text style={styles.errorTitle}>Unable to sync</Text>
+                <Text style={styles.errorSubtitle}>{error}</Text>
+              </TouchableOpacity>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Ionicons name="notifications-off" size={64} color="rgba(255,255,255,0.3)" />
               <Text style={styles.emptyTitle}>
-                {filter === 'unread' ? 'No unread notifications' : 'No notifications yet'}
+                {user
+                  ? filter === 'unread'
+                    ? 'No unread notifications'
+                    : 'No notifications yet'
+                  : 'Sign in to get notified'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                {filter === 'unread'
-                  ? 'You\'ve read all your notifications!'
-                  : 'When you get notifications, they\'ll appear here.'
-                }
+                {user
+                  ? filter === 'unread'
+                    ? 'You\'ve read all your notifications!'
+                    : 'When you get notifications, they\'ll appear here.'
+                  : 'Log in to see likes, follows, and new releases tailored to you.'}
               </Text>
             </View>
           }
@@ -271,6 +339,24 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  bgOrbPrimary: {
+    position: 'absolute',
+    width: 360,
+    height: 360,
+    borderRadius: 180,
+    top: -60,
+    left: -40,
+    opacity: 0.5,
+  },
+  bgOrbSecondary: {
+    position: 'absolute',
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    bottom: -80,
+    right: -40,
+    opacity: 0.4,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -278,6 +364,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 60,
     paddingBottom: 20,
+  },
+  titleBlock: {
+    gap: 4,
+  },
+  headerEyebrow: {
+    color: 'rgba(255,255,255,0.7)',
+    letterSpacing: 0.6,
+    fontSize: 12,
   },
   headerTitle: {
     fontSize: 28,
@@ -289,6 +383,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     backgroundColor: 'rgba(255,255,255,0.2)',
     borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   markAllText: {
     color: '#fff',
@@ -299,7 +396,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     marginHorizontal: 20,
     marginBottom: 20,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 25,
     padding: 4,
   },
@@ -327,16 +424,16 @@ const styles = StyleSheet.create({
   notificationItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(7,9,18,0.78)',
     borderRadius: 16,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: 'rgba(255,255,255,0.06)',
   },
   unreadNotification: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: 'rgba(255,214,0,0.08)',
+    borderColor: 'rgba(255,214,0,0.3)',
   },
   avatarContainer: {
     position: 'relative',
@@ -408,5 +505,34 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
     maxWidth: 280,
+  },
+  loadingState: {
+    paddingVertical: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 8,
+    fontWeight: '600',
+  },
+  errorBanner: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,118,118,0.5)',
+    backgroundColor: 'rgba(255,118,118,0.12)',
+    padding: 14,
+  },
+  errorTitle: {
+    color: '#ffd0d0',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  errorSubtitle: {
+    color: '#ffb6b6',
+    fontSize: 12,
+    marginTop: 4,
   },
 });

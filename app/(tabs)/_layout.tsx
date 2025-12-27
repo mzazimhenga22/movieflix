@@ -11,7 +11,7 @@ export default function TabLayout(): React.ReactElement {
   const insets = useSafeAreaInsets();
 
   return (
-    <Tabs
+      <Tabs
         screenOptions={{
           headerShown: false,
           tabBarActiveTintColor: '#ffd600',
@@ -24,7 +24,6 @@ export default function TabLayout(): React.ReactElement {
         <Tabs.Screen name="movies" options={{ title: 'Home' }} />
         <Tabs.Screen name="categories" options={{ title: 'Categories' }} />
         <Tabs.Screen name="search" options={{ title: 'Search' }} />
-        <Tabs.Screen name="downloads" options={{ title: 'Downloads' }} />
         <Tabs.Screen name="marketplace" options={{ title: 'Marketplace' }} />
         <Tabs.Screen name="interactive" options={{ title: 'More' }} />
       </Tabs>

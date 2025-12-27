@@ -40,7 +40,7 @@ const ProfileScreen = () => {
     reviewsWritten: 67,
     favoriteMovies: ['Inception', 'The Dark Knight', 'Interstellar'],
     socialLinks: {
-      instagram: '@moviefan2024',
+      handle: '@moviefan2024',
       twitter: '@cinema_lover'
     }
   };
@@ -162,8 +162,8 @@ const ProfileScreen = () => {
               <Text style={styles.sectionTitle}>Connect</Text>
               <View style={styles.socialLinks}>
                 <TouchableOpacity style={styles.socialLink}>
-                  <Ionicons name="logo-instagram" size={20} color="#fff" />
-                  <Text style={styles.socialLinkText}>{user.socialLinks.instagram}</Text>
+                  <Ionicons name="at-outline" size={20} color="#fff" />
+                  <Text style={styles.socialLinkText}>{user.socialLinks.handle}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.socialLink}>
                   <Ionicons name="logo-twitter" size={20} color="#fff" />

@@ -1,18 +1,16 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { CustomerInfo, PurchasesOfferings } from 'react-native-purchases';
-import Purchases from 'react-native-purchases';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 
-const REVENUECAT_API_KEY = 'test_ksetQTdkNHqTaRfhauINoLKNxpU';
+import { authPromise, firestore } from '../constants/firebase';
+
+const __DEV__FLAG = typeof __DEV__ !== 'undefined' && __DEV__;
 
 
 type PlanTier = 'free' | 'plus' | 'premium';
 
 type SubscriptionContextType = {
   isSubscribed: boolean;
-  customerInfo: CustomerInfo | null;
-  offerings: PurchasesOfferings | null;
   currentPlan: PlanTier;
   refresh: () => Promise<void>;
 };
@@ -35,60 +33,113 @@ type Props = {
 };
 
 export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
-  const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null);
-  const [offerings, setOfferings] = useState<PurchasesOfferings | null>(null);
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [currentPlan, setCurrentPlan] = useState<PlanTier>('free');
 
-  const getCurrentPlan = async (): Promise<PlanTier> => {
-    // First check AsyncStorage for override
-    try {
-      const stored = await AsyncStorage.getItem('planTierOverride');
-      if (stored === 'premium' || stored === 'plus' || stored === 'free') {
-        return stored;
-      }
-    } catch {}
-
-    // Then check entitlements
-    if (customerInfo) {
-      const activeEntitlements = Object.keys(customerInfo.entitlements.active);
-      if (activeEntitlements.includes('premium')) return 'premium';
-      if (activeEntitlements.includes('plus')) return 'plus';
-    }
-
-    return 'free';
-  };
-
-  const refresh = async () => {
-    const info = await Purchases.getCustomerInfo();
-    setCustomerInfo(info);
-    setIsSubscribed(Object.keys(info.entitlements.active).length > 0);
-    const currentOfferings = await Purchases.getOfferings();
-    setOfferings(currentOfferings);
-    const plan = await getCurrentPlan();
-    setCurrentPlan(plan);
-  };
-
-  useEffect(() => {
-    if (Purchases && typeof Purchases.configure === 'function') {
-      Purchases.configure({ apiKey: REVENUECAT_API_KEY! });
-    } else {
-      console.error('Purchases module is not properly linked or initialized.');
-      return;
-    }
-    refresh();
-    const listener = (info: CustomerInfo) => {
-      setCustomerInfo(info);
-      setIsSubscribed(Object.keys(info.entitlements.active).length > 0);
-    };
-    Purchases.addCustomerInfoUpdateListener(listener);
-    return () => {
-      Purchases.removeCustomerInfoUpdateListener && Purchases.removeCustomerInfoUpdateListener(listener);
-    };
+  const normalizePlanTier = useCallback((raw: unknown): PlanTier => {
+    const v = String(raw ?? '')
+      .toLowerCase()
+      .trim();
+    return v === 'premium' || v === 'plus' || v === 'free' ? (v as PlanTier) : 'free';
   }, []);
 
+  const refresh = useCallback(async () => {
+    try {
+      const auth = await authPromise;
+      const user = auth.currentUser;
+      if (!user) {
+        setCurrentPlan('free');
+        setIsSubscribed(false);
+        return;
+      }
+
+      const snap = await getDoc(doc(firestore, 'users', user.uid));
+      const tier = normalizePlanTier((snap.data() as any)?.planTier);
+
+      if (__DEV__FLAG) {
+        try {
+          const stored = await AsyncStorage.getItem('planTierOverride');
+          if (stored === 'premium' || stored === 'plus' || stored === 'free') {
+            setCurrentPlan(stored);
+            setIsSubscribed(stored !== 'free');
+            return;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      setCurrentPlan(tier);
+      setIsSubscribed(tier !== 'free');
+    } catch (err) {
+      console.warn('[SubscriptionProvider] failed to refresh plan', err);
+      setCurrentPlan('free');
+      setIsSubscribed(false);
+    }
+  }, [normalizePlanTier]);
+
+  useEffect(() => {
+    let unsubAuth: (() => void) | null = null;
+    let unsubUser: (() => void) | null = null;
+
+    void authPromise
+      .then((auth) => {
+        unsubAuth = auth.onAuthStateChanged((user) => {
+          if (unsubUser) {
+            unsubUser();
+            unsubUser = null;
+          }
+
+          if (!user) {
+            setCurrentPlan('free');
+            setIsSubscribed(false);
+            return;
+          }
+
+          const userRef = doc(firestore, 'users', user.uid);
+          unsubUser = onSnapshot(
+            userRef,
+            async (snap) => {
+              const nextTier = normalizePlanTier((snap.data() as any)?.planTier);
+
+              if (__DEV__FLAG) {
+                try {
+                  const stored = await AsyncStorage.getItem('planTierOverride');
+                  if (stored === 'premium' || stored === 'plus' || stored === 'free') {
+                    setCurrentPlan(stored);
+                    setIsSubscribed(stored !== 'free');
+                    return;
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+
+              setCurrentPlan(nextTier);
+              setIsSubscribed(nextTier !== 'free');
+            },
+            (err) => {
+              console.warn('[SubscriptionProvider] plan snapshot error', err);
+            },
+          );
+        });
+      })
+      .catch((err) => console.warn('[SubscriptionProvider] auth init failed', err));
+
+    return () => {
+      if (unsubUser) unsubUser();
+      if (unsubAuth) unsubAuth();
+    };
+  }, [normalizePlanTier]);
+
   return (
-    <SubscriptionContext.Provider value={{ isSubscribed, customerInfo, offerings, currentPlan, refresh }}>
+    <SubscriptionContext.Provider
+      value={{
+        isSubscribed,
+        currentPlan,
+        refresh,
+      }}
+    >
       {children}
     </SubscriptionContext.Provider>
   );

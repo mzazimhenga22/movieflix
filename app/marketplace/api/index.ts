@@ -1,55 +1,82 @@
-// This file will contain Supabase and Firestore integration logic
-
 import { createClient } from '@supabase/supabase-js';
-import { getFirestore, collection, addDoc, getDocs, doc, getDoc, updateDoc, query, where } from 'firebase/firestore';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { app } from '../../../constants/firebase'; // Assuming firebase.ts exports your Firebase app instance
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  getDocs,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import app from '../../../constants/firebase';
 
-// Initialize Supabase client
+/* ----------------------------- SUPABASE SETUP ----------------------------- */
+
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+const MARKETPLACE_BUCKET = 'marketplace';
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-// Initialize Firestore and Storage
 export const db = getFirestore(app);
-export const storage = getStorage(app);
 
-// --- Supabase Storage Functions ---
+/* -------------------------- FILE UPLOAD HELPERS --------------------------- */
 
-/**
- * Uploads a file to Supabase storage.
- * @param fileUri The URI of the file to upload (e.g., from ImagePicker).
- * @param pathInBucket The desired path and filename within the 'marketplace' bucket (e.g., 'product_images/my-product.jpg').
- * @returns The public URL of the uploaded file.
- */
-export const uploadFileToSupabase = async (fileUri: string, pathInBucket: string): Promise<string> => {
+const uriToBlob = (uri: string): Promise<Blob> =>
+  new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.onload = () => resolve(xhr.response);
+    xhr.onerror = () => reject(new Error('Failed to convert file to blob'));
+    xhr.responseType = 'blob';
+    xhr.open('GET', uri, true);
+    xhr.send(null);
+  });
+
+export const uploadFileToSupabase = async (
+  fileUri: string,
+  pathInBucket: string
+): Promise<string> => {
   if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error('Supabase URL or Anon Key is not defined in environment variables.');
+    throw new Error('Supabase env vars missing');
   }
 
-  const response = await fetch(fileUri);
-  const blob = await response.blob();
+  const fileExt = fileUri.split('.').pop() || 'jpg';
+  const fileName = pathInBucket.split('/').pop() ?? `upload.${fileExt}`;
 
-  const { data, error } = await supabase.storage
-    .from('marketplace') // Ensure 'marketplace' bucket exists in Supabase
-    .upload(pathInBucket, blob, {
-      cacheControl: '3600',
-      upsert: false,
-    });
+  const formData = new FormData();
+  formData.append('file', {
+    uri: fileUri,
+    name: fileName,
+    type: `image/${fileExt}`,
+  } as any);
 
-  if (error) {
-    throw new Error(`Supabase upload error: ${error.message}`);
+  const res = await fetch(
+    `${supabaseUrl}/storage/v1/object/${MARKETPLACE_BUCKET}/${pathInBucket}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${supabaseAnonKey}`,
+        'Content-Type': 'multipart/form-data',
+      },
+      body: formData,
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Supabase upload failed: ${err}`);
   }
 
-  // Get public URL
-  const { data: publicUrlData } = supabase.storage
-    .from('marketplace')
+  const { data } = supabase.storage
+    .from(MARKETPLACE_BUCKET)
     .getPublicUrl(pathInBucket);
 
-  return publicUrlData.publicUrl;
+  return data.publicUrl;
 };
 
-// --- Firestore Functions ---
+
+/* ------------------------------- TYPES ----------------------------------- */
 
 export enum ProductCategory {
   MERCHANDISE = 'Merchandise',
@@ -70,89 +97,562 @@ export enum ProductType {
 }
 
 export interface Product {
-  id?: string; // Optional for when adding new products
+  id?: string;
   name: string;
   description: string;
   price: number;
+  currency?: 'KES';
   imageUrl: string;
-  sellerId: string; // Assuming user authentication provides a seller ID
+  mediaUrls?: string[];
+  sellerId: string;
   sellerName: string;
-  sellerContact?: string; // Optional field for seller contact information
-  category: ProductCategory;
+  sellerContact?: string;
+  sellerAvatar?: string | null;
+  sellerProfileId?: string | null;
+  category: string;
+  categoryKey?: string;
   productType: ProductType;
-  createdAt: any; // Firebase Timestamp
-  // Add more fields as needed, e.g., condition for physical items, duration for services/events
+  promoted?: boolean;
+  promotionBid?: number;
+  promotionEndsAt?: any;
+  promotionPlacement?: 'search' | 'story' | 'feed';
+  promotionDurationUnit?: 'hours' | 'days';
+  promotionDurationValue?: number;
+  promotionCost?: number;
+  promotionWeight?: number;
+  createdAt: any;
 }
 
-const productsCollection = collection(db, 'marketplace_products');
-
-/**
- * Adds a new product to Firestore.
- * @param productData The product data to add.
- * @returns The ID of the newly created product.
- */
-export const addProduct = async (productData: Omit<Product, 'id' | 'createdAt'> & {createdAt: any}): Promise<string> => {
-  try {
-    const docRef = await addDoc(productsCollection, {
-      ...productData,
-      createdAt: productData.createdAt,
-    });
-    return docRef.id;
-  } catch (e) {
-    console.error("Error adding document: ", e);
-    throw e;
-  }
-};
-
-/**
- * Fetches all products from Firestore.
- * @returns An array of Product objects.
- */
-export const getProducts = async (): Promise<Product[]> => {
-  try {
-    const querySnapshot = await getDocs(productsCollection);
-    const products: Product[] = [];
-    querySnapshot.forEach((doc) => {
-      products.push({ id: doc.id, ...doc.data() } as Product);
-    });
-    return products;
-  } catch (e) {
-    console.error("Error getting documents: ", e);
-    throw e;
-  }
-};
-
-/**
- * Fetches a single product by its ID from Firestore.
- * @param id The ID of the product.
- * @returns The Product object or null if not found.
- */
-export const getProductById = async (id: string): Promise<Product | null> => {
-  try {
-    const docRef = doc(db, 'marketplace_products', id);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      return { id: docSnap.id, ...docSnap.data() } as Product;
-    } else {
+const toMillis = (value: any): number | null => {
+  if (!value) return null;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value?.toMillis === 'function') {
+    try {
+      return value.toMillis();
+    } catch {
       return null;
     }
-  } catch (e) {
-    console.error("Error getting document: ", e);
-    throw e;
   }
+  if (typeof value?.toDate === 'function') {
+    try {
+      const d = value.toDate();
+      return d instanceof Date ? d.getTime() : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
 };
 
-/**
- * Updates an existing product in Firestore.
- * @param id The ID of the product to update.
- * @param updates The fields to update.
- */
-export const updateProduct = async (id: string, updates: Partial<Product>): Promise<void> => {
-  try {
-    const docRef = doc(db, 'marketplace_products', id);
-    await updateDoc(docRef, updates);
-  } catch (e) {
-    console.error("Error updating document: ", e);
-    throw e;
+export const isProductPromoted = (
+  product: Product,
+  placement?: 'search' | 'story' | 'feed'
+): boolean => {
+  if (!product?.promoted) return false;
+  if (placement && product.promotionPlacement && product.promotionPlacement !== placement) return false;
+  const endsAtMs = toMillis((product as any).promotionEndsAt);
+  if (typeof endsAtMs === 'number' && endsAtMs <= Date.now()) return false;
+  return true;
+};
+
+export type SellerPaymentMethod = 'bank' | 'paypal' | 'momo';
+
+export type SellerPaymentDetails = {
+  sellerId: string;
+  method: SellerPaymentMethod;
+  accountName?: string | null;
+  paypalEmail?: string | null;
+  bankName?: string | null;
+  bankAccountNumber?: string | null;
+  bankRoutingNumber?: string | null;
+  momoNetwork?: string | null;
+  momoNumber?: string | null;
+  country?: string | null;
+  updatedAt?: any;
+  createdAt?: any;
+};
+
+export type MarketplaceSeller = {
+  id: string;
+  name: string;
+  contact?: string | null;
+  avatar?: string | null;
+  profileId?: string | null;
+};
+
+export type CreateMarketplaceListingInput = {
+  name: string;
+  description: string;
+  price: number;
+  categoryKey: string;
+  categoryLabel?: string;
+  productType?: ProductType;
+  mediaUri?: string | null;
+  fallbackImageUrl?: string | null;
+  seller: MarketplaceSeller;
+  sellerAvatar?: string | null;
+  sellerContact?: string | null;
+  sellerProfileId?: string | null;
+};
+
+export type MarketplaceCurrency = 'KES';
+
+export type MarketplaceCartQuoteItem = {
+  productId: string;
+  quantity: number;
+};
+
+export type MarketplaceQuotedLine = {
+  product: Product & { id: string };
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+};
+
+export type MarketplaceCartQuote = {
+  currency: MarketplaceCurrency;
+  lines: MarketplaceQuotedLine[];
+  subtotal: number;
+  platformFee: number;
+  total: number;
+};
+
+export type MarketplaceOrderStatus = 'pending_payment' | 'paid' | 'cancelled';
+
+export type MarketplaceOrderPayment =
+  | {
+      method: 'mpesa';
+      checkoutRequestId: string;
+      merchantRequestId?: string | null;
+      phone: string;
+      amount: number;
+      status: 'initiated' | 'confirmed' | 'failed';
+      confirmedAt?: any;
+       resultCode?: string | number | null;
+       resultDesc?: string | null;
+      raw?: any;
+    }
+  | {
+      method: 'manual';
+      note?: string | null;
+    };
+
+export type MarketplaceOrderWalletSummary = {
+  currency: MarketplaceCurrency;
+  total: number;
+  platformFee: number;
+  buyerDepositTxId: string;
+  buyerDebitTxId: string;
+  sellerTxIds: string[];
+  platformFeeTxId?: string | null;
+  sellerAllocations: { sellerId: string; sellerName?: string | null; amount: number }[];
+  processedAt?: any;
+};
+
+export type MarketplaceOrderItem = {
+  productId: string;
+  name: string;
+  imageUrl: string;
+  sellerId: string;
+  sellerName: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+};
+
+export type MarketplaceOrder = {
+  id?: string;
+  orderId: string;
+  buyerId: string;
+  buyerProfileId?: string | null;
+  currency: MarketplaceCurrency;
+  items: MarketplaceOrderItem[];
+  subtotal: number;
+  platformFee: number;
+  total: number;
+  status: MarketplaceOrderStatus;
+  payment?: MarketplaceOrderPayment | null;
+  wallet?: MarketplaceOrderWalletSummary | null;
+  createdAt: any;
+  updatedAt: any;
+};
+
+/* ---------------------------- HELPERS ---------------------------- */
+
+const inferExtension = (uri: string) => {
+  const match = uri.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
+  return match?.[1] ?? 'jpg';
+};
+
+const buildStoragePath = (sellerId: string, uri: string) => {
+  const ext = inferExtension(uri);
+  return `products/${sellerId}/${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}.${ext}`;
+};
+
+const MARKETPLACE_ALLOWED_CATEGORY_KEYS = new Set([
+  'merch',
+  'digital',
+  'services',
+  'promos',
+  'events',
+  'lifestyle',
+]);
+
+const normalizeText = (value: string) => value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
+
+const normalizePriceKsh = (value: number) => {
+  if (!Number.isFinite(value)) return NaN;
+  return Math.round(value);
+};
+
+const assertValidListingInput = (input: CreateMarketplaceListingInput) => {
+  const name = normalizeText(input.name);
+  const description = normalizeText(input.description);
+
+  if (!name) throw new Error('Product title is required');
+  if (name.length > 80) throw new Error('Product title is too long (max 80 characters)');
+  if (!description) throw new Error('Product description is required');
+  if (description.length > 2000) throw new Error('Product description is too long (max 2000 characters)');
+
+  const categoryKey = String(input.categoryKey ?? '').trim();
+  if (!MARKETPLACE_ALLOWED_CATEGORY_KEYS.has(categoryKey)) throw new Error('Invalid category');
+
+  const price = normalizePriceKsh(Number(input.price));
+  if (!Number.isFinite(price) || price <= 0) throw new Error('Invalid price');
+  if (price < 10) throw new Error('Price is too low');
+  if (price > 500_000) throw new Error('Price is too high');
+
+  if (!input.seller?.id) throw new Error('Missing seller information');
+
+  return {
+    ...input,
+    name,
+    description,
+    price,
+    categoryKey,
+  };
+};
+
+/* ------------------------- CREATE LISTING -------------------------- */
+
+export const createMarketplaceListing = async (
+  input: CreateMarketplaceListingInput
+) => {
+  const validated = assertValidListingInput(input);
+
+  if (!validated.mediaUri && !validated.fallbackImageUrl) {
+    throw new Error('A product image is required');
   }
+
+  let imageUrl = validated.fallbackImageUrl ?? '';
+
+  if (validated.mediaUri) {
+    const path = buildStoragePath(validated.seller.id, validated.mediaUri);
+    imageUrl = await uploadFileToSupabase(validated.mediaUri, path);
+  }
+
+  const payload: Omit<Product, 'id'> = {
+    name: validated.name,
+    description: validated.description,
+    price: validated.price,
+    currency: 'KES',
+    imageUrl,
+    mediaUrls: [imageUrl],
+    sellerId: validated.seller.id,
+    sellerName: validated.seller.name,
+    sellerContact: validated.seller.contact ?? validated.sellerContact ?? undefined,
+    sellerAvatar: validated.seller.avatar ?? validated.sellerAvatar ?? null,
+    sellerProfileId: validated.seller.profileId ?? null,
+    category: validated.categoryLabel || validated.categoryKey,
+    categoryKey: validated.categoryKey,
+    productType: validated.productType ?? ProductType.PHYSICAL,
+    promoted: false,
+    createdAt: serverTimestamp(),
+  };
+
+  const docRef = await addDoc(collection(db, 'marketplace_products'), payload);
+  return docRef.id;
+};
+
+/* ------------------------- FETCH / UPDATE -------------------------- */
+
+export const getProducts = async (): Promise<Product[]> => {
+  const snapshot = await getDocs(collection(db, 'marketplace_products'));
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Product));
+};
+
+export const getProductById = async (id: string): Promise<Product | null> => {
+  const snap = await getDoc(doc(db, 'marketplace_products', id));
+  return snap.exists() ? ({ id: snap.id, ...snap.data() } as Product) : null;
+};
+
+export const updateProduct = async (
+  id: string,
+  updates: Partial<Product>
+): Promise<void> => {
+  await updateDoc(doc(db, 'marketplace_products', id), updates);
+};
+
+/* ----------------------------- CART QUOTE ----------------------------- */
+
+const COMMISSION_RATE = 0.05;
+
+const clampInt = (value: number, min: number, max: number) => Math.max(min, Math.min(max, Math.floor(value)));
+
+export const quoteMarketplaceCart = async (args: {
+  items: MarketplaceCartQuoteItem[];
+  buyerId?: string | null;
+}): Promise<MarketplaceCartQuote> => {
+  const buyerId = args.buyerId ?? null;
+  const rawItems = Array.isArray(args.items) ? args.items : [];
+
+  if (rawItems.length === 0) throw new Error('Cart is empty');
+  if (rawItems.length > 25) throw new Error('Cart has too many items');
+
+  const seen = new Set<string>();
+  const normalized = rawItems
+    .map((i) => ({
+      productId: String(i?.productId ?? '').trim(),
+      quantity: clampInt(Number((i as any)?.quantity ?? 0), 1, 10),
+    }))
+    .filter((i) => i.productId && !seen.has(i.productId) && (seen.add(i.productId), true));
+
+  const lines: MarketplaceQuotedLine[] = [];
+  for (const item of normalized) {
+    const product = await getProductById(item.productId);
+    if (!product?.id) throw new Error('One or more items are no longer available');
+
+    if (buyerId && product.sellerId && product.sellerId === buyerId) {
+      throw new Error('You cannot purchase your own listing');
+    }
+
+    const unitPrice = normalizePriceKsh(Number(product.price));
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error('Invalid product price');
+
+    lines.push({
+      product: product as Product & { id: string },
+      quantity: item.quantity,
+      unitPrice,
+      lineTotal: unitPrice * item.quantity,
+    });
+  }
+
+  const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  const platformFee = Math.round(subtotal * COMMISSION_RATE);
+  const total = subtotal + platformFee;
+
+  if (total > 1_000_000) throw new Error('Cart total is too high');
+
+  return {
+    currency: 'KES',
+    lines,
+    subtotal,
+    platformFee,
+    total,
+  };
+};
+
+/* ------------------------------- ORDERS ------------------------------- */
+
+const ORDERS_COLLECTION = 'marketplace_orders';
+
+export const createMarketplaceOrder = async (args: {
+  buyerId: string;
+  buyerProfileId?: string | null;
+  quote: MarketplaceCartQuote;
+  orderId?: string;
+}): Promise<{ docId: string; orderId: string }> => {
+  const buyerId = String(args.buyerId ?? '').trim();
+  if (!buyerId) throw new Error('buyerId is required');
+
+  const orderId =
+    (String(args.orderId ?? '').trim() || `MFMP-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`).slice(
+      0,
+      48
+    );
+
+  const items: MarketplaceOrderItem[] = args.quote.lines.map((l) => ({
+    productId: l.product.id!,
+    name: l.product.name,
+    imageUrl: l.product.imageUrl,
+    sellerId: l.product.sellerId,
+    sellerName: l.product.sellerName,
+    quantity: l.quantity,
+    unitPrice: l.unitPrice,
+    lineTotal: l.lineTotal,
+  }));
+
+  const payload: Omit<MarketplaceOrder, 'id'> = {
+    orderId,
+    buyerId,
+    buyerProfileId: args.buyerProfileId ?? null,
+    currency: 'KES',
+    items,
+    subtotal: args.quote.subtotal,
+    platformFee: args.quote.platformFee,
+    total: args.quote.total,
+    status: 'pending_payment',
+    payment: null,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  const ref = await addDoc(collection(db, ORDERS_COLLECTION), payload as any);
+  return { docId: ref.id, orderId };
+};
+
+export const updateMarketplaceOrder = async (docId: string, updates: Partial<MarketplaceOrder>) => {
+  if (!docId) throw new Error('docId is required');
+  await updateDoc(doc(db, ORDERS_COLLECTION, docId), {
+    ...updates,
+    updatedAt: serverTimestamp(),
+  } as any);
+};
+
+/* ------------------------------ PAYMENTS ------------------------------ */
+
+type DarajaMarketplaceStkPushResponse = {
+  ok: true;
+  amount: number;
+  uid: string;
+  merchantRequestId: string | null;
+  checkoutRequestId: string | null;
+  customerMessage: string | null;
+};
+
+type DarajaMarketplaceQueryResponse = {
+  ok: true;
+  uid: string;
+  checkoutRequestId: string;
+  resultCode: string | number | null;
+  resultDesc: string | null;
+  order?: {
+    id: string;
+    orderId: string;
+    status: MarketplaceOrderStatus;
+  } | null;
+  wallet?: MarketplaceOrderWalletSummary | null;
+  raw: any;
+};
+
+const darajaFunctionUrl = () => {
+  if (!supabaseUrl) throw new Error('Supabase env vars missing');
+  return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/daraja`;
+};
+
+export const mpesaMarketplaceStkPush = async (args: {
+  firebaseToken: string;
+  phone: string;
+  amount: number;
+  accountReference: string;
+  transactionDesc: string;
+}): Promise<DarajaMarketplaceStkPushResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_stkpush',
+      phone: args.phone,
+      amount: args.amount,
+      accountReference: args.accountReference,
+      transactionDesc: args.transactionDesc,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Payment request failed');
+  return data as DarajaMarketplaceStkPushResponse;
+};
+
+export const mpesaMarketplaceQuery = async (args: {
+  firebaseToken: string;
+  checkoutRequestId: string;
+  orderDocId: string;
+}): Promise<DarajaMarketplaceQueryResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_query',
+      checkoutRequestId: args.checkoutRequestId,
+      orderDocId: args.orderDocId,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Payment verification failed');
+  return data as DarajaMarketplaceQueryResponse;
+};
+
+/* ------------------------------- REPORTS ------------------------------ */
+
+const REPORTS_COLLECTION = 'marketplace_reports';
+
+export const reportMarketplaceProduct = async (args: {
+  productId: string;
+  reporterId: string;
+  reporterProfileId?: string | null;
+  reason: string;
+}) => {
+  const productId = String(args.productId ?? '').trim();
+  const reporterId = String(args.reporterId ?? '').trim();
+  const reason = normalizeText(String(args.reason ?? '')).slice(0, 800);
+
+  if (!productId) throw new Error('productId is required');
+  if (!reporterId) throw new Error('Sign in required');
+  if (!reason) throw new Error('Please enter a reason');
+
+  await addDoc(collection(db, REPORTS_COLLECTION), {
+    productId,
+    reporterId,
+    reporterProfileId: args.reporterProfileId ?? null,
+    reason,
+    createdAt: serverTimestamp(),
+  });
+};
+
+/* ---------------------- SELLER PAYOUT DETAILS ---------------------- */
+
+const SELLER_PAYOUT_COLLECTION = 'marketplace_seller_payment_details';
+
+export const upsertSellerPaymentDetails = async (
+  sellerId: string,
+  details: Omit<SellerPaymentDetails, 'sellerId' | 'updatedAt' | 'createdAt'>
+): Promise<void> => {
+  if (!sellerId) throw new Error('sellerId is required');
+
+  const ref = doc(db, SELLER_PAYOUT_COLLECTION, sellerId);
+  const existing = await getDoc(ref);
+
+  await setDoc(
+    ref,
+    {
+      sellerId,
+      ...details,
+      updatedAt: serverTimestamp(),
+      ...(existing.exists() ? null : { createdAt: serverTimestamp() }),
+    } as any,
+    { merge: true }
+  );
+};
+
+export const getSellerPaymentDetails = async (
+  sellerId: string
+): Promise<SellerPaymentDetails | null> => {
+  if (!sellerId) return null;
+  const snap = await getDoc(doc(db, SELLER_PAYOUT_COLLECTION, sellerId));
+  return snap.exists() ? ({ sellerId: snap.id, ...snap.data() } as SellerPaymentDetails) : null;
 };

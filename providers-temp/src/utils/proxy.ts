@@ -3,6 +3,7 @@ import { Stream } from '@/providers/streams';
 
 // Default proxy URL for general purpose proxying
 const DEFAULT_PROXY_URL = 'https://proxy.nsbx.ru/proxy';
+const ABSOLUTE_URL_REGEX = /^https?:\/\//i;
 // Default M3U8 proxy URL for HLS stream proxying — prefer environment override
 // `NEXT_PUBLIC_PSTREAM_M3U8_PROXY_URL` for browser builds, otherwise default to local API path.
 function defaultM3U8Proxy(): string {
@@ -17,6 +18,52 @@ function defaultM3U8Proxy(): string {
 }
 
 let CONFIGURED_M3U8_PROXY_URL = defaultM3U8Proxy();
+
+const getLocationOrigin = (): string | null => {
+  try {
+    if (typeof globalThis === 'undefined') return null;
+    const maybeLocation = (globalThis as any)?.location;
+    if (maybeLocation && typeof maybeLocation.origin === 'string') {
+      return maybeLocation.origin;
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
+};
+
+const resolveProxyBase = (): string => {
+  const candidate = CONFIGURED_M3U8_PROXY_URL?.trim();
+  if (candidate) {
+    if (ABSOLUTE_URL_REGEX.test(candidate)) {
+      return candidate;
+    }
+
+    if (candidate.startsWith('//')) {
+      return `https:${candidate}`;
+    }
+
+    if (candidate.startsWith('/')) {
+      const origin = getLocationOrigin();
+      if (origin) {
+        return `${origin}${candidate}`;
+      }
+      return DEFAULT_PROXY_URL;
+    }
+
+    const sanitized = candidate.replace(/^\/*/, '');
+    if (sanitized) {
+      if (sanitized.startsWith('localhost')) {
+        return `http://${sanitized}`;
+      }
+      if (sanitized.includes('.')) {
+        return `https://${sanitized}`;
+      }
+    }
+  }
+
+  return DEFAULT_PROXY_URL;
+};
 
 /**
  * Set a custom M3U8 proxy URL to use for all M3U8 proxy requests
@@ -96,9 +143,9 @@ export function createM3U8ProxyUrl(url: string, features?: FeatureMap, headers: 
   // Next.js route: `/api/proxy?url=<base64(original)>&h=<base64(encodedHeaders)>`.
   const b64Url = Buffer.from(url).toString('base64');
   const hdr = headers && Object.keys(headers).length ? `&h=${encodeURIComponent(Buffer.from(JSON.stringify(headers)).toString('base64'))}` : '';
-  // If CONFIGURED_M3U8_PROXY_URL is an absolute host path (e.g. https://...), use it directly,
-  // otherwise allow relative paths like `/api/proxy`.
-  return `${CONFIGURED_M3U8_PROXY_URL}?url=${encodeURIComponent(b64Url)}${hdr}`;
+  // Ensure the proxy base is an absolute URL so native fetchers don't error on relative paths.
+  const proxyBase = resolveProxyBase();
+  return `${proxyBase}?url=${encodeURIComponent(b64Url)}${hdr}`;
 }
 
 /**
@@ -109,7 +156,8 @@ export function createM3U8ProxyUrl(url: string, features?: FeatureMap, headers: 
 export function updateM3U8ProxyUrl(url: string): string {
   // Replace any old /m3u8-proxy host with the currently-configured proxy base
   if (url.includes('/m3u8-proxy?url=')) {
-    return url.replace(/https?:\/\/[^/]+\/m3u8-proxy/, `${CONFIGURED_M3U8_PROXY_URL}`);
+    const proxyBase = resolveProxyBase();
+    return url.replace(/https?:\/\/[^/]+\/m3u8-proxy/, `${proxyBase}`);
   }
   return url;
 }

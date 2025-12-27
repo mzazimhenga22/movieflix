@@ -8,9 +8,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 type ScreenWrapperProps = {
   children: React.ReactNode;
   style?: ViewStyle;
+  disableTopInset?: boolean;
 };
 
-const ScreenWrapper = ({ children, style }: ScreenWrapperProps) => {
+const ScreenWrapper = ({ children, style, disableTopInset = false }: ScreenWrapperProps) => {
   const insets = useSafeAreaInsets();
 
   return (
@@ -21,7 +22,7 @@ const ScreenWrapper = ({ children, style }: ScreenWrapperProps) => {
       style={styles.gradient}
     >
       <View style={styles.glow} />
-      <View style={[styles.container, { paddingTop: insets.top }, style]}>
+      <View style={[styles.container, { paddingTop: disableTopInset ? 0 : insets.top }, style]}>
         <StatusBar barStyle="light-content" />
         {children}
       </View>

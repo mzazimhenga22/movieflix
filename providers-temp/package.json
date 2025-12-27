@@ -82,6 +82,7 @@
     "vitest": "^1.6.1"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.1.1",
     "abort-controller": "^3.0.0",
     "cheerio": "1.0.0-rc.12",
     "cookie": "^0.6.0",

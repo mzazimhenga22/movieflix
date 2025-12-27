@@ -1,6 +1,6 @@
-import React, { useState, useRef } from 'react';
-import { StyleSheet, View, Text, ScrollView, ImageBackground, TouchableOpacity, Dimensions, Linking } from 'react-native';
-import { FontAwesome } from '@expo/vector-icons';
+import React, { useState } from 'react';
+import { StyleSheet, View, Text, ScrollView, ImageBackground, TouchableOpacity, Dimensions } from 'react-native';
+import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { IMAGE_BASE_URL } from '@/constants/api';
 import { Media } from '@/types';
@@ -12,9 +12,10 @@ const { width } = Dimensions.get('window');
 interface SongListProps {
   title: string;
   songs: Media[];
+  onOpenAll?: () => void;
 }
 
-const SongList: React.FC<SongListProps> = ({ title, songs }) => {
+const SongList: React.FC<SongListProps> = ({ title, songs, onOpenAll }) => {
   const [activeIndex, setActiveIndex] = useState(0);
   const topSongs = songs.slice(0, 5); // Display a maximum of 5 cards
   const router = useRouter();
@@ -41,9 +42,26 @@ const SongList: React.FC<SongListProps> = ({ title, songs }) => {
     return null;
   }
 
+  const handleOpenAll = () => {
+    if (onOpenAll) onOpenAll();
+  };
+
   return (
     <View style={styles.sectionContainer}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      <TouchableOpacity
+        activeOpacity={0.85}
+        style={styles.headerRow}
+        onPress={handleOpenAll}
+        disabled={!onOpenAll}
+      >
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {onOpenAll && (
+          <View style={styles.headerCta}>
+            <Ionicons name="musical-notes" size={16} color="#fff" />
+            <Text style={styles.headerCtaText}>Open player</Text>
+          </View>
+        )}
+      </TouchableOpacity>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -124,13 +142,34 @@ const styles = StyleSheet.create({
   sectionContainer: {
     marginTop: 20,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
   sectionTitle: {
     color: 'white',
     fontSize: 18,
     fontWeight: '800',
     letterSpacing: 0.3,
-    marginBottom: 12,
-    paddingHorizontal: 16,
+  },
+  headerCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  headerCtaText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   sliderContainer: {
     paddingHorizontal: 0,

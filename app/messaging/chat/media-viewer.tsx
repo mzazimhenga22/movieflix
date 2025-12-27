@@ -1,8 +1,8 @@
-import React, { useMemo, useState } from 'react';
-import { View, StyleSheet, Image, TouchableOpacity, Dimensions, FlatList, NativeScrollEvent, NativeSyntheticEvent, Text } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Video, ResizeMode } from 'expo-av';
+import { Video } from 'expo-av';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useMemo, useState } from 'react';
+import { Dimensions, FlatList, Image, NativeScrollEvent, NativeSyntheticEvent, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 type MediaItem = {
   id: string;
@@ -90,7 +90,7 @@ const MediaViewerScreen = () => {
                   source={{ uri: item.url }}
                   style={[styles.media, { width: screen.width, height: screen.height * 0.6 }]}
                   useNativeControls
-                  resizeMode={ResizeMode.CONTAIN}
+                  resizeMode="contain"
                   shouldPlay={false}
                 />
               ) : (

@@ -41,24 +41,39 @@ export default function StoriesRow({ showAddStory = false }: Props) {
         grouped[uid].push(s);
       });
 
-      const circles = Object.values(grouped).map((list) => {
-        // sort by createdAt if available, newest last
-        const sorted = [...list].sort((a, b) => {
-          const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
-          const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
-          return ta - tb;
-        });
-        const first = sorted[0];
-        const last = sorted[sorted.length - 1];
-        return {
-          id: first.id, // use first story id as entry point
-          userId: first.userId,
-          username: first.username,
-          photoURL: last.photoURL, // show thumbnail from latest story
-        };
-      });
+      const groups = Object.values(grouped)
+        .map((list) => {
+          const sorted = [...list].sort((a, b) => {
+            const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
+            return ta - tb;
+          });
+          const first = sorted[0];
+          const last = sorted[sorted.length - 1];
+          const userId = first?.userId ? String(first.userId) : null;
+          if (!userId || userId === 'unknown') return null;
 
-      setStories(circles);
+          return {
+            id: userId,
+            userId,
+            username: first?.username ?? 'Story',
+            photoURL: last?.photoURL ?? null,
+            avatar: last?.userAvatar ?? last?.avatar ?? null,
+            media: sorted
+              .filter((s) => !!s?.photoURL)
+              .slice(0, 40)
+              .map((s) => ({
+                type: 'image' as const,
+                uri: String(s.photoURL),
+                storyId: String(s.id),
+                caption: typeof s.caption === 'string' ? s.caption : undefined,
+                overlayText: typeof s.overlayText === 'string' ? s.overlayText : undefined,
+              })),
+          };
+        })
+        .filter(Boolean);
+
+      setStories(groups as any);
     });
     return () => unsubscribe();
   }, []);
@@ -74,7 +89,13 @@ export default function StoriesRow({ showAddStory = false }: Props) {
       Animated.timing(scaleAnim, { toValue: 0.95, duration: 100, useNativeDriver: true }),
       Animated.timing(scaleAnim, { toValue: 1, duration: 100, useNativeDriver: true }),
     ]).start(() => {
-      router.push(`/story/${story.id}?photoURL=${encodeURIComponent(story.photoURL ?? '')}`);
+      router.push({
+        pathname: '/story-viewer',
+        params: {
+          stories: JSON.stringify(stories),
+          initialStoryId: String(story.id),
+        },
+      } as any);
       void updateStreakForContext({
         kind: 'story',
         userId: story.userId,

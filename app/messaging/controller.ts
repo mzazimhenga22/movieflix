@@ -2,49 +2,66 @@
 import { updateStreakForContext } from '@/lib/streaks/streakManager'
 import type { User } from 'firebase/auth'
 import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    onAuthStateChanged,
+    signInWithEmailAndPassword,
 } from 'firebase/auth'
 
+import { notifyPush } from '@/lib/pushApi'
+
 import {
-  getDatabase,
-  onDisconnect,
-  onValue,
-  ref,
-  set,
-  serverTimestamp as rtdbServerTimestamp,
-  off,
-  DatabaseReference,
+    DatabaseReference,
+    getDatabase,
+    off,
+    onDisconnect,
+    onValue,
+    ref,
+    serverTimestamp as rtdbServerTimestamp,
+    set,
 } from 'firebase/database'
 
 import {
-  addDoc,
-  arrayRemove,
-  arrayUnion,
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-  serverTimestamp,
-  setDoc,
-  where,
-  writeBatch,
-  startAfter,
-
-  // 🔹 ADD THESE
-  DocumentData,
-  Query,
-  QuerySnapshot,
-  QueryDocumentSnapshot,
+    addDoc,
+    arrayRemove,
+    arrayUnion,
+    collection,
+    deleteDoc,
+    doc,
+    DocumentData,
+    getDoc,
+    getDocs,
+    limit,
+    onSnapshot,
+    orderBy,
+    query,
+    Query,
+    QueryDocumentSnapshot,
+    QuerySnapshot,
+    serverTimestamp,
+    setDoc,
+    startAfter,
+    where,
+    writeBatch,
 } from 'firebase/firestore'
 
 import { authPromise, firestore } from '../../constants/firebase'
+
+const rawBroadcastAdmins = (process.env.EXPO_PUBLIC_BROADCAST_ADMINS || '').split(',').map((id) => id.trim()).filter(Boolean)
+
+const bakedBroadcastAdminEmails = ['vivescharris8@gmail.com']
+const rawBroadcastAdminEmails = (process.env.EXPO_PUBLIC_BROADCAST_ADMIN_EMAILS || '')
+  .split(',')
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean)
+
+export const BROADCAST_ADMIN_IDS: string[] = rawBroadcastAdmins
+export const BROADCAST_ADMIN_EMAILS: string[] = Array.from(
+  new Set([...bakedBroadcastAdminEmails.map((e) => e.toLowerCase()), ...rawBroadcastAdminEmails]),
+)
+export const GLOBAL_BROADCAST_CHANNEL_ID = 'movieflix-onboarding-channel'
+const GLOBAL_BROADCAST_NAME = 'MovieFlix Onboarding'
+const GLOBAL_BROADCAST_DESCRIPTION = 'Platform announcements, onboarding tips, and release updates'
+const MAX_GROUP_MEMBERS = 100
 
 // ---- Types ----
 export type Conversation = {
@@ -55,6 +72,8 @@ export type Conversation = {
   lastMessageHasMedia?: boolean
   pinned?: boolean
   muted?: boolean
+  status?: 'active' | 'pending' | 'archived'
+  members?: string[]
 
   // NEW (safe): read tracking
   lastReadAtBy?: Record<string, any>
@@ -76,6 +95,14 @@ export type Conversation = {
     backgroundImage?: string
   }
   rules?: string[]
+  isBroadcast?: boolean
+  channelSlug?: string | null
+  audience?: 'everyone' | 'private'
+  requestInitiatorId?: string | null
+  requestRecipientId?: string | null
+  requestAcceptedAt?: any
+  requestPreview?: string | null
+  requestPreviewAt?: any
 
   [key: string]: any
 }
@@ -99,7 +126,7 @@ export type Message = {
   forwarded?: boolean
   forwardedFrom?: string
   mediaUrl?: string
-  mediaType?: 'image' | 'video' | 'audio' | 'file'
+  mediaType?: 'image' | 'video' | 'audio' | 'file' | null
   fileName?: string
   fileSize?: number
   [key: string]: any
@@ -111,6 +138,7 @@ export type Profile = {
   photoURL: string
   status?: string
   isTyping?: boolean
+  blockedUsers?: string[]
 }
 
 type AuthCallback = (user: User | null) => void
@@ -144,6 +172,40 @@ const detachPresenceListeners = () => {
   connectedRef = null
   connectedHandler = null
   presenceUserRef = null
+}
+
+export const ensureGlobalBroadcastChannel = async (): Promise<void> => {
+  const channelRef = doc(firestore, 'conversations', GLOBAL_BROADCAST_CHANNEL_ID)
+  const existing = await getDoc(channelRef)
+
+  if (existing.exists()) {
+    const data = existing.data() as Conversation
+    if ((!data.admins || data.admins.length === 0) && BROADCAST_ADMIN_IDS.length > 0) {
+      await setDoc(channelRef, { admins: BROADCAST_ADMIN_IDS }, { merge: true })
+    }
+    return
+  }
+
+  await setDoc(
+    channelRef,
+    {
+      isBroadcast: true,
+      isGroup: true,
+      channelSlug: 'onboarding',
+      audience: 'everyone',
+      name: GLOBAL_BROADCAST_NAME,
+      description: GLOBAL_BROADCAST_DESCRIPTION,
+      members: [],
+      admins: BROADCAST_ADMIN_IDS,
+      creator: 'system',
+      updatedAt: serverTimestamp(),
+      lastMessage:
+        'Welcome to MovieFlix! Follow this space for release notes, downtime heads-up, and power tips.',
+      lastMessageSenderId: 'system',
+      status: 'active',
+    },
+    { merge: true },
+  )
 }
 
 // --- Authentication ---
@@ -332,7 +394,18 @@ export const onConversationsUpdate = (callback: (conversations: Conversation[]) 
             id: d.id,
             ...(d.data() as any),
           }))
-          callback(conversations)
+
+          const sorted = conversations.sort((a, b) => {
+            const aPinned = a.pinned ? 1 : 0
+            const bPinned = b.pinned ? 1 : 0
+            if (aPinned !== bPinned) return bPinned - aPinned
+
+            const aUpdated = (a.updatedAt?.toMillis?.() ?? a.updatedAt?.seconds * 1000) || 0
+            const bUpdated = (b.updatedAt?.toMillis?.() ?? b.updatedAt?.seconds * 1000) || 0
+            return bUpdated - aUpdated
+          })
+
+          callback(sorted)
         },
         (err) => console.error('[messagesController] onConversationsUpdate snapshot error:', err),
       )
@@ -387,6 +460,36 @@ export const onUserProfileUpdate = (userId: string, callback: (profile: Profile)
 }
 
 /**
+ * Subscribe to realtime presence for a user (RTDB `/status/{userId}`).
+ * Calls back with the raw status object { state, last_changed }.
+ */
+export const onUserPresence = (
+  userId: string,
+  callback: (status: { state: 'online' | 'offline'; last_changed: number | null }) => void,
+): UnsubscribeFn => {
+  try {
+    const presenceRef = ref(realtimeDb, `/status/${userId}`)
+    const handler = (snap: any) => {
+      const val = snap.val()
+      if (!val) {
+        callback({ state: 'offline', last_changed: null })
+        return
+      }
+      const last = val.last_changed ?? null
+      // RTDB serverTimestamp may be a number or an object; normalize to millis if possible
+      const lastMillis = last && typeof last === 'object' && typeof last.toMillis === 'function' ? last.toMillis() : (typeof last === 'number' ? last : null)
+      callback({ state: val.state === 'online' ? 'online' : 'offline', last_changed: lastMillis })
+    }
+
+    onValue(presenceRef, handler)
+    return () => off(presenceRef, 'value', handler)
+  } catch (err) {
+    console.warn('[messagesController] onUserPresence failed', err)
+    return () => {}
+  }
+}
+
+/**
  * sendMessage:
  * - Uses batch to keep message + conversation summary consistent
  */
@@ -397,8 +500,33 @@ export const sendMessage = async (
   const auth = await getAuth()
   if (!auth?.currentUser) return null
   const uid = auth.currentUser.uid
+  const email = (auth.currentUser.email || '').trim().toLowerCase()
 
   const conversationDocRef = doc(firestore, 'conversations', conversationId)
+  const conversationSnapshot = await getDoc(conversationDocRef)
+  if (!conversationSnapshot.exists()) {
+    throw new Error('Conversation not found')
+  }
+
+  const conversationData = conversationSnapshot.data() as Conversation
+  const isBroadcastChannel = conversationData.isBroadcast
+  const isChannelAdmin = Boolean(
+    conversationData.admins?.includes(uid) ||
+      BROADCAST_ADMIN_IDS.includes(uid) ||
+      (email && BROADCAST_ADMIN_EMAILS.includes(email)),
+  )
+  const isPendingRequest = conversationData.status === 'pending'
+  const requestInitiatorId = conversationData.requestInitiatorId || conversationData.creator || uid
+  const isRequestSender = requestInitiatorId === uid
+
+  if (isBroadcastChannel && !isChannelAdmin) {
+    throw new Error('Only admins can post in this channel')
+  }
+
+  if (isPendingRequest && !isRequestSender) {
+    throw new Error('This message request has not been accepted yet')
+  }
+
   const messagesColRef = collection(firestore, 'conversations', conversationId, 'messages')
 
   const payload: Record<string, any> = {
@@ -414,24 +542,33 @@ export const sendMessage = async (
 
   batch.set(newMessageRef, payload)
 
-  batch.set(
-    conversationDocRef,
-    {
-      lastMessage: (message as any).text ?? '',
-      lastMessageSenderId: uid,
-      updatedAt: serverTimestamp(),
-      // optional: lastMessageHasMedia if you support media
-      // lastMessageHasMedia: Boolean((message as any).mediaUrl || (message as any).imageUrl),
-    },
-    { merge: true },
-  )
+  const previewText = (() => {
+    if ((message as any).text) return (message as any).text
+    if ((message as any).mediaType === 'image') return 'Photo'
+    if ((message as any).mediaType === 'video') return 'Video'
+    if ((message as any).mediaType === 'audio') return 'Audio message'
+    if ((message as any).mediaUrl) return 'Attachment'
+    return ''
+  })()
+
+  const conversationUpdate: Record<string, any> = {
+    lastMessage: previewText,
+    lastMessageSenderId: uid,
+    updatedAt: serverTimestamp(),
+  }
+
+  if (isPendingRequest && isRequestSender) {
+    conversationUpdate.requestPreview = previewText
+    conversationUpdate.requestPreviewAt = serverTimestamp()
+  }
+
+  batch.set(conversationDocRef, conversationUpdate, { merge: true })
 
   await batch.commit()
 
   // Update chat streak
   try {
-    const convSnap = await getDoc(conversationDocRef)
-    const members: string[] = (convSnap.exists() && (convSnap.data() as any).members) || []
+    const members: string[] = (conversationData.members as string[]) || []
     const partnerId = members.find((m) => m !== uid) ?? null
     void updateStreakForContext({
       kind: 'chat',
@@ -442,6 +579,8 @@ export const sendMessage = async (
   } catch (err) {
     console.warn('[messagesController] failed to update chat streak', err)
   }
+
+  void notifyPush({ kind: 'message', conversationId, messageId: newMessageRef.id })
 
   return newMessageRef.id
 }
@@ -481,6 +620,11 @@ export const editMessage = async (conversationId: string, messageId: string, new
 export const setConversationPinned = async (conversationId: string, pinned: boolean): Promise<void> => {
   const conversationDocRef = doc(firestore, 'conversations', conversationId)
   await setDoc(conversationDocRef, { pinned }, { merge: true })
+}
+
+export const muteConversation = async (conversationId: string, muted: boolean): Promise<void> => {
+  const conversationDocRef = doc(firestore, 'conversations', conversationId)
+  await setDoc(conversationDocRef, { muted }, { merge: true })
 }
 
 /**
@@ -639,6 +783,28 @@ export const updateConversationStatus = async (conversationId: string, status: s
   await setDoc(conversationDocRef, { status }, { merge: true })
 }
 
+export const acceptMessageRequest = async (conversationId: string): Promise<void> => {
+  const auth = await getAuth()
+  if (!auth?.currentUser) throw new Error('User not authenticated')
+
+  const conversationDocRef = doc(firestore, 'conversations', conversationId)
+  const snap = await getDoc(conversationDocRef)
+  if (!snap.exists()) throw new Error('Conversation not found')
+
+  const data = snap.data() as Conversation
+  if (data.status !== 'pending') return
+
+  if (data.requestInitiatorId === auth.currentUser.uid) {
+    throw new Error('Only the recipient can accept this request')
+  }
+
+  await setDoc(
+    conversationDocRef,
+    { status: 'active', requestAcceptedAt: serverTimestamp() },
+    { merge: true },
+  )
+}
+
 export const createGroupConversation = async (options: {
   name: string
   memberIds: string[]
@@ -650,6 +816,10 @@ export const createGroupConversation = async (options: {
   if (!auth?.currentUser) throw new Error('User not authenticated')
 
   const uniqueMembers = Array.from(new Set([auth.currentUser.uid, ...options.memberIds]))
+
+  if (uniqueMembers.length > MAX_GROUP_MEMBERS) {
+    throw new Error(`Groups are limited to ${MAX_GROUP_MEMBERS} members`)
+  }
 
   const conversationsRef = collection(firestore, 'conversations')
   const newConversation = await addDoc(conversationsRef, {
@@ -680,7 +850,25 @@ export const findOrCreateConversation = async (otherUser: Profile): Promise<stri
   const q = query(conversationsRef, where('indexKey', '==', indexKey), limit(1))
   const querySnapshot = await getDocs(q)
   if (!querySnapshot.empty) {
-    return querySnapshot.docs[0].id
+    const existingRef = querySnapshot.docs[0].ref
+    const existingData = querySnapshot.docs[0].data() as Conversation
+    if (
+      existingData.status === 'pending' &&
+      !existingData.requestInitiatorId &&
+      !existingData.requestRecipientId
+    ) {
+      const inferredInitiator = auth.currentUser.uid
+      const inferredRecipient = otherUser.id
+      await setDoc(
+        existingRef,
+        {
+          requestInitiatorId: inferredInitiator,
+          requestRecipientId: inferredRecipient,
+        },
+        { merge: true },
+      )
+    }
+    return existingRef.id
   }
 
   const otherUserDocRef = doc(firestore, 'users', otherUser.id)
@@ -694,15 +882,25 @@ export const findOrCreateConversation = async (otherUser: Profile): Promise<stri
   const isFollowing = currentUserFollowing.includes(otherUser.id)
 
   const initialStatus = isFollowing && isFollowingBack ? 'active' : 'pending'
+  const isRequest = initialStatus === 'pending'
 
-  const newConversation = await addDoc(conversationsRef, {
+  const payload: Record<string, any> = {
     members: [auth.currentUser.uid, otherUser.id],
     indexKey,
     updatedAt: serverTimestamp(),
     lastMessage: '',
     status: initialStatus,
     lastMessageSenderId: null,
-  })
+  }
+
+  if (isRequest) {
+    payload.requestInitiatorId = auth.currentUser.uid
+    payload.requestRecipientId = otherUser.id
+    payload.requestPreview = ''
+    payload.requestPreviewAt = serverTimestamp()
+  }
+
+  const newConversation = await addDoc(conversationsRef, payload)
 
   return newConversation.id
 }
@@ -832,11 +1030,6 @@ export const getLastSeen = async (userId: string): Promise<Date | null> => {
   return null
 }
 
-export const muteConversation = async (conversationId: string, muted: boolean): Promise<void> => {
-  const conversationDocRef = doc(firestore, 'conversations', conversationId)
-  await setDoc(conversationDocRef, { muted }, { merge: true })
-}
-
 export const archiveConversation = async (conversationId: string, archived: boolean): Promise<void> => {
   const conversationDocRef = doc(firestore, 'conversations', conversationId)
   await setDoc(conversationDocRef, { archived }, { merge: true })
@@ -959,6 +1152,68 @@ export const leaveGroup = async (conversationId: string): Promise<void> => {
   }
 
   await removeGroupMember(conversationId, auth.currentUser.uid)
+}
+
+export const blockUser = async (targetUserId: string): Promise<void> => {
+  const auth = await getAuth()
+  if (!auth?.currentUser) throw new Error('User not authenticated')
+
+  if (auth.currentUser.uid === targetUserId) throw new Error('You cannot block yourself')
+
+  const userDocRef = doc(firestore, 'users', auth.currentUser.uid)
+  await setDoc(userDocRef, { blockedUsers: arrayUnion(targetUserId) }, { merge: true })
+}
+
+export const unblockUser = async (targetUserId: string): Promise<void> => {
+  const auth = await getAuth()
+  if (!auth?.currentUser) throw new Error('User not authenticated')
+
+  const userDocRef = doc(firestore, 'users', auth.currentUser.uid)
+  await setDoc(userDocRef, { blockedUsers: arrayRemove(targetUserId) }, { merge: true })
+}
+
+export const reportUser = async (
+  targetUserId: string,
+  options?: { conversationId?: string | null; reason?: string | null; details?: string | null },
+): Promise<string> => {
+  const auth = await getAuth()
+  if (!auth?.currentUser) throw new Error('User not authenticated')
+  if (!targetUserId) throw new Error('Missing target user')
+  if (auth.currentUser.uid === targetUserId) throw new Error('You cannot report yourself')
+
+  const reportsRef = collection(firestore, 'reports')
+  const docRef = await addDoc(reportsRef, {
+    kind: 'user',
+    reporterId: auth.currentUser.uid,
+    targetUserId,
+    conversationId: options?.conversationId ?? null,
+    reason: options?.reason ?? 'unspecified',
+    details: options?.details ?? null,
+    createdAt: serverTimestamp(),
+  })
+
+  return docRef.id
+}
+
+export const reportConversation = async (
+  conversationId: string,
+  options?: { reason?: string | null; details?: string | null },
+): Promise<string> => {
+  const auth = await getAuth()
+  if (!auth?.currentUser) throw new Error('User not authenticated')
+  if (!conversationId) throw new Error('Missing conversation')
+
+  const reportsRef = collection(firestore, 'reports')
+  const docRef = await addDoc(reportsRef, {
+    kind: 'conversation',
+    reporterId: auth.currentUser.uid,
+    conversationId,
+    reason: options?.reason ?? 'unspecified',
+    details: options?.details ?? null,
+    createdAt: serverTimestamp(),
+  })
+
+  return docRef.id
 }
 
 export const generateGroupInviteLink = async (conversationId: string, expiresInHours: number = 24): Promise<string> => {
