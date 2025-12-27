@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
+import Alert from '../../components/ui/alert';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
 import { firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
@@ -43,59 +44,87 @@ const SearchScreen = () => {
   const [messageResults, setMessageResults] = useState<any[]>([]);
   const [marketplaceResults, setMarketplaceResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [alertVisible, setAlertVisible] = useState(false);
+  const [alertTitle, setAlertTitle] = useState('');
+  const [alertMessage, setAlertMessage] = useState('');
   const { setAccentColor } = useAccent();
 
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestIdRef = useRef(0);
+  const moviesAbortRef = useRef<AbortController | null>(null);
+
   /** SEARCH LOGIC */
   useEffect(() => {
-    if (searchQuery.length > 2) {
-      setLoading(true);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
 
-      const searchMovies = async () => {
-        const [movieRes, tvRes] = await Promise.all([
-          fetch(
-            `${API_BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodeURIComponent(
-              searchQuery
-            )}`
-          ),
-          fetch(
-            `${API_BASE_URL}/search/tv?api_key=${API_KEY}&query=${encodeURIComponent(
-              searchQuery
-            )}`
-          ),
-        ]);
+    // cancel in-flight TMDB fetches
+    if (moviesAbortRef.current) {
+      moviesAbortRef.current.abort();
+      moviesAbortRef.current = null;
+    }
 
-        const movieData = movieRes.ok ? await movieRes.json() : { results: [] };
-        const tvData = tvRes.ok ? await tvRes.json() : { results: [] };
+    if (searchQuery.length <= 2) {
+      requestIdRef.current += 1;
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setLoading(false);
+      setMovieResults([]);
+      setTvResults([]);
+      setSocialResults([]);
+      setMessageResults([]);
+      setMarketplaceResults([]);
+      return;
+    }
 
-        const movies = (movieData.results || []).map((m: any) => ({
-          ...m,
-          media_type: 'movie',
-          title: m.title ?? m.original_title ?? '',
-          release_date: m.release_date ?? null,
-        }));
+    setLoading(true);
+    const requestId = (requestIdRef.current += 1);
 
-        const tvs = (tvData.results || []).map((t: any) => ({
-          ...t,
-          media_type: 'tv',
-          title: t.name ?? t.original_name ?? '',
-          release_date: t.first_air_date ?? null,
-        }));
+    const searchMovies = async () => {
+      const controller = new AbortController();
+      moviesAbortRef.current = controller;
+      const q = encodeURIComponent(searchQuery);
+      const [movieRes, tvRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/search/movie?api_key=${API_KEY}&query=${q}`, { signal: controller.signal }),
+        fetch(`${API_BASE_URL}/search/tv?api_key=${API_KEY}&query=${q}`, { signal: controller.signal }),
+      ]);
 
-        // Add subtitle availability indicator (will be checked when playing)
-        const moviesWithSubs = movies.map((m: any) => ({
-          ...m,
-          hasSubtitles: subtitleCheckCache[m.id] ?? null // null = not checked yet
-        }));
-        const tvsWithSubs = tvs.map((t: any) => ({
-          ...t,
-          hasSubtitles: subtitleCheckCache[t.id] ?? null
-        }));
+      const movieData = movieRes.ok ? await movieRes.json() : { results: [] };
+      const tvData = tvRes.ok ? await tvRes.json() : { results: [] };
 
-        setMovieResults(moviesWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)));
-        setTvResults(tvsWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)));
-      };
+      if (requestId !== requestIdRef.current) return;
+
+      const movies = (movieData.results || []).map((m: any) => ({
+        ...m,
+        media_type: 'movie',
+        title: m.title ?? m.original_title ?? '',
+        release_date: m.release_date ?? null,
+      }));
+
+      const tvs = (tvData.results || []).map((t: any) => ({
+        ...t,
+        media_type: 'tv',
+        title: t.name ?? t.original_name ?? '',
+        release_date: t.first_air_date ?? null,
+      }));
+
+      const moviesWithSubs = movies.map((m: any) => ({
+        ...m,
+        hasSubtitles: subtitleCheckCache[m.id] ?? null,
+      }));
+      const tvsWithSubs = tvs.map((t: any) => ({
+        ...t,
+        hasSubtitles: subtitleCheckCache[t.id] ?? null,
+      }));
+
+      setMovieResults(
+        moviesWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)),
+      );
+      setTvResults(tvsWithSubs.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0)));
+    };
 
       const searchSocial = async () => {
         try {
@@ -133,10 +162,14 @@ const SearchScreen = () => {
             item.message?.toLowerCase().includes(searchQuery.toLowerCase())
           );
 
-          setSocialResults(socialResults);
+          if (requestId === requestIdRef.current) {
+            setSocialResults(socialResults);
+          }
         } catch (err) {
           console.warn('Social search error', err);
-          setSocialResults([]);
+          if (requestId === requestIdRef.current) {
+            setSocialResults([]);
+          }
         }
       };
 
@@ -145,7 +178,7 @@ const SearchScreen = () => {
           // Search messages, users, chats
           const [messagesQuery, usersQuery] = await Promise.all([
             getDocs(query(collection(firestore, 'messages'), orderBy('createdAt', 'desc'), limit(100))),
-            getDocs(collection(firestore, 'users')),
+            getDocs(query(collection(firestore, 'users'), limit(200))),
           ]);
 
           const messages = messagesQuery.docs.map((doc: any) => ({
@@ -168,17 +201,21 @@ const SearchScreen = () => {
             ...users.filter((item: any) => item.title?.toLowerCase().includes(searchQuery.toLowerCase()) || item.email?.toLowerCase().includes(searchQuery.toLowerCase()))
           ];
 
-          setMessageResults(messageResults);
+          if (requestId === requestIdRef.current) {
+            setMessageResults(messageResults);
+          }
         } catch (err) {
           console.warn('Messages search error', err);
-          setMessageResults([]);
+          if (requestId === requestIdRef.current) {
+            setMessageResults([]);
+          }
         }
       };
 
       const searchMarketplace = async () => {
         try {
           // Search marketplace items
-          const marketplaceQuery = await getDocs(collection(firestore, 'marketplace'));
+          const marketplaceQuery = await getDocs(query(collection(firestore, 'marketplace'), limit(200)));
           const marketplaceItems = marketplaceQuery.docs.map((doc: any) => ({
             id: doc.id,
             type: 'marketplace',
@@ -192,43 +229,47 @@ const SearchScreen = () => {
             item.category?.toLowerCase().includes(searchQuery.toLowerCase())
           );
 
-          setMarketplaceResults(marketplaceResults);
+          if (requestId === requestIdRef.current) {
+            setMarketplaceResults(marketplaceResults);
+          }
         } catch (err) {
           console.warn('Marketplace search error', err);
-          setMarketplaceResults([]);
+          if (requestId === requestIdRef.current) {
+            setMarketplaceResults([]);
+          }
         }
       };
 
-      const searchPromises = [];
+    debounceRef.current = setTimeout(() => {
+      const run = async () => {
+        try {
+          if (activeTab === 'movies') {
+            await searchMovies();
+          } else if (activeTab === 'social') {
+            await searchSocial();
+          } else if (activeTab === 'messages') {
+            await searchMessages();
+          } else if (activeTab === 'marketplace') {
+            await searchMarketplace();
+          }
+        } finally {
+          if (requestId === requestIdRef.current) {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setLoading(false);
+          }
+        }
+      };
 
-      if (activeTab === 'movies') {
-        searchPromises.push(searchMovies());
-      } else if (activeTab === 'social') {
-        searchPromises.push(searchSocial());
-      } else if (activeTab === 'messages') {
-        searchPromises.push(searchMessages());
-      } else if (activeTab === 'marketplace') {
-        searchPromises.push(searchMarketplace());
+      void run();
+    }, 350);
+
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
-
-      Promise.all(searchPromises)
-        .then(() => {
-          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-          setLoading(false);
-        })
-        .catch((err) => {
-          console.warn('Search error', err);
-          setLoading(false);
-        });
-    } else {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setMovieResults([]);
-      setTvResults([]);
-      setSocialResults([]);
-      setMessageResults([]);
-      setMarketplaceResults([]);
-    }
-  }, [searchQuery, activeTab]);
+    };
+  }, [searchQuery, activeTab, subtitleCheckCache]);
 
   /** ACCENT UPDATE */
   const accentColor =
@@ -378,22 +419,24 @@ const SearchScreen = () => {
             socialResults.length > 0 ? (
               <View style={styles.resultsList}>
                 {socialResults.map((item) => (
-                  <TouchableOpacity key={item.id} style={styles.resultItem}>
-                    <Ionicons
-                      name={
-                        item.type === 'story' ? 'images' :
-                        item.type === 'notification' ? 'notifications' :
-                        'trophy'
-                      }
-                      size={24}
-                      color="#fff"
-                      style={styles.resultIcon}
-                    />
-                    <View style={styles.resultContent}>
-                      <Text style={styles.resultTitle}>{item.title}</Text>
-                      <Text style={styles.resultType}>{item.type}</Text>
-                    </View>
-                  </TouchableOpacity>
+                  <BlurView key={item.id} intensity={25} tint="dark" style={styles.resultItemBlur}>
+                    <TouchableOpacity style={styles.resultItem}>
+                      <Ionicons
+                        name={
+                          item.type === 'story' ? 'images' :
+                          item.type === 'notification' ? 'notifications' :
+                          'trophy'
+                        }
+                        size={24}
+                        color="#fff"
+                        style={styles.resultIcon}
+                      />
+                      <View style={styles.resultContent}>
+                        <Text style={styles.resultTitle}>{item.title}</Text>
+                        <Text style={styles.resultType}>{item.type}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  </BlurView>
                 ))}
               </View>
             ) : searchQuery.length > 2 ? (
@@ -420,18 +463,20 @@ const SearchScreen = () => {
             messageResults.length > 0 ? (
               <View style={styles.resultsList}>
                 {messageResults.map((item) => (
-                  <TouchableOpacity key={item.id} style={styles.resultItem}>
-                    <Ionicons
-                      name={item.type === 'user' ? 'person' : 'chatbubble'}
-                      size={24}
-                      color="#fff"
-                      style={styles.resultIcon}
-                    />
-                    <View style={styles.resultContent}>
-                      <Text style={styles.resultTitle}>{item.title}</Text>
-                      <Text style={styles.resultType}>{item.type}</Text>
-                    </View>
-                  </TouchableOpacity>
+                  <BlurView key={item.id} intensity={25} tint="dark" style={styles.resultItemBlur}>
+                    <TouchableOpacity style={styles.resultItem}>
+                      <Ionicons
+                        name={item.type === 'user' ? 'person' : 'chatbubble'}
+                        size={24}
+                        color="#fff"
+                        style={styles.resultIcon}
+                      />
+                      <View style={styles.resultContent}>
+                        <Text style={styles.resultTitle}>{item.title}</Text>
+                        <Text style={styles.resultType}>{item.type}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  </BlurView>
                 ))}
               </View>
             ) : searchQuery.length > 2 ? (
@@ -577,14 +622,17 @@ const styles = StyleSheet.create({
   resultsList: {
     flex: 1,
   },
+  resultItemBlur: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
   resultItem: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 12,
     paddingHorizontal: 16,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
   },
   resultIcon: {
     marginRight: 12,

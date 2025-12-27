@@ -17,6 +17,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { FlashList, type ListRenderItem } from '@shopify/flash-list';
 import FeaturedMovie from '../../components/FeaturedMovie';
 import MovieList from '../../components/MovieList';
 import MovieTrailerCarousel from '../../components/MovieTrailerCarousel';
@@ -42,6 +43,14 @@ const PULSE_PALETTES: [string, string][] = [
   ['#70e1f5', '#ffd194'],
   ['#c471f5', '#fa71cd'],
 ];
+
+const FILTER_KEYS = ['All', 'TopRated', 'New', 'ForYou'] as const;
+const FILTER_LABELS: Record<(typeof FILTER_KEYS)[number], string> = {
+  All: 'All',
+  TopRated: 'Top Rated',
+  New: 'New',
+  ForYou: 'For You',
+};
 
 const HomeScreen: React.FC = () => {
   const { currentPlan } = useSubscription();
@@ -438,6 +447,19 @@ const HomeScreen: React.FC = () => {
     [activeFilter, activeGenreId, recommended]
   );
 
+  const filteredTrending = useMemo(() => applyFilter(trending), [applyFilter, trending]);
+  const filteredRecommended = useMemo(() => applyFilter(recommended), [applyFilter, recommended]);
+  const filteredNetflix = useMemo(() => applyFilter(netflix), [applyFilter, netflix]);
+  const filteredAmazon = useMemo(() => applyFilter(amazon), [applyFilter, amazon]);
+  const filteredHbo = useMemo(() => applyFilter(hbo), [applyFilter, hbo]);
+  const filteredTrendingMoviesOnly = useMemo(
+    () => applyFilter(trendingMoviesOnly),
+    [applyFilter, trendingMoviesOnly],
+  );
+  const filteredTrendingTvOnly = useMemo(() => applyFilter(trendingTvOnly), [applyFilter, trendingTvOnly]);
+  const filteredSongs = useMemo(() => applyFilter(songs as any), [applyFilter, songs]);
+  const filteredMovieReels = useMemo(() => applyFilter(movieReels), [applyFilter, movieReels]);
+
   const becauseYouWatched = useMemo(() => {
     if (!lastWatched || !recommended || recommended.length === 0) return [];
     const lastGenres = (lastWatched.genre_ids || []) as number[];
@@ -497,13 +519,16 @@ const HomeScreen: React.FC = () => {
     return () => clearInterval(interval);
   }, [stories]);
 
-  const getGenreNames = (genreIds: number[] = []) => {
-    if (!genres.length || !genreIds?.length) return '';
-    return genreIds
-      .map((id) => genres.find((g) => g.id === id)?.name)
-      .filter(Boolean)
-      .join(', ');
-  };
+  const getGenreNames = useCallback(
+    (genreIds: number[] = []) => {
+      if (!genres.length || !genreIds?.length) return '';
+      return genreIds
+        .map((id) => genres.find((g) => g.id === id)?.name)
+        .filter(Boolean)
+        .join(', ');
+    },
+    [genres],
+  );
 
   const handleShuffle = () => {
     const allContent = [...trending, ...movieReels, ...recommended, ...netflix, ...amazon, ...hbo];
@@ -544,6 +569,7 @@ const HomeScreen: React.FC = () => {
 
   const displayedStories = stories.slice(storyIndex, storyIndex + 4);
   const showStoriesSection = !isKidsProfile && stories.length > 0;
+  const isEmptyState = stories.length === 0 && recommended.length === 0 && trending.length === 0;
   const trendingCount = trending.length;
   const reelsCount = movieReels.length;
   const { setAccentColor } = useAccent();
@@ -651,6 +677,258 @@ const HomeScreen: React.FC = () => {
     }).start(() => setPreviewVisible(false));
   };
 
+  type HomeSection =
+    | { key: 'featured' }
+    | { key: 'continueWatching' }
+    | { key: 'becauseYouWatched' }
+    | { key: 'favoriteGenre' }
+    | { key: 'songs' }
+    | { key: 'trailers' }
+    | { key: 'trending' }
+    | { key: 'recommended' }
+    | { key: 'netflix' }
+    | { key: 'amazon' }
+    | { key: 'hbo' }
+    | { key: 'topMoviesToday' }
+    | { key: 'topTvToday' }
+    | { key: 'popularMovies' }
+    | { key: 'upcomingTheaters' }
+    | { key: 'topRatedMovies' };
+
+  const sections = useMemo<HomeSection[]>(() => {
+    if (isEmptyState) return [];
+    const out: HomeSection[] = [];
+    if (featuredMovie) out.push({ key: 'featured' });
+    if (continueWatching.length > 0) out.push({ key: 'continueWatching' });
+    if (lastWatched && becauseYouWatched.length > 0) out.push({ key: 'becauseYouWatched' });
+    if (favoriteGenre && favoriteGenreMovies.length > 0) out.push({ key: 'favoriteGenre' });
+    if (songs.length > 0) out.push({ key: 'songs' });
+    if (movieTrailers.length > 0) out.push({ key: 'trailers' });
+    if (trending.length > 0) out.push({ key: 'trending' });
+    if (recommended.length > 0) out.push({ key: 'recommended' });
+    if (netflix.length > 0) out.push({ key: 'netflix' });
+    if (amazon.length > 0) out.push({ key: 'amazon' });
+    if (hbo.length > 0) out.push({ key: 'hbo' });
+    if (trendingMoviesOnly.length > 0) out.push({ key: 'topMoviesToday' });
+    if (trendingTvOnly.length > 0) out.push({ key: 'topTvToday' });
+    if (songs.length > 0) out.push({ key: 'popularMovies' });
+    if (movieReels.length > 0) out.push({ key: 'upcomingTheaters' });
+    if (recommended.length > 0) out.push({ key: 'topRatedMovies' });
+    return out;
+  }, [
+    becauseYouWatched.length,
+    continueWatching.length,
+    isEmptyState,
+    favoriteGenre,
+    favoriteGenreMovies.length,
+    featuredMovie,
+    lastWatched,
+    movieTrailers.length,
+    songs.length,
+    trending.length,
+    recommended.length,
+    netflix.length,
+    amazon.length,
+    hbo.length,
+    trendingMoviesOnly.length,
+    trendingTvOnly.length,
+    movieReels.length,
+  ]);
+
+  const sectionFadeStyle = useMemo(() => ({ opacity: sectionsAnim }), [sectionsAnim]);
+
+  const renderSection: ListRenderItem<HomeSection> = useCallback(
+    ({ item }) => {
+      switch (item.key) {
+        case 'featured':
+          return featuredMovie ? (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <FeaturedMovie movie={featuredMovie} getGenreNames={getGenreNames} onInfoPress={openQuickPreview} />
+              </View>
+            </Animated.View>
+          ) : null;
+
+        case 'continueWatching':
+          return continueWatching.length > 0 ? (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList
+                  title="Continue Watching"
+                  movies={continueWatching}
+                  onItemPress={handleResumePlayback}
+                  showProgress
+                />
+              </View>
+            </Animated.View>
+          ) : null;
+
+        case 'becauseYouWatched':
+          return lastWatched && becauseYouWatched.length > 0 ? (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList
+                  title={`Because you watched ${lastWatched.title || lastWatched.name}`}
+                  movies={becauseYouWatched}
+                  onItemPress={handleOpenDetails}
+                />
+              </View>
+            </Animated.View>
+          ) : null;
+
+        case 'favoriteGenre':
+          return favoriteGenre && favoriteGenreMovies.length > 0 ? (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList
+                  title={favoriteGenreLoading ? `Loading ${favoriteGenre.name} picks…` : `${favoriteGenre.name} Picks`}
+                  movies={favoriteGenreMovies}
+                  onItemPress={handleOpenDetails}
+                />
+              </View>
+            </Animated.View>
+          ) : null;
+
+        case 'songs':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <SongList title="Songs of the Moment" songs={songs} onOpenAll={() => router.push('/songs')} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'trailers':
+          return movieTrailers.length > 0 ? (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieTrailerCarousel trailers={movieTrailers} onTrailerPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          ) : null;
+
+        case 'trending':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Trending" movies={filteredTrending} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'recommended':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Recommended" movies={filteredRecommended} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'netflix':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Netflix Originals" movies={filteredNetflix} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'amazon':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Amazon Prime Video" movies={filteredAmazon} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'hbo':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="HBO Max" movies={filteredHbo} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'topMoviesToday':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Top Movies Today" movies={filteredTrendingMoviesOnly} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'topTvToday':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Top TV Today" movies={filteredTrendingTvOnly} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'popularMovies':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Popular Movies" movies={filteredSongs} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'upcomingTheaters':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Upcoming in Theaters" movies={filteredMovieReels} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        case 'topRatedMovies':
+          return (
+            <Animated.View style={sectionFadeStyle}>
+              <View style={styles.sectionBlock}>
+                <MovieList title="Top Rated Movies" movies={filteredRecommended} onItemPress={handleOpenDetails} />
+              </View>
+            </Animated.View>
+          );
+
+        default:
+          return null;
+      }
+    },
+    [
+      becauseYouWatched,
+      continueWatching,
+      favoriteGenre,
+      favoriteGenreLoading,
+      favoriteGenreMovies,
+      featuredMovie,
+      filteredAmazon,
+      filteredHbo,
+      filteredMovieReels,
+      filteredNetflix,
+      filteredRecommended,
+      filteredSongs,
+      filteredTrending,
+      filteredTrendingMoviesOnly,
+      filteredTrendingTvOnly,
+      getGenreNames,
+      handleOpenDetails,
+      handleResumePlayback,
+      lastWatched,
+      movieTrailers,
+      openQuickPreview,
+      router,
+      sectionFadeStyle,
+      songs,
+    ],
+  );
+
   if (loading) {
     return (
       <ScreenWrapper>
@@ -664,6 +942,18 @@ const HomeScreen: React.FC = () => {
       <ScreenWrapper>
         <View style={styles.centered}>
           <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => {
+              // Trigger a remount of this screen to re-run fetch hooks.
+              // expo-router supports replace with the current route.
+              router.replace('/movies');
+            }}
+            activeOpacity={0.88}
+          >
+            <Ionicons name="refresh" size={18} color="#fff" />
+            <Text style={styles.retryButtonText}>Try again</Text>
+          </TouchableOpacity>
         </View>
       </ScreenWrapper>
     );
@@ -838,31 +1128,40 @@ const HomeScreen: React.FC = () => {
             <AdBanner placement="feed" />
           </View>
 
-            <ScrollView contentContainerStyle={styles.scrollViewContent}>
-              {stories.length === 0 && recommended.length === 0 && trending.length === 0 ? (
-                <View style={styles.centered}>
-                  <Text style={styles.emptyText}>No movies or shows available right now.</Text>
-                </View>
-              ) : (
+            <FlashList
+              data={sections}
+              renderItem={renderSection}
+              keyExtractor={(it) => it.key}
+              estimatedItemSize={260}
+              contentContainerStyle={styles.scrollViewContent}
+              ListHeaderComponent={
                 <>
                   {/* Browse by genre above stories */}
                   {genres.length > 0 && (
-                    <Animated.View style={[styles.genreSection, { transform: [{ translateY: genreSectionAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }], opacity: genreSectionAnim }]}>
+                    <Animated.View
+                      style={[
+                        styles.genreSection,
+                        {
+                          transform: [
+                            {
+                              translateY: genreSectionAnim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: [30, 0],
+                              }),
+                            },
+                          ],
+                          opacity: genreSectionAnim,
+                        },
+                      ]}
+                    >
                       <Text style={styles.genreLabel}>Browse by genre</Text>
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.genreRow}
-                      >
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.genreRow}>
                         <TouchableOpacity
                           style={[styles.genreChip, activeGenreId == null && styles.genreChipActive]}
                           onPress={() => setActiveGenreId(null)}
                         >
                           <Text
-                            style={[
-                              styles.genreChipText,
-                              activeGenreId == null && styles.genreChipTextActive,
-                            ]}
+                            style={[styles.genreChipText, activeGenreId == null && styles.genreChipTextActive]}
                           >
                             All genres
                           </Text>
@@ -871,16 +1170,9 @@ const HomeScreen: React.FC = () => {
                           <TouchableOpacity
                             key={g.id}
                             style={[styles.genreChip, activeGenreId === g.id && styles.genreChipActive]}
-                            onPress={() =>
-                              setActiveGenreId((current) => (current === g.id ? null : g.id))
-                            }
+                            onPress={() => setActiveGenreId((current) => (current === g.id ? null : g.id))}
                           >
-                            <Text
-                              style={[
-                                styles.genreChipText,
-                                activeGenreId === g.id && styles.genreChipTextActive,
-                              ]}
-                            >
+                            <Text style={[styles.genreChipText, activeGenreId === g.id && styles.genreChipTextActive]}>
                               {g.name}
                             </Text>
                           </TouchableOpacity>
@@ -896,14 +1188,20 @@ const HomeScreen: React.FC = () => {
                   )}
 
                   {/* Main filter chips below stories */}
-                  <Animated.View style={[styles.filterRow, { transform: [{ translateY: filtersAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }], opacity: filtersAnim }]}>
-                    {['All', 'TopRated', 'New', 'ForYou'].map((key) => {
-                      const labelMap: Record<string, string> = {
-                        All: 'All',
-                        TopRated: 'Top Rated',
-                        New: 'New',
-                        ForYou: 'For You',
-                      };
+                  <Animated.View
+                    style={[
+                      styles.filterRow,
+                      {
+                        transform: [
+                          {
+                            translateY: filtersAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
+                          },
+                        ],
+                        opacity: filtersAnim,
+                      },
+                    ]}
+                  >
+                    {FILTER_KEYS.map((key) => {
                       const isActive = activeFilter === (key as any);
                       return (
                         <TouchableOpacity
@@ -911,149 +1209,22 @@ const HomeScreen: React.FC = () => {
                           style={[styles.filterChip, isActive && styles.filterChipActive]}
                           onPress={() => setActiveFilter(key as any)}
                         >
-                          <Text
-                            style={[styles.filterChipText, isActive && styles.filterChipTextActive]}
-                          >
-                            {labelMap[key]}
+                          <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
+                            {FILTER_LABELS[key]}
                           </Text>
                         </TouchableOpacity>
                       );
                     })}
                   </Animated.View>
 
-                <Animated.View style={[{ opacity: sectionsAnim }]}>
-                  {featuredMovie && (
-                    <View style={styles.sectionBlock}>
-                      <FeaturedMovie
-                        movie={featuredMovie}
-                        getGenreNames={getGenreNames}
-                        onInfoPress={openQuickPreview}
-                      />
+                  {isEmptyState ? (
+                    <View style={styles.centered}>
+                      <Text style={styles.emptyText}>No movies or shows available right now.</Text>
                     </View>
-                  )}
-
-                  {continueWatching.length > 0 && (
-                    <View style={styles.sectionBlock}>
-                      <MovieList
-                        title="Continue Watching"
-                        movies={continueWatching}
-                        onItemPress={handleResumePlayback}
-                        showProgress
-                      />
-                    </View>
-                  )}
-
-                  {lastWatched && becauseYouWatched.length > 0 && (
-                    <View style={styles.sectionBlock}>
-                      <MovieList
-                        title={`Because you watched ${lastWatched.title || lastWatched.name}`}
-                        movies={becauseYouWatched}
-                        onItemPress={handleOpenDetails}
-                      />
-                    </View>
-                  )}
-
-                  {favoriteGenre && favoriteGenreMovies.length > 0 && (
-                    <View style={styles.sectionBlock}>
-                      <MovieList
-                        title={
-                          favoriteGenreLoading
-                            ? `Loading ${favoriteGenre.name} picks…`
-                            : `${favoriteGenre.name} Picks`
-                        }
-                        movies={favoriteGenreMovies}
-                        onItemPress={handleOpenDetails}
-                      />
-                    </View>
-                  )}
-
-                  <View style={styles.sectionBlock}>
-                    <SongList
-                      title="Songs of the Moment"
-                      songs={songs}
-                      onOpenAll={() => router.push('/songs')}
-                    />
-                  </View>
-
-                  {movieTrailers.length > 0 && (
-                    <MovieTrailerCarousel
-                      trailers={movieTrailers}
-                      onTrailerPress={handleOpenDetails}
-                    />
-                  )}
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Trending"
-                      movies={applyFilter(trending)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Recommended"
-                      movies={applyFilter(recommended)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList title="Netflix Originals" movies={applyFilter(netflix)} onItemPress={handleOpenDetails} />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList title="Amazon Prime Video" movies={applyFilter(amazon)} onItemPress={handleOpenDetails} />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList title="HBO Max" movies={applyFilter(hbo)} onItemPress={handleOpenDetails} />
-                  </View>
-
-                  {/* Extra curated rows for depth */}
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Top Movies Today"
-                      movies={applyFilter(trendingMoviesOnly)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Top TV Today"
-                      movies={applyFilter(trendingTvOnly)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Popular Movies"
-                      movies={applyFilter(songs)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Upcoming in Theaters"
-                      movies={applyFilter(movieReels)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-
-                  <View style={styles.sectionBlock}>
-                    <MovieList
-                      title="Top Rated Movies"
-                      movies={applyFilter(recommended)}
-                      onItemPress={handleOpenDetails}
-                    />
-                  </View>
-                </Animated.View>
-              </>
-            )}
-          </ScrollView>
+                  ) : null}
+                </>
+              }
+            />
 
             {/* Sub FABs */}
             {fabExpanded && (() => {
@@ -1616,6 +1787,25 @@ const HomeScreen: React.FC = () => {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  retryButton: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 
   errorText: {

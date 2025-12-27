@@ -624,17 +624,8 @@ const FeedSlide = React.memo(function FeedSlide({
     router.push(`/profile?from=social-feed&userId=${encodeURIComponent(String(item.user))}`)
   }
 
-  const canRenderVideo = mounted && !!item.videoUrl
-
-  if (!item.videoUrl) {
-    return (
-      <View style={styles.slide}>
-        <View style={styles.center}>
-          <Text style={styles.errorText}>No video available</Text>
-        </View>
-      </View>
-    )
-  }
+  const hasVideo = Boolean(item.videoUrl)
+  const canRenderVideo = mounted && hasVideo
 
   useEffect(() => {
     // Reset loading state when we unmount the heavy video surface
@@ -653,6 +644,16 @@ const FeedSlide = React.memo(function FeedSlide({
 
   const handleLoadStart = useCallback(() => setLoading(true), [])
   const handleLoad = useCallback(() => setLoading(false), [])
+
+  if (!hasVideo) {
+    return (
+      <View style={styles.slide}>
+        <View style={styles.center}>
+          <Text style={styles.errorText}>No video available</Text>
+        </View>
+      </View>
+    )
+  }
 
   return (
     <View style={styles.slide}>

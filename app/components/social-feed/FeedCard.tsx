@@ -8,6 +8,7 @@ import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Alert,
   Dimensions,
   FlatList,
   GestureResponderEvent,
@@ -37,6 +38,7 @@ type Props = {
   onWatch: (id: FeedCardItem['id']) => void;
   onShare: (id: FeedCardItem['id']) => void;
   onBookmark: (id: FeedCardItem['id']) => void;
+  onDelete?: (item: FeedCardItem) => void | Promise<void>;
   enableStreaks?: boolean;
   active?: boolean;
   currentPlan?: PlanTier;
@@ -59,6 +61,7 @@ export default function FeedCard({
   onWatch,
   onShare,
   onBookmark,
+  onDelete,
   enableStreaks,
   active,
   currentPlan,
@@ -95,6 +98,22 @@ export default function FeedCard({
 
   // ✅ this matches ProfileScreen intent: check by UID
   const isOwnItem = !!user?.uid && !!item.userId && user.uid === item.userId;
+
+  const confirmDelete = useCallback(() => {
+    if (!isOwnItem || !onDelete) return;
+    Alert.alert('Delete post?', 'This will remove it from your feed.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          try {
+            void onDelete(item);
+          } catch {}
+        },
+      },
+    ]);
+  }, [isOwnItem, item, onDelete]);
 
   const fallbackAvatar =
     'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?auto=format&fit=crop&q=80&w=1780&ixlib=rb-4.0.3';
@@ -378,6 +397,11 @@ export default function FeedCard({
                 {item.review}
               </Text>
             </View>
+            {isOwnItem && onDelete ? (
+              <TouchableOpacity style={styles.menuBtnOverlay} onPress={confirmDelete}>
+                <Feather name="trash-2" size={18} color="#fff" />
+              </TouchableOpacity>
+            ) : null}
             <View style={styles.heartCount}>
               <Feather name="heart" size={18} color="#fff" />
               <Text style={styles.heartText}>{item.likes}</Text>
@@ -448,6 +472,11 @@ export default function FeedCard({
               </TouchableOpacity>
               <Text style={styles.date}>{item.date}</Text>
             </View>
+            {isOwnItem && onDelete ? (
+              <TouchableOpacity style={styles.menuBtn} onPress={confirmDelete}>
+                <Feather name="trash-2" size={18} color="#fff" />
+              </TouchableOpacity>
+            ) : null}
           </View>
         )}
 
@@ -640,6 +669,18 @@ const styles = StyleSheet.create({
   userOverlay: { color: '#fff', fontWeight: '700' },
   reviewOverlay: { color: '#f5f5f5', fontSize: 12, marginTop: 2 },
 
+  menuBtnOverlay: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+
   heartCount: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -652,6 +693,17 @@ const styles = StyleSheet.create({
 
   content: { paddingHorizontal: 14, paddingVertical: 10 },
   headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  menuBtn: {
+    marginLeft: 'auto',
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   user: { color: '#fff', fontWeight: '700' },
   date: { color: '#999', fontSize: 11, marginTop: 2 },
   review: { color: '#e6e6e6', marginTop: 6 },

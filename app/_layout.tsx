@@ -16,12 +16,21 @@ import '../polyfills/reanimated-worklet-callback';
 import { supabase } from '../constants/supabase';
 import { authPromise } from '../constants/firebase';
 import { CustomThemeProvider } from '../hooks/use-theme';
-import { installPushNavigationHandlers, registerForPushNotificationsAsync } from '../lib/pushNotifications';
+import { installPushNavigationHandlers, prepareNotificationsAsync, registerForPushNotificationsAsync } from '../lib/pushNotifications';
+import { initializeDownloadManager } from '../lib/downloadManager';
 import { SubscriptionProvider } from '../providers/SubscriptionProvider';
 import { AccentProvider } from './components/AccentContext';
 import UpdateGate from './components/UpdateGate';
 
 export default function RootLayout() {
+  useEffect(() => {
+    void prepareNotificationsAsync().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    void initializeDownloadManager().catch(() => {});
+  }, []);
+
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
 
@@ -29,7 +38,9 @@ export default function RootLayout() {
       .then((auth) => {
         unsubscribe = onAuthStateChanged(auth, (user) => {
           if (!user?.uid) return;
-          void registerForPushNotificationsAsync(user.uid).catch(() => {});
+          void registerForPushNotificationsAsync(user.uid).catch((err) => {
+            console.warn('[push] registration failed', err);
+          });
         });
       })
       .catch(() => {});

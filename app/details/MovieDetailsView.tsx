@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system/legacy';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Video, ResizeMode } from 'expo-av';
@@ -7,13 +6,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Image, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { IMAGE_BASE_URL } from '../../constants/api';
 import { pushWithOptionalInterstitial } from '../../lib/ads/navigate';
-import { emitDownloadEvent } from '../../lib/downloadEvents';
-import { ensureDownloadDir, guessFileExtension, persistDownloadRecord } from '../../lib/fileUtils';
-import { downloadHlsPlaylist } from '../../lib/hlsDownloader';
+import { createPrefetchKey, storePrefetchedPlayback } from '../../lib/videoPrefetchCache';
+import { enqueueDownload } from '../../lib/downloadManager';
+import { getHlsVariantOptions } from '../../lib/hlsDownloader';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { scrapeImdbTrailer as scrapeIMDbTrailer } from '../../src/providers/scrapeImdbTrailer';
-import { usePStream } from '../../src/pstream/usePStream';
+import { scrapePStream, usePStream } from '../../src/pstream/usePStream';
 import { useAccent } from '../components/AccentContext';
+import { buildScrapeDebugTag, buildSourceOrder } from '../../lib/videoPlaybackShared';
+
+import { DownloadQualityPicker, type DownloadQualityOption } from '../../components/DownloadQualityPicker';
 
 import { CastMember, Media } from '../../types';
 import CastList from './CastList';
@@ -154,11 +156,33 @@ const MovieDetailsView: React.FC<Props> = ({
       countdownInterval.current && clearInterval(countdownInterval.current);
     };
   }, [movie?.imdb_id]);
-  const [downloadState, setDownloadState] = React.useState<'idle' | 'preparing' | 'downloading'>('idle');
-  const [downloadProgress, setDownloadProgress] = React.useState(0);
   const [episodeDownloads, setEpisodeDownloads] = React.useState<Record<string, { state: 'idle' | 'preparing' | 'downloading' | 'completed' | 'error'; progress: number; error?: string }>>({});
-  const isMountedRef = React.useRef(true);
-  const downloadResumableRef = React.useRef<FileSystem.DownloadResumable | null>(null);
+
+  const [qualityPickerVisible, setQualityPickerVisible] = React.useState(false);
+  const [qualityPickerTitle, setQualityPickerTitle] = React.useState('');
+  const [qualityPickerOptions, setQualityPickerOptions] = React.useState<DownloadQualityOption[]>([]);
+  const onQualityPickRef = React.useRef<((option: DownloadQualityOption) => void) | null>(null);
+
+  const openQualityPicker = React.useCallback(
+    (title: string, options: DownloadQualityOption[], onPick: (option: DownloadQualityOption) => void) => {
+      setQualityPickerTitle(title);
+      setQualityPickerOptions(options);
+      onQualityPickRef.current = onPick;
+      setQualityPickerVisible(true);
+    },
+    [],
+  );
+
+  const handleQualityPick = React.useCallback((option: DownloadQualityOption) => {
+    const handler = onQualityPickRef.current;
+    onQualityPickRef.current = null;
+    setQualityPickerVisible(false);
+    try {
+      handler?.(option);
+    } catch {
+      // ignore
+    }
+  }, []);
   const contentHint = React.useMemo(() => determineContentHint(movie), [movie]);
   const releaseDateValue = React.useMemo(() => {
     if (!movie) return undefined;
@@ -185,23 +209,6 @@ const MovieDetailsView: React.FC<Props> = ({
     if (Array.isArray((movie as any).genres)) return (movie as any).genres.map((g: any) => g.id).filter(Boolean);
     return [];
   }, [movie]);
-  React.useEffect(() => {
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
-  const setDownloadStateSafe = React.useCallback((nextState: 'idle' | 'preparing' | 'downloading') => {
-    if (isMountedRef.current) {
-      setDownloadState(nextState);
-    }
-  }, []);
-
-  const setDownloadProgressSafe = React.useCallback((nextProgress: number) => {
-    if (isMountedRef.current) {
-      setDownloadProgress(nextProgress);
-    }
-  }, []);
 
   const setEpisodeDownloadState = React.useCallback((episodeId: string, next: { state: 'idle' | 'preparing' | 'downloading' | 'completed' | 'error'; progress: number; error?: string }) => {
     setEpisodeDownloads((prev) => ({ ...prev, [episodeId]: next }));
@@ -389,10 +396,71 @@ const upcoming: Array<{
         params.contentHint = contentHint;
       }
 
+      const baseTarget = { pathname: '/video-player', params: { ...params } };
+      const prefetchKey = createPrefetchKey(baseTarget);
+      (baseTarget.params as any).__prefetchKey = prefetchKey;
+
+      // best-effort prefetch to reduce time-to-first-frame
+      try {
+        const title = (baseTarget.params as any).title as string;
+        const releaseYear = Number(baseTarget.params.releaseYear) || new Date().getFullYear();
+        const tmdbId = String(baseTarget.params.tmdbId || '');
+        const imdbId = (baseTarget.params as any).imdbId ? String((baseTarget.params as any).imdbId) : undefined;
+        const preferAnimeSources = (baseTarget.params as any).contentHint === 'anime';
+        const sourceOrder = buildSourceOrder(Boolean(preferAnimeSources));
+        const debugTag = buildScrapeDebugTag('details-prefetch', title);
+
+        void (async () => {
+          try {
+            const mediaPayload =
+              normalizedMediaType === 'tv'
+                ? {
+                    type: 'show' as const,
+                    title,
+                    tmdbId,
+                    imdbId,
+                    releaseYear,
+                    season: {
+                      number: Number((baseTarget.params as any).seasonNumber) || 1,
+                      tmdbId: String((baseTarget.params as any).seasonTmdbId || ''),
+                      title: String((baseTarget.params as any).seasonTitle || `Season ${Number((baseTarget.params as any).seasonNumber) || 1}`),
+                      ...(baseTarget.params.seasonEpisodeCount
+                        ? { episodeCount: Number((baseTarget.params as any).seasonEpisodeCount) }
+                        : {}),
+                    },
+                    episode: {
+                      number: Number((baseTarget.params as any).episodeNumber) || 1,
+                      tmdbId: String((baseTarget.params as any).episodeTmdbId || ''),
+                    },
+                  }
+                : {
+                    type: 'movie' as const,
+                    title,
+                    tmdbId,
+                    imdbId,
+                    releaseYear,
+                  };
+
+            const playback = await scrapePStream(mediaPayload as any, { sourceOrder, debugTag });
+            storePrefetchedPlayback(prefetchKey, {
+              playback,
+              title:
+                normalizedMediaType === 'tv'
+                  ? `${title} • S${String(Number((baseTarget.params as any).seasonNumber) || 1).padStart(2, '0')}E${String(Number((baseTarget.params as any).episodeNumber) || 1).padStart(2, '0')}`
+                  : title,
+            });
+          } catch {
+            // ignore
+          }
+        })();
+      } catch {
+        // ignore
+      }
+
       pushWithOptionalInterstitial(
         router as any,
         currentPlan,
-        { pathname: '/video-player', params },
+        baseTarget,
         { placement: 'details_play', seconds: 30 },
       );
     } finally {
@@ -427,16 +495,66 @@ const upcoming: Array<{
       params.contentHint = contentHint;
     }
 
+    const baseTarget = { pathname: '/video-player', params: { ...params } };
+    const prefetchKey = createPrefetchKey(baseTarget);
+    (baseTarget.params as any).__prefetchKey = prefetchKey;
+
+    try {
+      const title = (baseTarget.params as any).title as string;
+      const releaseYear = Number(baseTarget.params.releaseYear) || new Date().getFullYear();
+      const tmdbId = String(baseTarget.params.tmdbId || '');
+      const imdbId = (baseTarget.params as any).imdbId ? String((baseTarget.params as any).imdbId) : undefined;
+      const preferAnimeSources = (baseTarget.params as any).contentHint === 'anime';
+      const sourceOrder = buildSourceOrder(Boolean(preferAnimeSources));
+      const debugTag = buildScrapeDebugTag('details-prefetch-episode', title);
+
+      void (async () => {
+        try {
+          const seasonNumber = Number((baseTarget.params as any).seasonNumber) || 1;
+          const episodeNumber = Number((baseTarget.params as any).episodeNumber) || 1;
+          const mediaPayload = {
+            type: 'show' as const,
+            title,
+            tmdbId,
+            imdbId,
+            releaseYear,
+            season: {
+              number: seasonNumber,
+              tmdbId: String((baseTarget.params as any).seasonTmdbId || ''),
+              title: String((baseTarget.params as any).seasonTitle || `Season ${seasonNumber}`),
+              ...(baseTarget.params.seasonEpisodeCount
+                ? { episodeCount: Number((baseTarget.params as any).seasonEpisodeCount) }
+                : {}),
+            },
+            episode: {
+              number: episodeNumber,
+              tmdbId: String((baseTarget.params as any).episodeTmdbId || ''),
+            },
+          };
+
+          const playback = await scrapePStream(mediaPayload as any, { sourceOrder, debugTag });
+          storePrefetchedPlayback(prefetchKey, {
+            playback,
+            title: `${title} • S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`,
+          });
+        } catch {
+          // ignore
+        }
+      })();
+    } catch {
+      // ignore
+    }
+
     pushWithOptionalInterstitial(
       router as any,
       currentPlan,
-      { pathname: '/video-player', params },
+      baseTarget,
       { placement: 'details_episode', seconds: 30 },
     );
   };
 
   const handleDownloadEpisode = async (episode: any, season: any) => {
-    if (!movie || downloadState !== 'idle') return;
+    if (!movie) return;
     if (!episode || !season) {
       Alert.alert('Download unavailable', 'Episode information is missing.');
       return;
@@ -461,354 +579,160 @@ const upcoming: Array<{
     };
 
     const title = payload.title;
-    const sessionId = `${movie.id ?? 'title'}-${payload.season.number}-${payload.episode.number}-${Date.now()}`;
     const episodeLabel = `S${String(payload.season.number).padStart(2, '0')}E${String(payload.episode.number).padStart(2, '0')}`;
     const subtitleParts = ['Episode', episodeLabel, runtimeMinutes ? `${runtimeMinutes}m` : null].filter(Boolean);
     const subtitle = subtitleParts.length ? subtitleParts.join(' • ') : null;
-    const baseEvent = {
-      sessionId,
-      title,
-      mediaId: movie.id ?? undefined,
-      mediaType: normalizedMediaType,
-      subtitle,
-      runtimeMinutes,
-      seasonNumber: payload.season.number,
-      episodeNumber: payload.episode.number,
-    };
+    const epKey = String(episode.id ?? payload.episode.tmdbId ?? `${payload.season.number}-${payload.episode.number}`);
 
-    emitDownloadEvent({
-      ...baseEvent,
-      status: 'preparing',
-      progress: 0,
-    });
+    setEpisodeDownloadState(epKey, { state: 'preparing', progress: 0 });
 
-    let cleanupPath: string | null = null;
     try {
-      setDownloadStateSafe('preparing');
-      setDownloadProgressSafe(0);
       const playback = await scrapeDownload(payload, { debugTag: `[download-episode] ${title}` });
-      const downloadsRoot = await ensureDownloadDir();
+      const headers = (playback.headers ?? {}) as Record<string, string>;
+      const uri = playback.uri || '';
+      const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
 
-      const epKey = String(episode.id ?? payload.episode.tmdbId ?? `${payload.season.number}-${payload.episode.number}`);
-
-      if (playback.stream.type === 'hls') {
-        const sessionName = `${movie.id ?? 'title'}-s${payload.season.number}-e${payload.episode.number}-${Date.now()}`;
-        cleanupPath = `${downloadsRoot}/${sessionName}`;
-        setDownloadStateSafe('downloading');
-        setEpisodeDownloadState(epKey, { state: 'preparing', progress: 0 });
-const hlsResult = await downloadHlsPlaylist({
-  playlistUrl: playback.uri || '',
-  headers: playback.headers || {},
-  rootDir: downloadsRoot,
-  sessionName,
-  onProgress: (completed, total) => {
-    if (total > 0) {
-      const progress = completed / total;
-      setDownloadProgressSafe(progress);
-      setEpisodeDownloadState(epKey, { state: 'downloading', progress });
-      emitDownloadEvent({
-        ...baseEvent,
-        status: 'downloading',
-        progress,
-      });
-    }
-  },
-});
-
-// Ensure hlsResult is not null before accessing
-if (!hlsResult) throw new Error('HLS download failed or returned null');
-
-        await persistDownloadRecord({
-  mediaId: movie.id,
-  title,
-  mediaType: normalizedMediaType,
-  localUri: hlsResult.playlistPath,
-  containerPath: hlsResult.directory,
-  createdAt: Date.now(),
-  bytesWritten: hlsResult.totalBytes,
-  runtimeMinutes,
-  releaseDate: releaseDateValue,
-  posterPath: movie.poster_path,
-  backdropPath: movie.backdrop_path,
-  overview: movie.overview ?? null,
-  seasonNumber: payload.season.number,
-  episodeNumber: payload.episode.number,
-  sourceUrl: playback.uri || undefined,
-  downloadType: 'hls',
-  segmentCount: hlsResult.segmentCount,
-});
-
-        setEpisodeDownloadState(epKey, { state: 'completed', progress: 1 });
-        emitDownloadEvent({
-          ...baseEvent,
-          status: 'completed',
-          progress: 1,
-        });
-      } else {
-        const extension = guessFileExtension(playback.uri || '');
-        const suffix = `s${String(payload.season.number).padStart(2, '0')}e${String(payload.episode.number).padStart(2, '0')}`;
-        const fileName = `${movie.id ?? 'title'}-${suffix}-${Date.now()}.${extension}`;
-        const destination = `${downloadsRoot}/${fileName}`;
-        cleanupPath = destination;
-        setDownloadStateSafe('downloading');
-        setEpisodeDownloadState(epKey, { state: 'preparing', progress: 0 });
-  const resumable = FileSystem.createDownloadResumable(
-    playback.uri || '',
-    destination,
-    playback.headers ? { headers: playback.headers } : undefined,
-    (progress) => {
-      if (progress.totalBytesExpectedToWrite > 0) {
-        const ratio = progress.totalBytesWritten / progress.totalBytesExpectedToWrite;
-        setDownloadProgressSafe(ratio);
-        setEpisodeDownloadState(epKey, { state: 'downloading', progress: ratio });
-        emitDownloadEvent({
-          ...baseEvent,
-          status: 'downloading',
-          progress: ratio,
-        });
-      }
-    },
-  );
-        downloadResumableRef.current = resumable;
-        const downloadResult = await resumable.downloadAsync();
-        downloadResumableRef.current = null;
-        if (!downloadResult || downloadResult.status >= 400) {
-          throw new Error('Download did not complete. Please try again.');
-        }
-        cleanupPath = null;
-       const fileInfo = await FileSystem.getInfoAsync(destination);
-        await persistDownloadRecord({
-          mediaId: movie.id,
+      const startQueuedDownload = async (opt: DownloadQualityOption) => {
+        await enqueueDownload({
           title,
+          mediaId: movie.id ?? undefined,
           mediaType: normalizedMediaType,
-          localUri: downloadResult.uri,
-          containerPath: destination,
-          createdAt: Date.now(),
-          bytesWritten: fileInfo.exists ? fileInfo.size : undefined,
+          subtitle,
           runtimeMinutes,
+          seasonNumber: payload.season.number,
+          episodeNumber: payload.episode.number,
           releaseDate: releaseDateValue,
           posterPath: movie.poster_path,
           backdropPath: movie.backdrop_path,
           overview: movie.overview ?? null,
-          seasonNumber: payload.season.number,
-          episodeNumber: payload.episode.number,
-          sourceUrl: playback.uri || undefined,
-          downloadType: 'file',
-        } as any);
-        setEpisodeDownloadState(epKey, { state: 'completed', progress: 1 });
-        emitDownloadEvent({
-          ...baseEvent,
-          status: 'completed',
-          progress: 1,
+          downloadType: isHls ? 'hls' : 'file',
+          sourceUrl: opt.url,
+          headers,
+          qualityLabel: opt.label,
         });
-      }
-      setDownloadStateSafe('idle');
-      setDownloadProgressSafe(0);
-      if (isMountedRef.current) {
-        Alert.alert('Download complete', `${title} ${episodeLabel} is now available offline.`, [
-          { text: 'OK', style: 'default' },
+        setEpisodeDownloadState(epKey, { state: 'downloading', progress: 0 });
+        Alert.alert('Added to downloads', `${title} ${episodeLabel} • ${opt.label}`, [
+          { text: 'OK' },
           { text: 'Go to downloads', onPress: () => router.push('/downloads') },
         ]);
+      };
+
+      let options: DownloadQualityOption[] = [];
+      if (isHls) {
+        const variants = await getHlsVariantOptions(uri, headers).catch(() => null);
+        options =
+          variants?.map((v) => ({ id: v.id, label: v.label, url: v.url })) ??
+          [{ id: 'auto', label: 'Auto (best)', url: uri }];
+      } else {
+        const qualities = (playback.stream as any)?.qualities as Record<string, { url?: string }> | undefined;
+        const order = ['4k', '1080', '720', '480', '360', 'unknown'];
+        options = (order
+          .map((key) => ({ key, url: qualities?.[key]?.url }))
+          .filter((q) => !!q.url)
+          .map((q) => ({
+            id: q.key,
+            label: q.key === 'unknown' ? 'Auto' : `${q.key}p`,
+            url: q.url as string,
+          })));
+        if (!options.length) {
+          options = [{ id: 'auto', label: 'Auto', url: uri }];
+        }
+      }
+
+      if (options.length === 1) {
+        await startQueuedDownload(options[0]);
+      } else {
+        openQualityPicker(`${title} ${episodeLabel}`, options, (opt) => {
+          void startQueuedDownload(opt);
+        });
       }
     } catch (err: any) {
-      console.error('Episode download failed', err);
-      const epId = payload.episode.tmdbId ?? `${payload.season.number}-${payload.episode.number}`;
-      setEpisodeDownloadState(epId, { state: 'error', progress: 0, error: err?.message ?? String(err) });
-      if (isMountedRef.current) {
-        Alert.alert('Download failed', err?.message || 'Unable to save this episode for offline viewing right now.');
-      }
-      setDownloadStateSafe('idle');
-      setDownloadProgressSafe(0);
-      downloadResumableRef.current = null;
-      if (cleanupPath) {
-        FileSystem.deleteAsync(cleanupPath, { idempotent: true }).catch(() => {});
-      }
-      emitDownloadEvent({
-        ...baseEvent,
-        status: 'error',
-        progress: 0,
-        errorMessage: err?.message || 'Download failed',
-      });
+      setEpisodeDownloadState(epKey, { state: 'error', progress: 0, error: err?.message ?? String(err) });
+      Alert.alert('Download failed', err?.message || 'Unable to queue this download right now.');
     }
   };
 
   const handleDownload = async () => {
-    if (!movie || downloadState !== 'idle') return;
-    const payload = buildDownloadPayload();
-    if (!payload) {
-      Alert.alert('Download unavailable', 'We could not find an episode to download yet.');
-      return;
-    }
-    const title = movie.title || movie.name || 'Download';
-    const sessionId = `${movie.id ?? 'title'}-${Date.now()}`;
-    const episodeLabel =
-      payload.type === 'show'
-        ? `S${String(payload.season.number).padStart(2, '0')}E${String(payload.episode.number).padStart(2, '0')}`
-        : null;
-    const subtitleParts = [
-      payload.type === 'show' ? 'Episode' : 'Movie',
-      episodeLabel,
-      runtimeMinutes ? `${runtimeMinutes}m` : null,
-    ].filter(Boolean);
-    const subtitle = subtitleParts.length ? subtitleParts.join(' • ') : null;
-    const baseEvent = {
-      sessionId,
-      title,
-      mediaId: movie.id ?? undefined,
-      mediaType: normalizedMediaType,
-      subtitle,
-      runtimeMinutes,
-      seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
-      episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
-    };
-    emitDownloadEvent({
-      ...baseEvent,
-      status: 'preparing',
-      progress: 0,
-    });
-    let cleanupPath: string | null = null;
     try {
-      setDownloadStateSafe('preparing');
-      setDownloadProgressSafe(0);
-      const playback = await scrapeDownload(payload, { debugTag: `[download] ${title}` });
-      const downloadsRoot = await ensureDownloadDir();
+      if (!movie) return;
+      const payload = buildDownloadPayload();
+      if (!payload) {
+        Alert.alert('Download unavailable', 'We could not find an episode to download yet.');
+        return;
+      }
 
-      if (playback.stream.type === 'hls') {
-        const sessionName = `${movie.id ?? 'title'}-${Date.now()}`;
-        cleanupPath = `${downloadsRoot}/${sessionName}`;
-        setDownloadStateSafe('downloading');
-const hlsResult = await downloadHlsPlaylist({
-  playlistUrl: playback.uri || '',
-  headers: playback.headers || {},
-  rootDir: downloadsRoot,
-  sessionName,
-  onProgress: (completed, total) => {
-    if (total > 0) {
-      const progress = completed / total;
-      setDownloadProgressSafe(progress);
-      emitDownloadEvent({
-        ...baseEvent,
-        status: 'downloading',
-        progress,
-      });
-    }
-  },
-});
+      const title = movie.title || movie.name || 'Download';
+      const episodeLabel =
+        payload.type === 'show'
+          ? `S${String(payload.season.number).padStart(2, '0')}E${String(payload.episode.number).padStart(2, '0')}`
+          : null;
+      const subtitleParts = [
+        payload.type === 'show' ? 'Episode' : 'Movie',
+        episodeLabel,
+        runtimeMinutes ? `${runtimeMinutes}m` : null,
+      ].filter(Boolean);
+      const subtitle = subtitleParts.length ? subtitleParts.join(' • ') : null;
 
-// Ensure hlsResult is not null
-if (!hlsResult) throw new Error('HLS download failed or returned null');
+      const playback = await scrapeDownload(payload as any, { debugTag: `[download] ${title}` });
+      const headers = (playback.headers ?? {}) as Record<string, string>;
+      const uri = playback.uri || '';
+      const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
 
-  await persistDownloadRecord({
-  mediaId: movie.id,
-  title,
-  mediaType: normalizedMediaType,
-  localUri: hlsResult.playlistPath,
-  containerPath: hlsResult.directory,
-  createdAt: Date.now(),
-  bytesWritten: hlsResult.totalBytes,
-  runtimeMinutes,
-  releaseDate: releaseDateValue,
-  posterPath: movie.poster_path,
-  backdropPath: movie.backdrop_path,
-  overview: movie.overview ?? null,
-  seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
-  episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
-  sourceUrl: playback.uri || undefined,
-  downloadType: 'hls',
-  segmentCount: hlsResult.segmentCount,
-} as any);
-
-        emitDownloadEvent({
-          ...baseEvent,
-          status: 'completed',
-          progress: 1,
-        });
-      } else {
-        const extension = guessFileExtension(playback.uri || '');
-        const suffix =
-          payload.type === 'show'
-            ? `s${String(payload.season.number).padStart(2, '0')}e${String(payload.episode.number).padStart(2, '0')}`
-            : 'movie';
-        const fileName = `${movie.id ?? 'title'}-${suffix}-${Date.now()}.${extension}`;
-        const destination = `${downloadsRoot}/${fileName}`;
-        cleanupPath = destination;
-        setDownloadStateSafe('downloading');
-        const resumable = FileSystem.createDownloadResumable(
-          playback.uri || '',
-          destination,
-          playback.headers ? { headers: playback.headers } : undefined,
-          (progress) => {
-            if (progress.totalBytesExpectedToWrite > 0) {
-              const ratio = progress.totalBytesWritten / progress.totalBytesExpectedToWrite;
-              setDownloadProgressSafe(ratio);
-              emitDownloadEvent({
-                ...baseEvent,
-                status: 'downloading',
-                progress: ratio,
-              });
-            }
-          },
-        );
-        downloadResumableRef.current = resumable;
-        const downloadResult = await resumable.downloadAsync();
-        downloadResumableRef.current = null;
-        if (!downloadResult || downloadResult.status >= 400) {
-          throw new Error('Download did not complete. Please try again.');
-        }
-        cleanupPath = null;
-       const fileInfo = await FileSystem.getInfoAsync(destination); 
-        await persistDownloadRecord({
-          mediaId: movie.id,
+      const startQueuedDownload = async (opt: DownloadQualityOption) => {
+        await enqueueDownload({
           title,
+          mediaId: movie.id ?? undefined,
           mediaType: normalizedMediaType,
-          localUri: downloadResult.uri,
-          containerPath: destination,
-          createdAt: Date.now(),
-          bytesWritten: fileInfo.exists ? fileInfo.size : undefined,
+          subtitle,
           runtimeMinutes,
+          seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
+          episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
           releaseDate: releaseDateValue,
           posterPath: movie.poster_path,
           backdropPath: movie.backdrop_path,
           overview: movie.overview ?? null,
-          seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
-          episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
-          sourceUrl: playback.uri || undefined,
-          downloadType: 'file',
-        } as any);
-        emitDownloadEvent({
-          ...baseEvent,
-          status: 'completed',
-          progress: 1,
+          downloadType: isHls ? 'hls' : 'file',
+          sourceUrl: opt.url,
+          headers,
+          qualityLabel: opt.label,
+        });
+        Alert.alert('Added to downloads', `${title}${episodeLabel ? ` • ${episodeLabel}` : ''} • ${opt.label}`, [
+          { text: 'OK' },
+          { text: 'Go to downloads', onPress: () => router.push('/downloads') },
+        ]);
+      };
+
+      let options: DownloadQualityOption[] = [];
+      if (isHls) {
+        const variants = await getHlsVariantOptions(uri, headers).catch(() => null);
+        options =
+          variants?.map((v) => ({ id: v.id, label: v.label, url: v.url })) ??
+          [{ id: 'auto', label: 'Auto (best)', url: uri }];
+      } else {
+        const qualities = (playback.stream as any)?.qualities as Record<string, { url?: string }> | undefined;
+        const order = ['4k', '1080', '720', '480', '360', 'unknown'];
+        options = (order
+          .map((key) => ({ key, url: qualities?.[key]?.url }))
+          .filter((q) => !!q.url)
+          .map((q) => ({
+            id: q.key,
+            label: q.key === 'unknown' ? 'Auto' : `${q.key}p`,
+            url: q.url as string,
+          })));
+        if (!options.length) {
+          options = [{ id: 'auto', label: 'Auto', url: uri }];
+        }
+      }
+
+      if (options.length === 1) {
+        await startQueuedDownload(options[0]);
+      } else {
+        openQualityPicker(title, options, (opt) => {
+          void startQueuedDownload(opt);
         });
       }
-      setDownloadStateSafe('idle');
-      setDownloadProgressSafe(0);
-      if (isMountedRef.current) {
-        Alert.alert('Download complete', `${title} is now available offline.`, [
-          { text: 'OK', style: 'default' },
-          {
-            text: 'Go to downloads',
-            onPress: () => router.push('/downloads'),
-          },
-        ]);
-      }
     } catch (err: any) {
-      console.error('Download failed', err);
-      if (isMountedRef.current) {
-        Alert.alert('Download failed', err?.message || 'Unable to save this title for offline viewing right now.');
-      }
-      setDownloadStateSafe('idle');
-      setDownloadProgressSafe(0);
-      downloadResumableRef.current = null;
-      if (cleanupPath) {
-        FileSystem.deleteAsync(cleanupPath, { idempotent: true }).catch(() => {});
-      }
-      emitDownloadEvent({
-        ...baseEvent,
-        status: 'error',
-        progress: 0,
-        errorMessage: err?.message || 'Download failed',
-      });
+      Alert.alert('Download failed', err?.message || 'Unable to queue this download right now.');
     }
   };
 
@@ -819,6 +743,13 @@ if (!hlsResult) throw new Error('HLS download failed or returned null');
       showsVerticalScrollIndicator={false}
       stickyHeaderIndices={[0]}
     >
+      <DownloadQualityPicker
+        visible={qualityPickerVisible}
+        title={qualityPickerTitle}
+        options={qualityPickerOptions}
+        onClose={() => setQualityPickerVisible(false)}
+        onSelect={handleQualityPick}
+      />
       {/* Sticky Header */}
       <View style={styles.stickyHeader}>
         <View style={styles.headerWrap}>
@@ -1027,12 +958,11 @@ if (!hlsResult) throw new Error('HLS download failed or returned null');
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.fabSecondary, downloadState !== 'idle' && styles.fabDisabled]}
+          style={[styles.fabSecondary]}
           onPress={handleDownload}
-          disabled={downloadState !== 'idle'}
         >
           <Ionicons
-            name={downloadState === 'downloading' ? 'cloud-download' : 'cloud-download-outline'}
+            name={'cloud-download-outline'}
             size={20}
             color="#fff"
           />

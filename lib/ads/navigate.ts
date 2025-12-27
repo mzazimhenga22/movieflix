@@ -38,7 +38,8 @@ export function pushWithOptionalInterstitial(
   }
 
   const seconds = String(options?.seconds ?? DEFAULT_INTERSTITIAL_SECONDS);
-  const prefetchKey = createPrefetchKey(next);
+  const existingPrefetchKey = next.params && typeof next.params.__prefetchKey === 'string' ? next.params.__prefetchKey : undefined;
+  const prefetchKey = existingPrefetchKey || createPrefetchKey(next);
   state.active = true;
   state.queued = 0;
   state.pendingNext = next;

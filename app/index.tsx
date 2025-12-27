@@ -12,10 +12,10 @@ import {
   Text,
   View,
 } from 'react-native';
-import { buildProfileScopedKey, getStoredActiveProfile } from '../lib/profileStorage';
+import { buildProfileScopedKey, getLastAuthUid, getStoredActiveProfile } from '../lib/profileStorage';
 import { onAuthChange } from './messaging/controller';
 
-type RouteContext = 'authed' | 'guest' | 'offline-downloads';
+type RouteContext = 'authed' | 'guest' | 'offline-downloads' | 'offline-profiles';
 
 type RouteTarget = '/downloads' | '/select-profile' | '/(auth)/login';
 
@@ -78,6 +78,8 @@ export default function SplashScreen() {
         return 'Profiles synced';
       case 'offline-downloads':
         return 'Offline vault ready';
+      case 'offline-profiles':
+        return 'Offline profiles ready';
       default:
         return 'Guest cinematic mode';
     }
@@ -103,7 +105,8 @@ export default function SplashScreen() {
         label,
         active:
           index === 0 ||
-          (routePlan?.context === 'offline-downloads' && label === 'Offline vault') ||
+          ((routePlan?.context === 'offline-downloads' || routePlan?.context === 'offline-profiles') &&
+            label === 'Offline vault') ||
           (routePlan?.context === 'guest' && label === 'Indie gems'),
       })),
     [routePlan]
@@ -197,6 +200,26 @@ export default function SplashScreen() {
     }
   }, []);
 
+  const resolveOfflineProfiles = useCallback(async (): Promise<RoutePlan | null> => {
+    try {
+      const uid = await getLastAuthUid();
+      if (!uid) return null;
+      const cached = await AsyncStorage.getItem(`profileCache:${uid}`);
+      if (!cached) return null;
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return {
+          target: '/select-profile',
+          context: 'offline-profiles',
+          summary: `${parsed.length} cached profile${parsed.length === 1 ? '' : 's'} available offline`,
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const decideInitialRoute = useCallback(
     async (user: any) => {
       if (hasNavigatedRef.current) return;
@@ -214,11 +237,20 @@ export default function SplashScreen() {
         setRoutePlan(offline);
         return;
       }
+
+      const offlineProfiles = await resolveOfflineProfiles();
+      if (offlineProfiles) {
+        setOfflineSummary(offlineProfiles.summary ?? null);
+        setStatusMessage('Offline profiles loaded');
+        setRoutePlan(offlineProfiles);
+        return;
+      }
+
       setOfflineSummary(null);
       setStatusMessage('Sign in to keep watching');
       setRoutePlan({ target: '/(auth)/login', context: 'guest' });
     },
-    [resolveOfflineDownloads]
+    [resolveOfflineDownloads, resolveOfflineProfiles]
   );
 
   useEffect(() => {

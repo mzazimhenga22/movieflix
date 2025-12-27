@@ -3,7 +3,7 @@ export type DownloadEvent = {
   title: string;
   mediaId?: number;
   mediaType: 'movie' | 'tv';
-  status: 'preparing' | 'downloading' | 'completed' | 'error';
+  status: 'queued' | 'preparing' | 'downloading' | 'paused' | 'completed' | 'cancelled' | 'error';
   progress?: number;
   subtitle?: string | null;
   runtimeMinutes?: number;

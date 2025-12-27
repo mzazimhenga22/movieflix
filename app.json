@@ -3,6 +3,7 @@
     "name": "MovieFlix",
     "slug": "movieflix",
     "version": "1.0.0",
+    "supportsPictureInPicture": true,
     "runtimeVersion": {
       "policy": "appVersion"
     },

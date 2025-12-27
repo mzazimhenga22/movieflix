@@ -42,6 +42,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import ScreenWrapper from '../components/ScreenWrapper'
 import { authPromise, firestore } from '../constants/firebase'
 import { supabase, supabaseConfigured } from '../constants/supabase'
+import { getLastAuthUid as getLastAuthUidStored, setLastAuthUid as setLastAuthUidStored } from '../lib/profileStorage'
 import { useSubscription } from '../providers/SubscriptionProvider'
 import { useAccent } from './components/AccentContext'
 
@@ -87,6 +88,10 @@ const SelectProfileScreen = () => {
 
   const [authChecked, setAuthChecked] = useState(false)
   const [currentUser, setCurrentUser] = useState<User | null>(null)
+  const [lastAuthUid, setLastAuthUid] = useState<string | null>(null)
+  const [lastAuthUidLoaded, setLastAuthUidLoaded] = useState(false)
+
+  const effectiveUid = currentUser?.uid ?? lastAuthUid
 
   // Plan + offline cache
   const [planTier, setPlanTier] = useState<PlanTier>('free')
@@ -139,8 +144,25 @@ const SelectProfileScreen = () => {
   const previewAvatarSource = avatarUri || editingProfile?.photoURL || null
   const isEditing = Boolean(editingProfile)
 
-  const profileCacheKey = currentUser ? `profileCache:${currentUser.uid}` : null
-  const planCacheKey = currentUser ? `planCache:${currentUser.uid}` : null
+  const profileCacheKey = effectiveUid ? `profileCache:${effectiveUid}` : null
+  const planCacheKey = effectiveUid ? `planCache:${effectiveUid}` : null
+
+  useEffect(() => {
+    let mounted = true
+    getLastAuthUidStored()
+      .then((uid) => {
+        if (!mounted) return
+        setLastAuthUid(uid)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (mounted) setLastAuthUidLoaded(true)
+      })
+
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
@@ -181,7 +203,7 @@ const SelectProfileScreen = () => {
 
   // Load plan: cache first → network fallback
   const loadPlanTier = useCallback(async () => {
-    if (!currentUser) {
+    if (!effectiveUid) {
       setPlanTier('free')
       setPlanHydrated(true)
       return
@@ -200,6 +222,11 @@ const SelectProfileScreen = () => {
 
     setPlanTier(resolved)
 
+    if (!currentUser) {
+      setPlanHydrated(true)
+      return
+    }
+
     try {
       const userDocRef = doc(firestore, 'users', currentUser.uid)
       const snap = await getDoc(userDocRef)
@@ -215,7 +242,7 @@ const SelectProfileScreen = () => {
     } finally {
       setPlanHydrated(true)
     }
-  }, [currentUser, planCacheKey])
+  }, [currentUser, effectiveUid, planCacheKey])
 
   // Auth
   useEffect(() => {
@@ -226,6 +253,10 @@ const SelectProfileScreen = () => {
       .then((auth) => {
         unsub = onAuthStateChanged(auth, (user) => {
           setCurrentUser(user ?? null)
+          if (user?.uid) {
+            setLastAuthUid(user.uid)
+            void setLastAuthUidStored(user.uid)
+          }
           if (!resolved) {
             setAuthChecked(true)
             resolved = true
@@ -243,10 +274,10 @@ const SelectProfileScreen = () => {
   }, [])
 
   useEffect(() => {
-    if (authChecked && !currentUser) {
+    if (authChecked && lastAuthUidLoaded && !currentUser && !effectiveUid) {
       router.replace('/(auth)/login')
     }
-  }, [authChecked, currentUser, router])
+  }, [authChecked, currentUser, effectiveUid, lastAuthUidLoaded, router])
 
   // Hydrate profiles from cache immediately
   useEffect(() => {
@@ -353,12 +384,12 @@ const SelectProfileScreen = () => {
             planTier,
           }),
         )
-        router.replace('/movies')
+        router.replace(currentUser ? '/movies' : '/downloads')
       } catch (err) {
         Alert.alert('Error', 'Unable to select this profile.')
       }
     },
-    [planTier, profiles, handleUpgrade],
+    [planTier, profiles, handleUpgrade, currentUser],
   )
 
   const resetForm = () => {
@@ -388,7 +419,10 @@ const SelectProfileScreen = () => {
   }
 
   const handleDeleteProfile = (profile: HouseholdProfile) => {
-    if (!currentUser) return
+    if (!currentUser) {
+      Alert.alert('Offline', 'Connect to the internet to manage profiles.')
+      return
+    }
 
     Alert.alert(
       'Delete profile',

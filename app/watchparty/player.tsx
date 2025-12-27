@@ -189,6 +189,173 @@ const CONTROLS_HIDE_DELAY_PLAYING = 10500;
 const CONTROLS_HIDE_DELAY_PAUSED = 16500;
 const SURFACE_DOUBLE_TAP_MS = 350;
 
+const DEFAULT_STREAM_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const RGSHOWS_REFERER = 'https://www.rgshows.ru/';
+const RGSHOWS_ORIGIN = 'https://www.rgshows.ru';
+
+function getM3U8ProxyBase(): string | null {
+  try {
+    const env =
+      (typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
+      (typeof process !== 'undefined' && (process.env as any)?.NEXT_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
+      (typeof process !== 'undefined' && (process.env as any)?.PSTREAM_M3U8_PROXY_URL) ||
+      (typeof process !== 'undefined' && (process.env as any)?.M3U8_PROXY_URL);
+    const normalized = typeof env === 'string' ? env.trim() : '';
+    return normalized ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function isM3U8ProxyUrl(uri?: string): boolean {
+  if (!uri) return false;
+  return uri.includes('m3u8-proxy') && uri.includes('url=');
+}
+
+function encodeBase64Url(value: string): string {
+  try {
+    // Prefer Buffer when available (Expo often polyfills it).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const anyBuffer = (globalThis as any)?.Buffer ?? (typeof Buffer !== 'undefined' ? Buffer : null);
+    if (anyBuffer?.from) {
+      const b64: string = anyBuffer.from(value, 'utf8').toString('base64');
+      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+  } catch {
+    // ignore
+  }
+  // Fallback (best-effort)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const btoaFn: any = (globalThis as any)?.btoa;
+  const b64 = typeof btoaFn === 'function' ? btoaFn(value) : value;
+  return String(b64).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function pickHlsProxyHeaders(headers?: Record<string, string>): Record<string, string> {
+  const incoming = headers ?? {};
+  const pick = (key: string) => incoming[key] ?? incoming[key.toLowerCase()] ?? incoming[key.toUpperCase()];
+  const out: Record<string, string> = {};
+  const referer = pick('referer');
+  const origin = pick('origin');
+  const ua = pick('user-agent');
+  const accept = pick('accept');
+  const acceptLang = pick('accept-language');
+  if (typeof referer === 'string' && referer) out.referer = referer;
+  if (typeof origin === 'string' && origin) out.origin = origin;
+  if (typeof ua === 'string' && ua) out['user-agent'] = ua;
+  if (typeof accept === 'string' && accept) out.accept = accept;
+  if (typeof acceptLang === 'string' && acceptLang) out['accept-language'] = acceptLang;
+  return out;
+}
+
+function buildM3U8ProxyUrl(uri: string, headers?: Record<string, string>): string | null {
+  const base = getM3U8ProxyBase();
+  if (!base) return null;
+  const urlParam = encodeBase64Url(uri);
+  const h = pickHlsProxyHeaders(headers);
+  const hParam = Object.keys(h).length ? `&h=${encodeURIComponent(encodeBase64Url(JSON.stringify(h)))}` : '';
+  return `${base}?url=${urlParam}${hParam}`;
+}
+
+const needsRgShowsHeaders = (uri?: string, sourceId?: string, embedId?: string) => {
+  const lower = uri?.toLowerCase() ?? '';
+  if (!lower && !sourceId && !embedId) return false;
+  return (
+    lower.includes('rgshows') ||
+    lower.includes('luaix') ||
+    lower.includes('rgflix') ||
+    sourceId === 'rgshows' ||
+    (embedId ? embedId.toLowerCase().includes('rgshows') : false)
+  );
+};
+
+function sanitizePlaybackHeaders(incoming?: Record<string, string>): Record<string, string> | undefined {
+  if (!incoming) return undefined;
+  const out: Record<string, string> = {};
+
+  for (const [rawKey, rawValue] of Object.entries(incoming)) {
+    if (!rawKey) continue;
+    if (rawValue === undefined || rawValue === null) continue;
+    const value = String(rawValue);
+    if (!value) continue;
+    const lower = rawKey.trim().toLowerCase();
+    if (!lower) continue;
+
+    // Never pin Host (breaks redirected segment requests on some CDNs/players).
+    if (lower === 'host' || lower === 'content-length') continue;
+
+    switch (lower) {
+      case 'user-agent':
+        out['User-Agent'] = value;
+        break;
+      case 'referer':
+        out.Referer = value;
+        break;
+      case 'origin':
+        out.Origin = value;
+        break;
+      case 'accept':
+        out.Accept = value;
+        break;
+      case 'accept-language':
+        out['Accept-Language'] = value;
+        break;
+      case 'accept-encoding':
+        out['Accept-Encoding'] = value;
+        break;
+      default:
+        out[rawKey] = value;
+        break;
+    }
+  }
+
+  return Object.keys(out).length ? out : undefined;
+}
+
+function buildPlaybackHeaders(
+  uri: string,
+  sourceId?: string,
+  embedId?: string,
+  incoming?: Record<string, string>,
+): Record<string, string> {
+  const sanitizedIncoming = sanitizePlaybackHeaders(incoming);
+  const headers: Record<string, string> = {
+    'User-Agent': DEFAULT_STREAM_UA,
+    Accept: '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    ...(sanitizedIncoming ?? {}),
+  };
+
+  if (needsRgShowsHeaders(uri, sourceId, embedId)) {
+    headers.Referer = headers.Referer ?? RGSHOWS_REFERER;
+    headers.Origin = headers.Origin ?? RGSHOWS_ORIGIN;
+  }
+
+  return headers;
+}
+
+function createPlaybackSource(params: {
+  uri: string;
+  headers?: Record<string, string>;
+  streamType?: string;
+  captions?: CaptionSource[];
+  qualities?: QualitiesMap;
+  sourceId?: string;
+  embedId?: string;
+}): PlaybackSource {
+  const { uri, headers, streamType, captions, qualities, sourceId, embedId } = params;
+  return {
+    uri,
+    streamType,
+    captions,
+    qualities,
+    sourceId,
+    embedId,
+    headers: buildPlaybackHeaders(uri, sourceId, embedId, headers),
+  };
+}
+
 const buildScrapeDebugTag = (kind: string, title: string) => (__DEV__ ? `[${kind}] ${title}` : undefined);
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
@@ -228,7 +395,7 @@ const resolveStreamtapeUrl = async (
   existingHeaders?: Record<string, string>
 ): Promise<{ uri: string; headers: Record<string, string> } | null> => {
   const headers: Record<string, string> = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': DEFAULT_STREAM_UA,
     'Referer': 'https://streamtape.com/',
     'Origin': 'https://streamtape.com',
     'Accept': '*/*',
@@ -367,7 +534,7 @@ const resolveMixdropUrl = async (
   existingHeaders?: Record<string, string>
 ): Promise<{ uri: string; headers: Record<string, string> } | null> => {
   const headers: Record<string, string> = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': DEFAULT_STREAM_UA,
     'Referer': 'https://mixdrop.co/',
     'Origin': 'https://mixdrop.co',
     ...existingHeaders,
@@ -412,7 +579,7 @@ const resolveGenericVideoUrl = async (
   existingHeaders?: Record<string, string>
 ): Promise<{ uri: string; headers: Record<string, string> } | null> => {
   const headers: Record<string, string> = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': DEFAULT_STREAM_UA,
     'Accept': '*/*',
     ...existingHeaders,
   };
@@ -710,7 +877,7 @@ const WatchPartyPlayerScreen = () => {
   }, [rawHeaders]);
 
   // PStream hooks
-  const { loading: scrapingInitial, scrape: scrapeInitial, addManualOverride } = usePStream();
+  const { loading: scrapingInitial, scrape: scrapeInitial } = usePStream();
   const { loading: scrapingEpisode, scrape: scrapeEpisode } = usePStream();
   const isFetchingStream = scrapingInitial || scrapingEpisode;
 
@@ -718,7 +885,9 @@ const WatchPartyPlayerScreen = () => {
   const [scrapeError, setScrapeError] = useState<string | null>(null);
   const [episodeDrawerOpen, setEpisodeDrawerOpen] = useState(false);
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
-    passedVideoUrl ? { uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType } : null,
+    passedVideoUrl
+      ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+      : null,
   );
 
   const [useHotlinkHeaderFallback, setUseHotlinkHeaderFallback] = useState(() => headerFallbackRequested);
@@ -746,6 +915,7 @@ const WatchPartyPlayerScreen = () => {
   const lastSurfaceTapRef = useRef(0);
 
   const [positionMillis, setPositionMillis] = useState(0);
+  const positionMillisRef = useRef(0);
   const [durationMillis, setDurationMillis] = useState(0);
   const [seekPosition, setSeekPosition] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
@@ -847,15 +1017,25 @@ const WatchPartyPlayerScreen = () => {
   const [audioTrackOptions, setAudioTrackOptions] = useState<AudioTrackOption[]>([]);
   const [selectedAudioKey, setSelectedAudioKey] = useState<string>('auto');
   const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
+  const qualityOptionsRef = useRef<QualityOption[]>([]);
   const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
   const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
   const [qualityLoadingId, setQualityLoadingId] = useState<string | null>(null);
+  const autoQualityStepRef = useRef(0);
+  const lastAutoDowngradeTsRef = useRef(0);
+
+  const pendingSeekAfterReloadRef = useRef<number | null>(null);
+  const pendingShouldPlayAfterReloadRef = useRef<boolean | null>(null);
 
   // Buffering state
   const [showBufferingOverlay, setShowBufferingOverlay] = useState(false);
   const bufferingOverlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoDowngradeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevPositionRef = useRef<number>(0);
   const lastAdvanceTsRef = useRef<number>(Date.now());
+
+  const hlsProxyRetryRef = useRef(false);
+  const hlsVariantRetryRef = useRef(false);
 
   // Stream preloading state (best-effort). This doesn't guarantee the native player will reuse
   // fetched bytes, but it helps warm DNS/TLS and some CDNs/hosts.
@@ -870,7 +1050,6 @@ const WatchPartyPlayerScreen = () => {
 
   // Manual URL input state
   const [manualUrlInput, setManualUrlInput] = useState('');
-  const [manualUrlVisible, setManualUrlVisible] = useState(false);
 
   // Keep watch entry ref updated
   useEffect(() => {
@@ -884,8 +1063,20 @@ const WatchPartyPlayerScreen = () => {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
       }
+      if (autoDowngradeTimeoutRef.current) {
+        clearTimeout(autoDowngradeTimeoutRef.current);
+        autoDowngradeTimeoutRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    positionMillisRef.current = positionMillis;
+  }, [positionMillis]);
+
+  useEffect(() => {
+    qualityOptionsRef.current = qualityOptions;
+  }, [qualityOptions]);
 
   const bumpControlsLife = useCallback(() => setControlsSession(prev => prev + 1), []);
 
@@ -929,7 +1120,9 @@ const WatchPartyPlayerScreen = () => {
   // Reset state when video URL changes
   useEffect(() => {
     setPlaybackSource(
-      passedVideoUrl ? { uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType } : null,
+      passedVideoUrl
+        ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+        : null,
     );
     setScrapeError(null);
     setCaptionSources([]);
@@ -943,6 +1136,10 @@ const WatchPartyPlayerScreen = () => {
     setSelectedQualityId('auto');
     setQualityOverrideUri(null);
     setQualityLoadingId(null);
+    autoQualityStepRef.current = 0;
+    lastAutoDowngradeTsRef.current = 0;
+    hlsProxyRetryRef.current = false;
+    hlsVariantRetryRef.current = false;
     setVideoReloadKey((prev) => prev + 1);
   }, [passedVideoUrl, parsedVideoHeaders, passedStreamType]);
 
@@ -1093,20 +1290,20 @@ const WatchPartyPlayerScreen = () => {
 
           if (!playback.uri) throw new Error('Playback URI missing');
 
-          setPendingPlaybackSource({
-            uri: playback.uri as string,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              ...playback.headers,
-              ...playback.stream?.preferredHeaders
-            },
-            streamType: playback.stream?.type,
-            captions: normalizeCaptions(playback.stream?.captions as any),
-            qualities: playback.stream?.qualities,
-            sourceId: playback.sourceId,
-            embedId: playback.embedId,
-          });
+          setPendingPlaybackSource(
+            createPlaybackSource({
+              uri: playback.uri as string,
+              headers: {
+                ...(playback.headers as Record<string, string> | undefined),
+                ...(playback.stream?.preferredHeaders as Record<string, string> | undefined),
+              },
+              streamType: playback.stream?.type,
+              captions: normalizeCaptions(playback.stream?.captions as any),
+              qualities: ((playback.stream as any)?.qualities as QualitiesMap | undefined) ?? undefined,
+              sourceId: playback.sourceId,
+              embedId: playback.embedId,
+            }),
+          );
         } else {
           const payload = {
             type: 'movie',
@@ -1123,20 +1320,20 @@ const WatchPartyPlayerScreen = () => {
           if (isCancelled) return;
           if (!playback.uri) throw new Error('Playback URI missing');
 
-          setPendingPlaybackSource({
-            uri: playback.uri as string,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              ...playback.headers,
-              ...playback.stream?.preferredHeaders
-            },
-            streamType: playback.stream?.type,
-            captions: normalizeCaptions(playback.stream?.captions as any),
-            qualities: playback.stream?.qualities,
-            sourceId: playback.sourceId,
-            embedId: playback.embedId,
-          });
+          setPendingPlaybackSource(
+            createPlaybackSource({
+              uri: playback.uri as string,
+              headers: {
+                ...(playback.headers as Record<string, string> | undefined),
+                ...(playback.stream?.preferredHeaders as Record<string, string> | undefined),
+              },
+              streamType: playback.stream?.type,
+              captions: normalizeCaptions(playback.stream?.captions as any),
+              qualities: ((playback.stream as any)?.qualities as QualitiesMap | undefined) ?? undefined,
+              sourceId: playback.sourceId,
+              embedId: playback.embedId,
+            }),
+          );
         }
       } catch (err: any) {
         console.error('[VideoPlayer] Initial scrape failed', err);
@@ -1198,7 +1395,7 @@ const WatchPartyPlayerScreen = () => {
 
     // Build headers with proper referers for known hosts
     const headers: Record<string, string> = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': DEFAULT_STREAM_UA,
       ...(playbackSource.headers || {}),
     };
 
@@ -1244,6 +1441,101 @@ const WatchPartyPlayerScreen = () => {
     const fromVideoPlaybackSource = (videoPlaybackSource as any)?.headers as Record<string, string> | undefined;
     return { ...fromPlaybackSource, ...(fromVideoPlaybackSource ?? {}) };
   }, [playbackSource?.headers, videoPlaybackSource]);
+
+  const getSortedQualityOptions = useCallback(() => {
+    const options = qualityOptionsRef.current ?? [];
+    return [...options]
+      .filter((o) => o && o.uri)
+      .sort((a, b) => {
+        const bwA = typeof a.bandwidth === 'number' ? a.bandwidth : -1;
+        const bwB = typeof b.bandwidth === 'number' ? b.bandwidth : -1;
+        if (bwA !== bwB) return bwB - bwA;
+        return (b.resolution ?? '').localeCompare(a.resolution ?? '');
+      });
+  }, []);
+
+  const maybeAutoDowngradeQuality = useCallback(
+    async (reason: 'stall' | 'error') => {
+      if (!movieSettings.autoLowerQualityOnBuffer) return;
+      if (!isHlsSource) return;
+      if (!playbackSource?.headers) return;
+      if (qualityLoadingId) return;
+      if (selectedQualityId !== 'auto') return;
+
+      const now = Date.now();
+      if (now - lastAutoDowngradeTsRef.current < 25_000) return;
+
+      const sorted = getSortedQualityOptions();
+      if (sorted.length < 2) return;
+
+      const currentUri = qualityOverrideUri;
+      let idx = 0;
+      if (currentUri) {
+        const found = sorted.findIndex((o) => o.uri === currentUri);
+        if (found >= 0) idx = found;
+      } else {
+        idx = autoQualityStepRef.current;
+      }
+
+      const nextIdx = Math.min(sorted.length - 1, Math.max(0, idx + 1));
+      const next = sorted[nextIdx];
+      if (!next?.uri) return;
+      if (next.uri === currentUri) return;
+
+      try {
+        if (__DEV__) {
+          console.log('[WatchParty] Auto-downgrading quality', {
+            reason,
+            from: currentUri ?? 'auto',
+            to: next.resolution ?? next.label,
+            toBw: next.bandwidth,
+          });
+        }
+        await preloadQualityVariant(next.uri, playbackSource.headers);
+        autoQualityStepRef.current = nextIdx;
+        lastAutoDowngradeTsRef.current = now;
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
+        setQualityOverrideUri(next.uri);
+        setVideoReloadKey((prev) => prev + 1);
+      } catch (err) {
+        if (__DEV__) {
+          console.warn('[WatchParty] Auto-downgrade preload failed', err);
+        }
+      }
+    },
+    [
+      getSortedQualityOptions,
+      isHlsSource,
+      isPlaying,
+      movieSettings.autoLowerQualityOnBuffer,
+      playbackSource?.headers,
+      qualityLoadingId,
+      qualityOverrideUri,
+      selectedQualityId,
+    ],
+  );
+
+  const handleVideoLoad = useCallback(() => {
+    const seekTo = pendingSeekAfterReloadRef.current;
+    if (typeof seekTo === 'number' && Number.isFinite(seekTo) && seekTo > 0) {
+      const shouldPlayAfter = pendingShouldPlayAfterReloadRef.current;
+      pendingSeekAfterReloadRef.current = null;
+      pendingShouldPlayAfterReloadRef.current = null;
+
+      const video = videoRef.current;
+      if (video) {
+        void video
+          .setPositionAsync(seekTo)
+          .then(() => {
+            if (shouldPlayAfter === true) return video.playAsync();
+            if (shouldPlayAfter === false) return video.pauseAsync();
+            return undefined;
+          })
+          .catch(() => {});
+      }
+    }
+  }, []);
 
   // ============================================================================
   // FIXED: Probe the playback source properly for different video hosts
@@ -1302,12 +1594,25 @@ const WatchPartyPlayerScreen = () => {
         console.log('[VideoPlayer] Successfully resolved to:', resolvedSource.uri);
 
         // Set the playback source
-        setPlaybackSource({
-          ...pending,
-          uri: resolvedSource.uri,
-          headers: resolvedSource.headers,
-        });
-        setCaptionSources(normalizeCaptions(captions as any));
+        hlsProxyRetryRef.current = false;
+        hlsVariantRetryRef.current = false;
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
+        pendingSeekAfterReloadRef.current = null;
+        pendingShouldPlayAfterReloadRef.current = null;
+
+        setPlaybackSource(
+          createPlaybackSource({
+            uri: resolvedSource.uri,
+            headers: resolvedSource.headers,
+            streamType: pending.streamType,
+            captions: pending.captions,
+            qualities: pending.qualities,
+            sourceId: pending.sourceId,
+            embedId: pending.embedId,
+          }),
+        );
+        setCaptionSources(captions ?? []);
         setSelectedCaptionId('off');
         captionCacheRef.current = {};
         captionCuesRef.current = [];
@@ -1338,7 +1643,7 @@ const WatchPartyPlayerScreen = () => {
     };
   }, [pendingPlaybackSource, displayTitle]);
 
-  // Best-effort: keep a rolling 3-minute preload window for HLS while playing.
+  // Best-effort: keep a rolling preload window for HLS (can help warm DNS/TLS/CDNs).
   useEffect(() => {
     const uri = activeStreamUri;
     if (!uri) return;
@@ -1354,22 +1659,21 @@ const WatchPartyPlayerScreen = () => {
     if (!isHlsSource) return;
 
     let cancelled = false;
-
-    const tick = async () => {
+    const tick = async (mode: 'normal' | 'aggressive') => {
       if (cancelled) return;
-      if (!isPlaying) return;
-      // Avoid adding extra network pressure while we're already stalled.
-      if (showBufferingOverlay) return;
+      if (!isPlaying && mode === 'normal') return;
 
       const now = Date.now();
-      if (now - streamPreloadRef.current.lastRunAt < 30_000) return;
+      if (mode === 'normal' && now - streamPreloadRef.current.lastRunAt < 30_000) return;
       streamPreloadRef.current.lastRunAt = now;
 
       try {
+        const startAtSeconds = Math.max(0, positionMillisRef.current / 1000 + 5);
         await preloadStreamWindow(uri, activeStreamHeaders, {
-          windowSeconds: 180,
-          maxSegments: 40,
-          concurrency: 4,
+          startAtSeconds,
+          windowSeconds: mode === 'aggressive' ? 240 : 180,
+          maxSegments: mode === 'aggressive' ? 36 : 24,
+          concurrency: mode === 'aggressive' ? 6 : 4,
           seen: streamPreloadRef.current.seen,
         });
       } catch {
@@ -1377,10 +1681,10 @@ const WatchPartyPlayerScreen = () => {
       }
     };
 
+    void tick('normal');
     const interval = setInterval(() => {
-      void tick();
-    }, 15_000);
-    void tick();
+      void tick(showBufferingOverlay ? 'aggressive' : 'normal');
+    }, 45_000);
 
     return () => {
       cancelled = true;
@@ -1510,20 +1814,20 @@ const WatchPartyPlayerScreen = () => {
       }
 
       setUseHotlinkHeaderFallback(false);
-      setPendingPlaybackSource({
-        uri: playback.uri as string,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': '*/*',
-          ...playback.headers,
-          ...playback.stream?.preferredHeaders,
-        },
-        streamType: playback.stream?.type,
-        captions: normalizeCaptions(playback.stream?.captions as any),
-        qualities: playback.stream?.qualities,
-        sourceId: playback.sourceId,
-        embedId: playback.embedId,
-      });
+      setPendingPlaybackSource(
+        createPlaybackSource({
+          uri: playback.uri as string,
+          headers: {
+            ...(playback.headers as Record<string, string> | undefined),
+            ...(playback.stream?.preferredHeaders as Record<string, string> | undefined),
+          },
+          streamType: playback.stream?.type,
+          captions: normalizeCaptions(playback.stream?.captions as any),
+          qualities: ((playback.stream as any)?.qualities as QualitiesMap | undefined) ?? undefined,
+          sourceId: playback.sourceId,
+          embedId: playback.embedId,
+        }),
+      );
     } catch (err: any) {
       // If alternate lookup fails entirely, revert to the current stream.
       setPlaybackSource(fallback);
@@ -1881,10 +2185,25 @@ const WatchPartyPlayerScreen = () => {
           bufferingOverlayTimeoutRef.current = null;
         }, 650);
       }
+
+      if (
+        movieSettings.autoLowerQualityOnBuffer &&
+        selectedQualityId === 'auto' &&
+        !autoDowngradeTimeoutRef.current
+      ) {
+        autoDowngradeTimeoutRef.current = setTimeout(() => {
+          autoDowngradeTimeoutRef.current = null;
+          void maybeAutoDowngradeQuality('stall');
+        }, 2500);
+      }
     } else {
       if (bufferingOverlayTimeoutRef.current) {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
+      }
+      if (autoDowngradeTimeoutRef.current) {
+        clearTimeout(autoDowngradeTimeoutRef.current);
+        autoDowngradeTimeoutRef.current = null;
       }
       if (showBufferingOverlay) {
         setShowBufferingOverlay(false);
@@ -1909,7 +2228,17 @@ const WatchPartyPlayerScreen = () => {
         markComplete: status.didJustFinish,
       });
     }
-  }, [isSeeking, showBufferingOverlay, durationMillis, resumeMillisParam, updateActiveCaption, persistWatchProgress]);
+  }, [
+    durationMillis,
+    isSeeking,
+    maybeAutoDowngradeQuality,
+    movieSettings.autoLowerQualityOnBuffer,
+    persistWatchProgress,
+    resumeMillisParam,
+    selectedQualityId,
+    showBufferingOverlay,
+    updateActiveCaption,
+  ]);
 
   // Persist progress on unmount
   useEffect(() => {
@@ -2074,8 +2403,12 @@ const WatchPartyPlayerScreen = () => {
       const isHls = isHlsSource;
       if (!option) {
         if (selectedQualityId === 'auto' && !qualityOverrideUri) return;
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(null);
         setSelectedQualityId('auto');
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
         setVideoReloadKey((prev) => prev + 1);
         return;
       }
@@ -2085,8 +2418,12 @@ const WatchPartyPlayerScreen = () => {
         if (isHls) {
           await preloadQualityVariant(option.uri, playbackSource.headers);
         }
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(option.uri);
         setSelectedQualityId(option.id);
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
         setVideoReloadKey((prev) => prev + 1);
       } catch (err) {
         console.warn('Quality preload failed', err);
@@ -2095,7 +2432,7 @@ const WatchPartyPlayerScreen = () => {
         setQualityLoadingId(null);
       }
     },
-    [playbackSource, selectedQualityId, qualityOverrideUri, isHlsSource],
+    [isHlsSource, isPlaying, playbackSource, qualityOverrideUri, selectedQualityId],
   );
 
   // Auto-recover from buffering (optional settings)
@@ -2111,16 +2448,9 @@ const WatchPartyPlayerScreen = () => {
       autoRecoveryRef.current.lastAttemptAt = now;
 
       // 1) Try lowering quality (only meaningful for multi-variant streams)
-      if (
-        movieSettings.autoLowerQualityOnBuffer &&
-        qualityOptions.length > 1 &&
-        selectedQualityId === 'auto'
-      ) {
-        const lowest = qualityOptions[qualityOptions.length - 1];
-        if (lowest) {
-          void handleQualitySelect(lowest);
-          return;
-        }
+      if (movieSettings.autoLowerQualityOnBuffer && selectedQualityId === 'auto' && qualityOptions.length > 1) {
+        void maybeAutoDowngradeQuality('stall');
+        return;
       }
 
       // 2) Otherwise try next source
@@ -2132,9 +2462,9 @@ const WatchPartyPlayerScreen = () => {
     return () => clearTimeout(timer);
   }, [
     autoRecoveryRef,
-    handleQualitySelect,
     handleTryNextSource,
     isFetchingStream,
+    maybeAutoDowngradeQuality,
     movieSettings.autoLowerQualityOnBuffer,
     movieSettings.autoSwitchSourceOnBuffer,
     nextSourceBusy,
@@ -2328,19 +2658,20 @@ const WatchPartyPlayerScreen = () => {
       if (!playback.uri) throw new Error('Playback URI missing');
 
       // Set pending source to go through the probe flow
-      setPendingPlaybackSource({
-        uri: playback.uri as string,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          ...playback.headers,
-          ...playback.stream?.preferredHeaders
-        },
-        streamType: playback.stream?.type,
-        captions: normalizeCaptions(playback.stream?.captions as any),
-        qualities: playback.stream?.qualities,
-        sourceId: playback.sourceId,
-        embedId: playback.embedId,
-      });
+      setPendingPlaybackSource(
+        createPlaybackSource({
+          uri: playback.uri as string,
+          headers: {
+            ...(playback.headers as Record<string, string> | undefined),
+            ...(playback.stream?.preferredHeaders as Record<string, string> | undefined),
+          },
+          streamType: playback.stream?.type,
+          captions: normalizeCaptions(playback.stream?.captions as any),
+          qualities: ((playback.stream as any)?.qualities as QualitiesMap | undefined) ?? undefined,
+          sourceId: playback.sourceId,
+          embedId: playback.embedId,
+        }),
+      );
 
       const nextSeasonTitle = episode.seasonName ?? seasonTitleParam ?? `Season ${normalizedSeasonNumber}`;
       const updatedEntryBase =
@@ -2374,55 +2705,125 @@ const WatchPartyPlayerScreen = () => {
   };
 
   // Handle video error
-  const handleVideoError = useCallback((error: any) => {
-    console.error('[VideoPlayer] Video error:', error);
+  const handleVideoError = useCallback(
+    (error: any) => {
+      console.error('[WatchParty] Video error:', error);
 
-    // Try to extract meaningful error message
-    let errorMessage = 'Unknown playback error';
-    if (typeof error === 'string') {
-      errorMessage = error;
-    } else if (error?.message) {
-      errorMessage = error.message;
-    } else if (error?.error) {
-      errorMessage = error.error;
-    }
-
-    // Check for specific error types
-    if (errorMessage.includes('UnrecognizedInputFormatException')) {
-      errorMessage = 'Video format not supported or stream is unavailable';
-    } else if (errorMessage.includes('HttpDataSource')) {
-      errorMessage = 'Failed to load video from server';
-    } else if (errorMessage.includes('BehindLiveWindowException')) {
-      errorMessage = 'Live stream has moved ahead';
-    }
-
-    // Optional fallback: retry once with hotlink headers inferred from embedId.
-    try {
       const raw =
-        (typeof error === 'string' ? error : (error?.message || error?.error || '')) as string;
-      const looksLike403or404 = /Response code:\s*(403|404)/i.test(raw) || /InvalidResponseCodeException/i.test(raw);
+        typeof error === 'string'
+          ? error
+          : String(error?.message ?? error?.error ?? error ?? '');
+
+      // Try to extract meaningful error message
+      let errorMessage = raw || 'Unknown playback error';
+      if (errorMessage.includes('UnrecognizedInputFormatException')) {
+        errorMessage = 'Video format not supported or stream is unavailable';
+      } else if (errorMessage.includes('HttpDataSource')) {
+        errorMessage = 'Failed to load video from server';
+      } else if (errorMessage.includes('BehindLiveWindowException')) {
+        errorMessage = 'Live stream has moved ahead';
+      }
+
       const activeUri = (qualityOverrideUri ?? playbackSource?.uri) || '';
       const activeHostType = activeUri ? getVideoHostHandler(activeUri) : 'generic';
-      const hint = playbackSource?.embedId;
 
-      if (
-        looksLike403or404 &&
-        !useHotlinkHeaderFallback &&
-        activeHostType === 'generic' &&
-        (hint === 'streamtape' || hint === 'mixdrop' || hint === 'filemoon')
-      ) {
-        console.warn('[VideoPlayer] Retrying with hotlink header fallback', { hint });
-        setScrapeError(null);
-        setUseHotlinkHeaderFallback(true);
-        setVideoReloadKey((prev) => prev + 1);
+      // Optional fallback: retry once with hotlink headers inferred from embedId.
+      try {
+        const looksLike403or404 = /Response code:\s*(403|404)/i.test(raw) || /InvalidResponseCodeException/i.test(raw);
+        const hint = playbackSource?.embedId;
+        if (
+          looksLike403or404 &&
+          !useHotlinkHeaderFallback &&
+          activeHostType === 'generic' &&
+          (hint === 'streamtape' || hint === 'mixdrop' || hint === 'filemoon')
+        ) {
+          console.warn('[WatchParty] Retrying with hotlink header fallback', { hint });
+          setScrapeError(null);
+          setUseHotlinkHeaderFallback(true);
+          setVideoReloadKey((prev) => prev + 1);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+
+      const hasPlayback = Boolean(playbackSource?.uri);
+
+      if (hasPlayback && isHlsSource && !hlsVariantRetryRef.current && qualityOptions.length) {
+        hlsVariantRetryRef.current = true;
+        const baseUri = qualityOverrideUri ?? playbackSource!.uri;
+        const headers = playbackSource!.headers;
+        void (async () => {
+          for (const option of qualityOptions) {
+            if (!option?.uri || option.uri === baseUri) continue;
+            try {
+              await preloadQualityVariant(option.uri, headers);
+              pendingSeekAfterReloadRef.current = positionMillisRef.current;
+              pendingShouldPlayAfterReloadRef.current = isPlaying;
+              setQualityOverrideUri(option.uri);
+              setSelectedQualityId(option.id);
+              setVideoReloadKey((prev) => prev + 1);
+              return;
+            } catch {
+              // try next variant
+            }
+          }
+        })();
         return;
       }
-    } catch {
-      // ignore
-    }
 
-    setScrapeError(errorMessage);
-  }, [playbackSource?.embedId, playbackSource?.uri, qualityOverrideUri, useHotlinkHeaderFallback]);
+      if (
+        hasPlayback &&
+        isHlsSource &&
+        !hlsProxyRetryRef.current &&
+        !isM3U8ProxyUrl(activeUri) &&
+        (raw.includes('UnknownHostException') ||
+          raw.includes('Unable to resolve host') ||
+          raw.includes('InvalidResponseCodeException') ||
+          raw.includes('Response code'))
+      ) {
+        const proxied = buildM3U8ProxyUrl(activeUri, playbackSource!.headers);
+        if (proxied) {
+          hlsProxyRetryRef.current = true;
+          setScrapeError(null);
+          pendingSeekAfterReloadRef.current = positionMillisRef.current;
+          pendingShouldPlayAfterReloadRef.current = isPlaying;
+          setQualityOverrideUri(null);
+          setSelectedQualityId('auto');
+          autoQualityStepRef.current = 0;
+          lastAutoDowngradeTsRef.current = 0;
+          setPlaybackSource(
+            createPlaybackSource({
+              uri: proxied,
+              headers: playbackSource!.headers,
+              streamType: playbackSource!.streamType,
+              captions: playbackSource!.captions,
+              qualities: playbackSource!.qualities,
+              sourceId: playbackSource!.sourceId,
+              embedId: playbackSource!.embedId,
+            }),
+          );
+          setVideoReloadKey((prev) => prev + 1);
+          return;
+        }
+      }
+
+      if (hasPlayback && isHlsSource) {
+        void maybeAutoDowngradeQuality('error');
+      }
+
+      setScrapeError(errorMessage);
+    },
+    [
+      isHlsSource,
+      isPlaying,
+      maybeAutoDowngradeQuality,
+      playbackSource,
+      qualityOptions,
+      qualityOverrideUri,
+      useHotlinkHeaderFallback,
+    ],
+  );
 
   return (
     <View style={styles.container}>
@@ -2439,6 +2840,7 @@ const WatchPartyPlayerScreen = () => {
             useNativeControls={false}
             onPlaybackStatusUpdate={handleStatusUpdate}
             onError={handleVideoError}
+            onLoad={handleVideoLoad}
           />
         ) : (
           <View style={styles.videoFallback}>
@@ -2464,24 +2866,17 @@ const WatchPartyPlayerScreen = () => {
                         if (!manualUrlInput.trim()) return;
 
                         try {
-                          const media: any = {
-                            type: normalizedMediaType === 'tv' ? 'show' : 'movie',
-                            title: displayTitle,
-                            tmdbId: parsedTmdbNumericId?.toString() || '',
-                            releaseYear: derivedReleaseYear ?? new Date().getFullYear(),
-                          };
-
-                          await addManualOverride(media, manualUrlInput.trim());
                           setScrapeError(null);
-                          setPlaybackSource({
-                            uri: manualUrlInput.trim(),
-                            streamType: manualUrlInput.includes('.m3u8') ? 'hls' : 'file',
-                          });
+                          setPlaybackSource(
+                            createPlaybackSource({
+                              uri: manualUrlInput.trim(),
+                              streamType: manualUrlInput.includes('.m3u8') ? 'hls' : 'file',
+                            }),
+                          );
                           setVideoReloadKey(prev => prev + 1);
-                          setManualUrlVisible(false);
                           setManualUrlInput('');
                         } catch (err) {
-                          Alert.alert('Error', 'Failed to save manual override');
+                          Alert.alert('Error', 'Failed to load stream');
                         }
                       }}
                       disabled={!manualUrlInput.trim()}
@@ -3098,7 +3493,12 @@ function parseHlsAudioTracks(manifest: string): AudioTrackOption[] {
     const isDefault = attrs.DEFAULT === 'YES';
 
     options.push({
-      id: `${groupId || 'audio'}:${language || name || idx}`,
+      id: buildAudioTrackOptionId({
+        groupId,
+        language,
+        name,
+        index: idx,
+      }),
       name,
       language,
       groupId,
@@ -3107,6 +3507,30 @@ function parseHlsAudioTracks(manifest: string): AudioTrackOption[] {
   });
 
   return options;
+}
+
+function buildAudioTrackOptionId(params: {
+  groupId?: string;
+  language?: string;
+  name?: string;
+  index: number;
+}): string {
+  const segments = [params.groupId, params.language, params.name]
+    .map((segment) => sanitizeKeySegment(segment))
+    .filter(Boolean) as string[];
+  const base = segments.length ? segments.join('__') : 'audio-track';
+  return `${base}-${params.index}`;
+}
+
+function sanitizeKeySegment(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || undefined;
 }
 
 function parseHlsSubtitleTracks(manifest: string, manifestUrl: string): CaptionSource[] {
@@ -3249,6 +3673,7 @@ function resolveRelativeUrl(target: string, base: string): string {
 }
 
 type PreloadStreamWindowOptions = {
+  startAtSeconds?: number;
   windowSeconds: number;
   maxSegments: number;
   concurrency: number;
@@ -3383,9 +3808,22 @@ async function preloadStreamWindow(
     const concurrency = Math.max(1, options.concurrency);
     const seen = options.seen;
 
+    const startAtSeconds = Math.max(0, options.startAtSeconds ?? 0);
+    const hasDurations = segments.some((s) => typeof s.duration === 'number' && Number.isFinite(s.duration));
+    const shouldSkipByTime = startAtSeconds > 0 && hasDurations;
+
     const toFetch: string[] = [];
     let accSeconds = 0;
+    let skipAccSeconds = 0;
+    let started = !shouldSkipByTime;
     for (const seg of segments) {
+      if (!started) {
+        skipAccSeconds += seg.duration ?? 0;
+        if (skipAccSeconds >= startAtSeconds) {
+          started = true;
+        }
+        continue;
+      }
       if (toFetch.length >= maxSegments) break;
       if (seen && seen.has(seg.uri)) continue;
 

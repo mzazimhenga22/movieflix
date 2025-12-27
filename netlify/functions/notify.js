@@ -78,7 +78,11 @@ const getUserExpoTokens = (userDoc) => {
   const tokens = [];
   if (typeof data.expoPushToken === 'string' && data.expoPushToken) tokens.push(data.expoPushToken);
   if (Array.isArray(data.expoPushTokens)) tokens.push(...data.expoPushTokens);
-  return uniq(tokens).filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken'));
+  return uniq(tokens).filter(
+    (t) =>
+      typeof t === 'string' &&
+      (t.startsWith('ExponentPushToken') || t.startsWith('ExpoPushToken')),
+  );
 };
 
 const sendExpoPush = async (messages) => {
@@ -248,7 +252,7 @@ exports.handler = async (event) => {
             title,
             body: bodyText,
             sound: 'default',
-            channelId: 'default',
+            channelId: 'messages',
             priority: 'high',
             data: { type: 'message', conversationId, messageId, from: uid, toUserId: userId },
           });
@@ -287,7 +291,7 @@ exports.handler = async (event) => {
             title,
             body: bodyText,
             sound: 'default',
-            channelId: 'default',
+            channelId: 'calls',
             priority: 'high',
             data: { type: 'call', callId, from: uid, toUserId: userId },
           });

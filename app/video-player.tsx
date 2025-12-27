@@ -1,15 +1,17 @@
 ﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
-import { AVPlaybackSource, AVPlaybackStatusSuccess, ResizeMode, Video } from 'expo-av';
+import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, ResizeMode, Video } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { AppStateStatus } from 'react-native';
 import {
     ActivityIndicator,
+    AppState,
     Alert,
     Animated,
     FlatList,
@@ -29,6 +31,7 @@ import {
 import { firestore } from '../constants/firebase';
 import { API_BASE_URL, API_KEY } from '../constants/api';
 import { useUser } from '../hooks/use-user';
+import { usePromotedProducts } from '../hooks/use-promoted-products';
 import { logInteraction } from '../lib/algo';
 import { syncMovieMatchProfile } from '../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../lib/profileStorage';
@@ -36,6 +39,9 @@ import { usePStream, type PStreamPlayback } from '../src/pstream/usePStream';
 import type { Media } from '../types';
 import { buildSourceOrder, buildScrapeDebugTag } from '../lib/videoPlaybackShared';
 import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
+import { VideoMaskingOverlay } from '../lib/engineer';
+import NativeAdCard from '../components/ads/NativeAdCard';
+import { useSubscription } from '../providers/SubscriptionProvider';
 const FALLBACK_EPISODE_IMAGE = 'https://via.placeholder.com/160x90?text=Episode';
 type UpcomingEpisode = {
   id?: number;
@@ -176,17 +182,61 @@ const needsRgShowsHeaders = (uri?: string, sourceId?: string, embedId?: string) 
   );
 };
 
+function sanitizePlaybackHeaders(incoming?: Record<string, string>): Record<string, string> | undefined {
+  if (!incoming) return undefined;
+  const out: Record<string, string> = {};
+
+  for (const [rawKey, rawValue] of Object.entries(incoming)) {
+    if (!rawKey) continue;
+    if (rawValue === undefined || rawValue === null) continue;
+    const value = String(rawValue);
+    if (!value) continue;
+    const lower = rawKey.trim().toLowerCase();
+    if (!lower) continue;
+
+    // Never pin Host (breaks redirected segment requests on some CDNs/players).
+    if (lower === 'host' || lower === 'content-length') continue;
+
+    switch (lower) {
+      case 'user-agent':
+        out['User-Agent'] = value;
+        break;
+      case 'referer':
+        out.Referer = value;
+        break;
+      case 'origin':
+        out.Origin = value;
+        break;
+      case 'accept':
+        out.Accept = value;
+        break;
+      case 'accept-language':
+        out['Accept-Language'] = value;
+        break;
+      case 'accept-encoding':
+        out['Accept-Encoding'] = value;
+        break;
+      default:
+        out[rawKey] = value;
+        break;
+    }
+  }
+
+  return Object.keys(out).length ? out : undefined;
+}
+
 function buildPlaybackHeaders(
   uri: string,
   sourceId?: string,
   embedId?: string,
   incoming?: Record<string, string>,
 ): Record<string, string> {
+  const sanitizedIncoming = sanitizePlaybackHeaders(incoming);
   const headers: Record<string, string> = {
     'User-Agent': DEFAULT_STREAM_UA,
     Accept: '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
-    ...incoming,
+    ...(sanitizedIncoming ?? {}),
   };
 
   if (needsRgShowsHeaders(uri, sourceId, embedId)) {
@@ -237,18 +287,17 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
   const startValueRef = useRef(value);
   const valueRef = useRef(value);
   const fillAnim = useRef(new Animated.Value(value)).current;
+  const isInteractingRef = useRef(false);
+  const lastEmitTsRef = useRef(0);
+  const lastEmittedValueRef = useRef(value);
   // keep latest value in a ref so handlers can read it without recreating the
   // PanResponder on every value update (prevents re-binding and improves
   // responsiveness while dragging/tapping)
   useEffect(() => {
+    if (isInteractingRef.current) return;
     valueRef.current = value;
-    Animated.spring(fillAnim, {
-      toValue: value,
-      damping: 16,
-      stiffness: 220,
-      mass: 0.6,
-      useNativeDriver: false,
-    }).start();
+    lastEmittedValueRef.current = value;
+    fillAnim.setValue(value);
   }, [value, fillAnim]);
   const panResponder = useMemo(
     () =>
@@ -259,6 +308,7 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
         onMoveShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponderCapture: () => true,
         onPanResponderGrant: () => {
+          isInteractingRef.current = true;
           startValueRef.current = valueRef.current;
           onInteraction?.();
         },
@@ -266,19 +316,35 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
           const delta = -gesture.dy / height;
           const next = clamp01(startValueRef.current + delta);
           valueRef.current = next;
-          onValueChange(next);
+          fillAnim.setValue(next);
+          const now = Date.now();
+          if (now - lastEmitTsRef.current >= 33 || Math.abs(next - lastEmittedValueRef.current) >= 0.02) {
+            lastEmitTsRef.current = now;
+            lastEmittedValueRef.current = next;
+            onValueChange(next);
+          }
         },
         // ✅ don't allow termination (prevents snap-back)
         onPanResponderTerminationRequest: () => false,
         // ✅ keep current value as new baseline
         onPanResponderRelease: () => {
+          isInteractingRef.current = false;
           startValueRef.current = valueRef.current;
+          if (lastEmittedValueRef.current !== valueRef.current) {
+            lastEmittedValueRef.current = valueRef.current;
+            onValueChange(valueRef.current);
+          }
         },
         onPanResponderTerminate: () => {
+          isInteractingRef.current = false;
           startValueRef.current = valueRef.current;
+          if (lastEmittedValueRef.current !== valueRef.current) {
+            lastEmittedValueRef.current = valueRef.current;
+            onValueChange(valueRef.current);
+          }
         },
       }),
-    [height, onInteraction, onValueChange],
+    [height, onInteraction, onValueChange, fillAnim],
   );
   const fillHeight = fillAnim.interpolate({
     inputRange: [0, 1],
@@ -304,6 +370,8 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
 const VideoPlayerScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
+  const { currentPlan } = useSubscription();
+  const { products: promotedProducts, hasAds: hasPromotedAds } = usePromotedProducts({ placement: 'story', limit: 20 });
 
   const [transitionReady, setTransitionReady] = useState(false);
   useEffect(() => {
@@ -445,24 +513,142 @@ const VideoPlayerScreen = () => {
       ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
       : null,
   );
+
+  useEffect(() => {
+    if (transitionReady) return;
+    if (playbackSource) {
+      setTransitionReady(true);
+    }
+  }, [playbackSource, transitionReady]);
+  const playbackSourceRef = useRef<PlaybackSource | null>(playbackSource);
   const [watchHistoryKey, setWatchHistoryKey] = useState<string | null>(null);
   const [activeProfile, setActiveProfile] = useState<StoredProfile | null>(null);
   const videoRef = useRef<Video | null>(null);
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
+  const isPlayingRef = useRef(true);
+  const pendingAudioFocusRetryRef = useRef(false);
   const [activeTitle, setActiveTitle] = useState(displayTitle);
   useEffect(() => {
     setActiveTitle(displayTitle);
   }, [displayTitle]);
   const [isPlaying, setIsPlaying] = useState(true);
+  const lastPlayPauseIntentTsRef = useRef(0);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  const ensurePlaybackAudioMode = useCallback(async () => {
+    try {
+      await Audio.setIsEnabledAsync(true);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: Audio.INTERRUPTION_MODE_IOS_DUCK_OTHERS,
+        interruptionModeAndroid: Audio.INTERRUPTION_MODE_ANDROID_DUCK_OTHERS,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      const isActive = nextState === 'active';
+      setAppIsActive(isActive);
+
+      if (isActive && pendingAudioFocusRetryRef.current) {
+        pendingAudioFocusRetryRef.current = false;
+        const video = videoRef.current;
+        if (!video) return;
+        if (!isPlayingRef.current || midrollActiveRef.current) return;
+        void (async () => {
+          await ensurePlaybackAudioMode();
+          try {
+            await video.playAsync();
+          } catch {
+            // ignore
+          }
+        })();
+      }
+    });
+    return () => sub.remove();
+  }, [ensurePlaybackAudioMode]);
+
   const [showControls, setShowControls] = useState(true);
   const [controlsSession, setControlsSession] = useState(0);
   const lastSurfaceTapRef = useRef(0);
   const [positionMillis, setPositionMillis] = useState(0);
+  const positionMillisRef = useRef(0);
   const [durationMillis, setDurationMillis] = useState(0);
+  const [bufferedMillis, setBufferedMillis] = useState(0);
+  const bufferedMillisRef = useRef(0);
   const [seekPosition, setSeekPosition] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [brightness, setBrightness] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [volume, setVolume] = useState(1);
+  const [midrollActive, setMidrollActive] = useState(false);
+  const midrollActiveRef = useRef(false);
+  const [midrollRemainingSec, setMidrollRemainingSec] = useState(0);
+  const midrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const midrollStartedAtRef = useRef<number | null>(null);
+  const midrollWasPlayingRef = useRef(true);
+  const lastMidrollShownAtRef = useRef(0);
+  const midrollCuePointsRef = useRef<number[]>([]);
+  const midrollScheduleKeyRef = useRef('');
+  const [midrollProduct, setMidrollProduct] = useState<any>(null);
+  const pendingBrightnessRef = useRef(brightness);
+  const pendingVolumeRef = useRef(volume);
+  const brightnessApplyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const volumeApplyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleBrightnessApply = useCallback((value: number) => {
+    pendingBrightnessRef.current = value;
+    if (brightnessApplyTimeoutRef.current) return;
+    brightnessApplyTimeoutRef.current = setTimeout(() => {
+      brightnessApplyTimeoutRef.current = null;
+      Brightness.setBrightnessAsync(pendingBrightnessRef.current).catch(() => {});
+    }, 50);
+  }, []);
+  const scheduleVolumeApply = useCallback(() => {
+    if (volumeApplyTimeoutRef.current) return;
+    volumeApplyTimeoutRef.current = setTimeout(() => {
+      volumeApplyTimeoutRef.current = null;
+      const video = videoRef.current;
+      if (!video) return;
+      video.setVolumeAsync(pendingVolumeRef.current).catch(() => {});
+    }, 50);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (brightnessApplyTimeoutRef.current) {
+        clearTimeout(brightnessApplyTimeoutRef.current);
+        brightnessApplyTimeoutRef.current = null;
+      }
+      if (volumeApplyTimeoutRef.current) {
+        clearTimeout(volumeApplyTimeoutRef.current);
+        volumeApplyTimeoutRef.current = null;
+      }
+
+      if (midrollTimerRef.current) {
+        clearInterval(midrollTimerRef.current);
+        midrollTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    midrollActiveRef.current = midrollActive;
+  }, [midrollActive]);
+
+  useEffect(() => {
+    positionMillisRef.current = positionMillis;
+  }, [positionMillis]);
   const { user } = useUser();
   const [chatMessages, setChatMessages] = useState<
     Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }>
@@ -520,6 +706,7 @@ const VideoPlayerScreen = () => {
   const [isLocked, setIsLocked] = useState(false);
   const [isPipSupported, setIsPipSupported] = useState(false);
   const [isPipActive, setIsPipActive] = useState(false);
+  const pipUiEnabled = Platform.OS === 'android' ? true : isPipSupported;
   const [isMini, setIsMini] = useState(false);
   const captionPreferenceKeyRef = useRef<string | null>(null);
   const [audioTrackOptions, setAudioTrackOptions] = useState<AudioTrackOption[]>([]);
@@ -528,14 +715,25 @@ const VideoPlayerScreen = () => {
   const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
   const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
   const [qualityLoadingId, setQualityLoadingId] = useState<string | null>(null);
+  useEffect(() => {
+    bufferedMillisRef.current = 0;
+    setBufferedMillis(0);
+  }, [videoReloadKey, playbackSource?.uri, qualityOverrideUri]);
   const [showBufferingOverlay, setShowBufferingOverlay] = useState(false);
   const bufferingOverlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoDowngradeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSeekAfterReloadRef = useRef<number | null>(null);
+  const pendingShouldPlayAfterReloadRef = useRef<boolean | null>(null);
   const prevPositionRef = useRef<number>(0);
   const lastAdvanceTsRef = useRef<number>(Date.now());
   const statusLogRef = useRef<{ lastTs: number; lastKey: string }>({ lastTs: 0, lastKey: '' });
+  const qualityOptionsRef = useRef<QualityOption[]>([]);
+  const autoQualityStepRef = useRef(0);
+  const lastAutoDowngradeTsRef = useRef(0);
   const [avDrawerOpen, setAvDrawerOpen] = useState(false);
   const hlsWarmupRef = useRef<{ key: string; seen: Set<string> }>({ key: '', seen: new Set() });
   const hlsProxyRetryRef = useRef(false);
+  const hlsVariantRetryRef = useRef(false);
   useEffect(() => {
     watchEntryRef.current = watchHistoryEntry;
   }, [watchHistoryEntry]);
@@ -564,8 +762,22 @@ const VideoPlayerScreen = () => {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
       }
+      if (autoDowngradeTimeoutRef.current) {
+        clearTimeout(autoDowngradeTimeoutRef.current);
+        autoDowngradeTimeoutRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    qualityOptionsRef.current = qualityOptions;
+  }, [qualityOptions]);
+
+  useEffect(() => {
+    // Reset auto-downgrade state when the stream changes.
+    autoQualityStepRef.current = 0;
+    lastAutoDowngradeTsRef.current = 0;
+  }, [playbackSource?.uri]);
   const bumpControlsLife = useCallback(() => setControlsSession(prev => prev + 1), []);
   const sourceOrder = useMemo(() => buildSourceOrder(preferAnimeSources), [preferAnimeSources]);
   const updateActiveCaption = useCallback(
@@ -657,6 +869,8 @@ const VideoPlayerScreen = () => {
   const applyPlaybackResult = useCallback(
     (playback: PStreamPlayback, options?: { title?: string }) => {
       if (!playback) return;
+      hlsProxyRetryRef.current = false;
+      hlsVariantRetryRef.current = false;
       if (__DEV__) {
         console.log('[VideoPlayer] Applying playback result', {
           streamType: playback.stream?.type,
@@ -710,7 +924,10 @@ const VideoPlayerScreen = () => {
     }
   }, [playbackSource]);
   useEffect(() => {
-    if (!transitionReady) return;
+    playbackSourceRef.current = playbackSource;
+  }, [playbackSource]);
+
+  useEffect(() => {
     if (!prefetchKey) {
       if (!prefetchChecked) {
         setPrefetchChecked(true);
@@ -718,16 +935,32 @@ const VideoPlayerScreen = () => {
       return;
     }
     if (prefetchChecked) return;
+    if (playbackSourceRef.current) {
+      setPrefetchChecked(true);
+      return;
+    }
     let cancelled = false;
     let timeoutRef: ReturnType<typeof setTimeout> | null = null;
+    let earlyRef: ReturnType<typeof setTimeout> | null = null;
     const startedAt = Date.now();
-    const MAX_WAIT_MS = 12_000;
-    const POLL_INTERVAL_MS = 250;
+    const MAX_WAIT_MS = 2_500;
+    const POLL_INTERVAL_MS = 200;
+    const EARLY_SCRAPE_AFTER_MS = 650;
+
+    earlyRef = setTimeout(() => {
+      if (!cancelled) {
+        setPrefetchChecked(true);
+      }
+    }, EARLY_SCRAPE_AFTER_MS);
 
     const tryConsume = () => {
       if (cancelled) return;
       const entry = consumePrefetchedPlayback(prefetchKey);
       if (entry?.playback) {
+        if (playbackSourceRef.current) {
+          if (!cancelled) setPrefetchChecked(true);
+          return;
+        }
         if (__DEV__) {
           console.log('[VideoPlayer] Prefetched playback consumed', {
             title: entry.title,
@@ -738,6 +971,10 @@ const VideoPlayerScreen = () => {
         applyPlaybackResult(entry.playback, { title: entry.title ?? displayTitle });
         if (!cancelled) {
           setPrefetchChecked(true);
+        }
+        if (earlyRef) {
+          clearTimeout(earlyRef);
+          earlyRef = null;
         }
         return;
       }
@@ -758,10 +995,13 @@ const VideoPlayerScreen = () => {
         clearTimeout(timeoutRef);
         timeoutRef = null;
       }
+      if (earlyRef) {
+        clearTimeout(earlyRef);
+        earlyRef = null;
+      }
     };
-  }, [prefetchKey, prefetchChecked, applyPlaybackResult, displayTitle, transitionReady]);
+  }, [prefetchKey, prefetchChecked, applyPlaybackResult, displayTitle]);
   useEffect(() => {
-    if (!transitionReady) return;
     if (!prefetchChecked) return;
     if (playbackSource || !tmdbId || !rawMediaType) return;
     let isCancelled = false;
@@ -853,7 +1093,6 @@ const VideoPlayerScreen = () => {
     displayTitle,
     imdbId,
     tmdbEnrichment,
-    transitionReady,
     seasonNumberParam,
     episodeNumberParam,
     seasonTmdbId,
@@ -883,6 +1122,14 @@ const VideoPlayerScreen = () => {
     }
     return base;
   }, [playbackSource, isHlsSource, qualityOverrideUri]);
+
+  useEffect(() => {
+    if (!transitionReady) return;
+    if (!videoPlaybackSource) return;
+    if (!appIsActive) return;
+    void ensurePlaybackAudioMode();
+  }, [transitionReady, videoPlaybackSource, appIsActive, ensurePlaybackAudioMode]);
+
   useEffect(() => {
     if (__DEV__) {
       if (videoPlaybackSource) {
@@ -910,12 +1157,14 @@ const VideoPlayerScreen = () => {
     }
 
     let cancelled = false;
-    const warmup = async () => {
+    const warmup = async (mode: 'normal' | 'aggressive' = 'normal') => {
       try {
+        const startAtSeconds = Math.max(0, positionMillisRef.current / 1000 + 5);
         await preloadStreamWindow(uri, activeStreamHeaders, {
-          windowSeconds: 18,
-          maxSegments: 3,
-          concurrency: 3,
+          startAtSeconds,
+          windowSeconds: mode === 'aggressive' ? 240 : 180,
+          maxSegments: mode === 'aggressive' ? 36 : 24,
+          concurrency: mode === 'aggressive' ? 6 : 4,
           seen: hlsWarmupRef.current.seen,
         });
       } catch (err) {
@@ -926,10 +1175,10 @@ const VideoPlayerScreen = () => {
       }
     };
 
-    warmup();
+    warmup('normal');
     const interval = setInterval(() => {
-      if (cancelled || !isPlaying || showBufferingOverlay) return;
-      void warmup();
+      if (cancelled) return;
+      void warmup(showBufferingOverlay ? 'aggressive' : 'normal');
     }, 45000);
 
     return () => {
@@ -942,16 +1191,36 @@ const VideoPlayerScreen = () => {
     playbackSource?.uri,
     qualityOverrideUri,
     selectedQualityId,
-    isPlaying,
     showBufferingOverlay,
     activeStreamHeaders,
   ]);
+
+  useEffect(() => {
+    if (!showBufferingOverlay) return;
+    if (!transitionReady) return;
+    if (!isHlsSource) return;
+    const uri = qualityOverrideUri ?? playbackSource?.uri;
+    if (!uri) return;
+    (async () => {
+      try {
+        const startAtSeconds = Math.max(0, positionMillisRef.current / 1000 + 5);
+        await preloadStreamWindow(uri, activeStreamHeaders, {
+          startAtSeconds,
+          windowSeconds: 240,
+          maxSegments: 36,
+          concurrency: 6,
+          seen: hlsWarmupRef.current.seen,
+        });
+      } catch {
+        // ignore
+      }
+    })();
+  }, [showBufferingOverlay, transitionReady, isHlsSource, playbackSource?.uri, qualityOverrideUri, activeStreamHeaders]);
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
   const shouldShowMovieFlixLoader =
     !!qualityLoadingId ||
     isFetchingStream ||
     isInitialStreamPending ||
-    (videoPlaybackSource && showBufferingOverlay && !scrapeError) ||
     !transitionReady;
   let loaderMessage = 'Fetching stream...';
   if (qualityLoadingId) {
@@ -962,8 +1231,6 @@ const VideoPlayerScreen = () => {
     loaderMessage = 'Preparing player...';
   } else if (isInitialStreamPending) {
     loaderMessage = 'Preparing stream...';
-  } else if (videoPlaybackSource && showBufferingOverlay) {
-    loaderMessage = 'Found stream, prepping video...';
   }
   const isBlockingLoader = Boolean(qualityLoadingId || isFetchingStream || isInitialStreamPending);
   const loaderVariant: 'solid' | 'transparent' = isBlockingLoader ? 'solid' : 'transparent';
@@ -1102,6 +1369,7 @@ useEffect(() => {
         );
         await Brightness.requestPermissionsAsync();
         const current = await Brightness.getBrightnessAsync();
+        pendingBrightnessRef.current = current;
         setBrightness(current);
       } catch (e) {
         console.warn('Video setup error', e);
@@ -1113,15 +1381,6 @@ useEffect(() => {
       ScreenOrientation.unlockAsync();
     };
   }, []);
-  // apply brightness
-  useEffect(() => {
-    Brightness.setBrightnessAsync(brightness).catch(() => {});
-  }, [brightness]);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.setVolumeAsync(volume).catch(() => {});
-  }, [volume]);
   // auto-hide controls when playing
   useEffect(() => {
     if (!showControls || episodeDrawerOpen || isLocked) return;
@@ -1129,6 +1388,101 @@ useEffect(() => {
     const timeout = setTimeout(() => setShowControls(false), delay);
     return () => clearTimeout(timeout);
   }, [showControls, isPlaying, episodeDrawerOpen, controlsSession, isLocked]);
+
+  const startMidrollAd = useCallback(async () => {
+    if (currentPlan !== 'free') return;
+    if (!hasPromotedAds || !promotedProducts.length) return;
+    if (midrollActiveRef.current) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const now = Date.now();
+    if (now - lastMidrollShownAtRef.current < 30_000) return;
+
+    lastMidrollShownAtRef.current = now;
+    midrollWasPlayingRef.current = isPlaying;
+    midrollStartedAtRef.current = now;
+    setMidrollProduct(promotedProducts[Math.floor(Math.random() * promotedProducts.length)] ?? null);
+    setMidrollRemainingSec(15);
+    setShowControls(false);
+    midrollActiveRef.current = true;
+    setMidrollActive(true);
+    setIsPlaying(false);
+
+    try {
+      await video.pauseAsync();
+    } catch {
+      // ignore
+    }
+
+    if (midrollTimerRef.current) {
+      clearInterval(midrollTimerRef.current);
+      midrollTimerRef.current = null;
+    }
+    midrollTimerRef.current = setInterval(() => {
+      const startedAt = midrollStartedAtRef.current ?? Date.now();
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const remaining = Math.max(0, 15 - elapsed);
+      setMidrollRemainingSec(remaining);
+      if (remaining <= 0) {
+        if (midrollTimerRef.current) {
+          clearInterval(midrollTimerRef.current);
+          midrollTimerRef.current = null;
+        }
+        midrollActiveRef.current = false;
+        setMidrollActive(false);
+        setMidrollProduct(null);
+        const shouldResume = midrollWasPlayingRef.current;
+        if (shouldResume) {
+          setIsPlaying(true);
+          video.playAsync().catch(() => {});
+        }
+      }
+    }, 250);
+  }, [currentPlan, hasPromotedAds, promotedProducts, isPlaying]);
+
+  useEffect(() => {
+    if (currentPlan !== 'free') {
+      midrollCuePointsRef.current = [];
+      midrollScheduleKeyRef.current = '';
+      return;
+    }
+    if (!hasPromotedAds || !promotedProducts.length) {
+      midrollCuePointsRef.current = [];
+      midrollScheduleKeyRef.current = '';
+      return;
+    }
+    if (!durationMillis || durationMillis < 60_000) return;
+
+    const scheduleKey = `${watchHistoryKey ?? playbackSource?.uri ?? ''}|${Math.round(durationMillis / 1000)}`;
+    if (midrollScheduleKeyRef.current === scheduleKey) return;
+    midrollScheduleKeyRef.current = scheduleKey;
+
+    const totalMinutes = durationMillis / 60_000;
+    const everyMinutes = 8;
+    const adCount = Math.max(0, Math.floor(totalMinutes / everyMinutes));
+    if (!adCount) {
+      midrollCuePointsRef.current = [];
+      return;
+    }
+
+    const earliest = 2 * 60_000;
+    const latest = Math.max(earliest, durationMillis - 60_000);
+    const minGapMs = 4 * 60_000;
+    const picks: number[] = [];
+    const maxAttempts = adCount * 20;
+
+    let attempts = 0;
+    while (picks.length < adCount && attempts < maxAttempts) {
+      attempts += 1;
+      const t = Math.floor(earliest + Math.random() * Math.max(1, latest - earliest));
+      if (picks.some((p) => Math.abs(p - t) < minGapMs)) continue;
+      picks.push(t);
+    }
+
+    picks.sort((a, b) => a - b);
+    midrollCuePointsRef.current = picks;
+  }, [currentPlan, hasPromotedAds, promotedProducts.length, durationMillis, watchHistoryKey, playbackSource?.uri]);
+
   const persistWatchProgress = useCallback(
     async (
       positionValue: number,
@@ -1205,6 +1559,80 @@ useEffect(() => {
     },
     [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
   );
+
+  const getSortedQualityOptions = useCallback(() => {
+    const options = qualityOptionsRef.current ?? [];
+    return [...options]
+      .filter((o) => o && o.uri)
+      .sort((a, b) => {
+        const bwA = typeof a.bandwidth === 'number' ? a.bandwidth : -1;
+        const bwB = typeof b.bandwidth === 'number' ? b.bandwidth : -1;
+        if (bwA !== bwB) return bwB - bwA;
+        return (b.resolution ?? '').localeCompare(a.resolution ?? '');
+      });
+  }, []);
+
+  const maybeAutoDowngradeQuality = useCallback(
+    async (reason: 'stall' | 'error') => {
+      if (!isHlsSource) return;
+      if (!playbackSource?.headers) return;
+      if (qualityLoadingId) return;
+      if (selectedQualityId !== 'auto') return;
+
+      const now = Date.now();
+      if (now - lastAutoDowngradeTsRef.current < 25_000) return;
+
+      const sorted = getSortedQualityOptions();
+      if (sorted.length < 2) return;
+
+      const currentUri = qualityOverrideUri;
+      let idx = 0;
+      if (currentUri) {
+        const found = sorted.findIndex((o) => o.uri === currentUri);
+        if (found >= 0) idx = found;
+      } else {
+        idx = autoQualityStepRef.current;
+      }
+
+      const nextIdx = Math.min(sorted.length - 1, Math.max(0, idx + 1));
+      const next = sorted[nextIdx];
+      if (!next?.uri) return;
+      if (next.uri === currentUri) return;
+
+      try {
+        if (__DEV__) {
+          console.log('[VideoPlayer] Auto-downgrading quality', {
+            reason,
+            from: currentUri ?? 'auto',
+            to: next.resolution ?? next.label,
+            toBw: next.bandwidth,
+          });
+        }
+        await preloadQualityVariant(next.uri, playbackSource.headers);
+        autoQualityStepRef.current = nextIdx;
+        lastAutoDowngradeTsRef.current = now;
+        pendingSeekAfterReloadRef.current = positionMillis;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
+        setQualityOverrideUri(next.uri);
+        setVideoReloadKey((prev) => prev + 1);
+      } catch (err) {
+        if (__DEV__) {
+          console.warn('[VideoPlayer] Auto-downgrade preload failed', err);
+        }
+      }
+    },
+    [
+      getSortedQualityOptions,
+      isHlsSource,
+      playbackSource?.headers,
+      qualityLoadingId,
+      qualityOverrideUri,
+      selectedQualityId,
+      positionMillis,
+      isPlaying,
+    ],
+  );
+
   const handleVideoError = useCallback(
     (error: any) => {
       console.error('[VideoPlayer] Video element error', error);
@@ -1212,6 +1640,27 @@ useEffect(() => {
       const message = String(error?.message ?? error ?? '');
       const hasPlayback = Boolean(playbackSource?.uri);
       const isHls = playbackSource?.streamType === 'hls';
+
+      if (hasPlayback && isHls && !hlsVariantRetryRef.current && qualityOptions.length) {
+        hlsVariantRetryRef.current = true;
+        const baseUri = qualityOverrideUri ?? playbackSource!.uri;
+        const headers = playbackSource!.headers;
+        void (async () => {
+          for (const option of qualityOptions) {
+            if (!option?.uri || option.uri === baseUri) continue;
+            try {
+              await preloadQualityVariant(option.uri, headers);
+              setQualityOverrideUri(option.uri);
+              setSelectedQualityId(option.id);
+              setVideoReloadKey((prev) => prev + 1);
+              return;
+            } catch {
+              // try next variant
+            }
+          }
+        })();
+        return;
+      }
 
       if (
         hasPlayback &&
@@ -1241,9 +1690,13 @@ useEffect(() => {
         }
       }
 
+      if (hasPlayback && isHls) {
+        void maybeAutoDowngradeQuality('error');
+      }
+
       Alert.alert('Playback error', error?.message || 'Video failed to load.');
     },
-    [playbackSource],
+    [playbackSource, qualityOptions, qualityOverrideUri, maybeAutoDowngradeQuality],
   );
   const handleVideoLoad = useCallback((payload: any) => {
     if (__DEV__) {
@@ -1253,13 +1706,39 @@ useEffect(() => {
         status: payload,
       });
     }
+
+    const seekTo = pendingSeekAfterReloadRef.current;
+    if (typeof seekTo === 'number' && Number.isFinite(seekTo) && seekTo > 0) {
+      const shouldPlayAfter = pendingShouldPlayAfterReloadRef.current;
+      pendingSeekAfterReloadRef.current = null;
+      pendingShouldPlayAfterReloadRef.current = null;
+
+      const video = videoRef.current;
+      if (video) {
+        // best-effort restore position after quality/override reload
+        void video
+          .setPositionAsync(seekTo)
+          .then(() => {
+            if (shouldPlayAfter === true) return video.playAsync();
+            if (shouldPlayAfter === false) return video.pauseAsync();
+            return undefined;
+          })
+          .catch(() => {});
+      }
+    }
+
+    // Ensure latest slider-set volume is applied once the player is ready.
+    const video = videoRef.current;
+    if (video) {
+      video.setVolumeAsync(pendingVolumeRef.current).catch(() => {});
+    }
   }, []);
   const handleStatusUpdate = (status: AVPlaybackStatusSuccess | any) => {
     if (!status || !status.isLoaded) return;
     const playingNow = Boolean(status.isPlaying);
     const bufferingNow = Boolean(status.isBuffering);
+    const now = Date.now();
     if (__DEV__) {
-      const now = Date.now();
       const positionLabel = Math.round((status.positionMillis || 0) / 1000);
       const key = `${playingNow ? 'play' : 'pause'}|${bufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
       if (now - statusLogRef.current.lastTs > 2000 || statusLogRef.current.lastKey !== key) {
@@ -1275,7 +1754,9 @@ useEffect(() => {
         statusLogRef.current = { lastTs: now, lastKey: key };
       }
     }
-    setIsPlaying(playingNow);
+    if (now - lastPlayPauseIntentTsRef.current > 300) {
+      setIsPlaying(playingNow);
+    }
     const currentPos = status.positionMillis || 0;
     // detect progress: if position advanced by >300ms, update last advance timestamp
     try {
@@ -1301,10 +1782,21 @@ useEffect(() => {
           bufferingOverlayTimeoutRef.current = null;
         }, 650);
       }
+
+      if (!autoDowngradeTimeoutRef.current) {
+        autoDowngradeTimeoutRef.current = setTimeout(() => {
+          autoDowngradeTimeoutRef.current = null;
+          void maybeAutoDowngradeQuality('stall');
+        }, 2500);
+      }
     } else {
       if (bufferingOverlayTimeoutRef.current) {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
+      }
+      if (autoDowngradeTimeoutRef.current) {
+        clearTimeout(autoDowngradeTimeoutRef.current);
+        autoDowngradeTimeoutRef.current = null;
       }
       if (showBufferingOverlay) {
         setShowBufferingOverlay(false);
@@ -1315,6 +1807,16 @@ useEffect(() => {
       setSeekPosition(currentPosition);
     }
     setPositionMillis(currentPosition);
+
+    const playable = (status as any)?.playableDurationMillis;
+    if (typeof playable === 'number' && Number.isFinite(playable)) {
+      const nextBuffered = Math.max(currentPosition, playable);
+      if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
+        bufferedMillisRef.current = nextBuffered;
+        setBufferedMillis(nextBuffered);
+      }
+    }
+
     updateActiveCaption(currentPosition);
     if (status.durationMillis) {
       setDurationMillis(status.durationMillis);
@@ -1326,6 +1828,24 @@ useEffect(() => {
         markComplete: status.didJustFinish,
       });
     }
+
+    if (
+      currentPlan === 'free' &&
+      hasPromotedAds &&
+      promotedProducts.length > 0 &&
+      !midrollActiveRef.current &&
+      !status.didJustFinish
+    ) {
+      const cues = midrollCuePointsRef.current;
+      while (cues.length && cues[0] < currentPosition - 5000) {
+        cues.shift();
+      }
+      const nextCue = cues[0];
+      if (typeof nextCue === 'number' && currentPosition >= nextCue) {
+        cues.shift();
+        void startMidrollAd();
+      }
+    }
   };
   useEffect(() => {
     return () => {
@@ -1334,27 +1854,64 @@ useEffect(() => {
       }
     };
   }, [positionMillis, durationMillis, persistWatchProgress]);
-  const togglePlayPause = async () => {
+  const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
     bumpControlsLife();
-    try {
-      if (isPlaying) {
-        await video.pauseAsync();
-        setShowControls(true);
-      } else {
-        await video.playAsync();
-      }
-    } catch (err: any) {
-      console.warn('Playback failed', err);
-      const msg = err?.message || String(err);
-      if (msg.toLowerCase().includes('audiofocus') || msg.toLowerCase().includes('audio focus') || msg.includes('AudioFocusNotAcquiredException')) {
-        Alert.alert('Playback blocked', 'This app is currently in the background, so audio focus could not be acquired. Please bring the app to the foreground and try again.');
-      } else {
+    lastPlayPauseIntentTsRef.current = Date.now();
+
+    const nextPlaying = !isPlaying;
+    setIsPlaying(nextPlaying);
+    if (!nextPlaying) setShowControls(true);
+
+    void (async () => {
+      try {
+        if (nextPlaying) {
+          await ensurePlaybackAudioMode();
+          await video.playAsync();
+        } else {
+          await video.pauseAsync();
+        }
+      } catch (err: any) {
+        console.warn('Playback failed', err);
+        setIsPlaying(!nextPlaying);
+        const msg = err?.message || String(err);
+        const isAudioFocusError =
+          msg.toLowerCase().includes('audiofocus') ||
+          msg.toLowerCase().includes('audio focus') ||
+          msg.includes('AudioFocusNotAcquiredException');
+
+        if (isAudioFocusError) {
+          if (appStateRef.current !== 'active') {
+            pendingAudioFocusRetryRef.current = true;
+            Alert.alert(
+              'Playback blocked',
+              'Playback could not start because the app is not active. Return to the app and try again.',
+            );
+            return;
+          }
+
+          // Foreground but focus not acquired: retry once after resetting audio mode.
+          try {
+            await ensurePlaybackAudioMode();
+            await new Promise((r) => setTimeout(r, 250));
+            await video.playAsync();
+            setIsPlaying(true);
+            return;
+          } catch (retryErr: any) {
+            const retryMsg = retryErr?.message || msg;
+            Alert.alert(
+              'Playback blocked',
+              `Unable to acquire audio focus. Pause other audio (music/calls) and try again.\n\n${retryMsg}`,
+            );
+            return;
+          }
+        }
+
         Alert.alert('Playback error', msg);
       }
-    }
-  };
+    })();
+  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying]);
   const seekBy = async (deltaMillis: number) => {
     const video = videoRef.current;
     if (!video) return;
@@ -1383,6 +1940,11 @@ useEffect(() => {
   };
   const currentTimeLabel = formatTime(positionMillis);
   const totalTimeLabel = durationMillis ? formatTime(durationMillis) : '0:00';
+  const durationForUi = Math.max(1, durationMillis || 1);
+  const playedMillisForUi = Math.max(0, isSeeking ? seekPosition : positionMillis);
+  const bufferedMillisForUi = Math.max(playedMillisForUi, bufferedMillis);
+  const playedPctForUi = clamp01(playedMillisForUi / durationForUi);
+  const bufferedPctForUi = clamp01(bufferedMillisForUi / durationForUi);
   useEffect(() => {
     if (!isTvShow) {
       setEpisodeDrawerOpen(false);
@@ -1449,17 +2011,21 @@ useEffect(() => {
   };
   const handleBrightnessChange = useCallback(
     (value: number) => {
+      pendingBrightnessRef.current = value;
       setBrightness(value);
+      scheduleBrightnessApply(value);
       bumpControlsLife();
     },
-    [bumpControlsLife],
+    [bumpControlsLife, scheduleBrightnessApply],
   );
   const handleVolumeChange = useCallback(
     (value: number) => {
+      pendingVolumeRef.current = value;
       setVolume(value);
+      scheduleVolumeApply();
       bumpControlsLife();
     },
-    [bumpControlsLife],
+    [bumpControlsLife, scheduleVolumeApply],
   );
   const toggleLock = useCallback(() => {
     setIsLocked(prev => {
@@ -1477,7 +2043,8 @@ useEffect(() => {
     setIsPipActive(Boolean(event?.isPictureInPictureActive));
   }, []);
   const handlePipToggle = useCallback(async () => {
-    if (!isPipSupported || !videoRef.current) return;
+    if (!videoRef.current) return;
+    if (!pipUiEnabled) return;
     bumpControlsLife();
     const player = videoRef.current as any;
     const enterPip =
@@ -1493,7 +2060,14 @@ useEffect(() => {
         ? player.exitPictureInPictureAsync.bind(player)
         : null;
     if (!enterPip && !exitPip) {
-      setIsPipSupported(false);
+      if (Platform.OS === 'android') {
+        Alert.alert(
+          'Picture in Picture',
+          'PiP can start automatically when you press the Home button (if enabled in system settings).\n\nIf it still doesn\'t work, you may need a new dev build/app update with PiP enabled.',
+        );
+      } else {
+        setIsPipSupported(false);
+      }
       return;
     }
     try {
@@ -1507,14 +2081,19 @@ useEffect(() => {
     } catch (err) {
       console.warn('PiP toggle failed', err);
     }
-  }, [isPipActive, isPipSupported, bumpControlsLife]);
+  }, [isPipActive, pipUiEnabled, bumpControlsLife]);
+
   const handleQualitySelect = useCallback(
     async (option: QualityOption | null) => {
       if (!playbackSource) return;
       if (!option) {
         if (selectedQualityId === 'auto' && !qualityOverrideUri) return;
+        pendingSeekAfterReloadRef.current = positionMillis;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(null);
         setSelectedQualityId('auto');
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
         setVideoReloadKey((prev) => prev + 1);
         return;
       }
@@ -1522,8 +2101,12 @@ useEffect(() => {
       setQualityLoadingId(option.id);
       try {
         await preloadQualityVariant(option.uri, playbackSource.headers);
+        pendingSeekAfterReloadRef.current = positionMillis;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(option.uri);
         setSelectedQualityId(option.id);
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
         setVideoReloadKey((prev) => prev + 1);
       } catch (err) {
         console.warn('Quality preload failed', err);
@@ -1532,7 +2115,7 @@ useEffect(() => {
         setQualityLoadingId(null);
       }
     },
-    [playbackSource, selectedQualityId, qualityOverrideUri],
+    [playbackSource, selectedQualityId, qualityOverrideUri, positionMillis, isPlaying],
   );
   const getCaptionLabel = useCallback((caption: CaptionSource) => {
     if (caption.display) return caption.display;
@@ -1723,29 +2306,32 @@ useEffect(() => {
       Alert.alert('Episode unavailable', err?.message || 'Unable to load this episode.');
     }
   };
-  const videoPipProps = useMemo(() => ({ allowsPictureInPicture: isPipSupported }), [isPipSupported]);
+  const videoPipProps = useMemo(() => ({ allowsPictureInPicture: pipUiEnabled }), [pipUiEnabled]);
   return (
     <View style={styles.container}>
       <StatusBar hidden />
       <TouchableOpacity activeOpacity={1} style={styles.touchLayer} onPress={handleSurfacePress}>
         {transitionReady && videoPlaybackSource ? (
-          <Video
-            key={videoReloadKey}
-            ref={videoRef}
-            source={videoPlaybackSource}
-            style={styles.video}
-            resizeMode={ResizeMode.CONTAIN}
-            shouldPlay
-            useNativeControls={false}
-            onPlaybackStatusUpdate={handleStatusUpdate}
-            onError={handleVideoError}
-            onLoad={handleVideoLoad}
-            pointerEvents='none'
-            {...(videoPipProps as any)}
-            // @ts-ignore - presentPictureInPictureAsync exists at runtime
-            onPictureInPictureStatusUpdate={handlePipStatusUpdate}
-            onReadyForDisplay={handleVideoReadyForDisplay}
-          />
+          <>
+            <Video
+              key={videoReloadKey}
+              ref={videoRef}
+              source={videoPlaybackSource}
+              style={styles.video}
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay={isPlaying && !midrollActive && (appIsActive || isPipActive)}
+              useNativeControls={false}
+              onPlaybackStatusUpdate={handleStatusUpdate}
+              onError={handleVideoError}
+              onLoad={handleVideoLoad}
+              pointerEvents='none'
+              {...(videoPipProps as any)}
+              // @ts-ignore - presentPictureInPictureAsync exists at runtime
+              onPictureInPictureStatusUpdate={handlePipStatusUpdate}
+              onReadyForDisplay={handleVideoReadyForDisplay}
+            />
+            <VideoMaskingOverlay intensity={0.06} />
+          </>
         ) : (
           <View style={styles.videoFallback}>
             {shouldShowMovieFlixLoader ? null : (
@@ -1764,7 +2350,39 @@ useEffect(() => {
             variant={loaderVariant}
           />
         )}
-        {!showControls && !isLocked ? (
+        {transitionReady && videoPlaybackSource && showBufferingOverlay && !scrapeError ? (
+          <BufferingPill message="Buffering…" />
+        ) : null}
+        {transitionReady && videoPlaybackSource && midrollActive ? (
+          <View style={styles.midrollOverlay} pointerEvents="auto">
+            <LinearGradient
+              colors={['rgba(0,0,0,0.92)', 'rgba(0,0,0,0.70)', 'rgba(0,0,0,0.92)'] as const}
+              style={StyleSheet.absoluteFillObject}
+            />
+            <View style={styles.midrollHeader}>
+              <View style={styles.midrollBadge}>
+                <Text style={styles.midrollBadgeText}>Sponsored</Text>
+              </View>
+              <Text style={styles.midrollCountdown}>{`Ad ends in ${midrollRemainingSec}s`}</Text>
+            </View>
+
+            <View style={styles.midrollBody}>
+              {midrollProduct ? (
+                <NativeAdCard
+                  product={midrollProduct}
+                  onPress={() => {
+                    if (!midrollProduct?.id) return;
+                    router.push((`/marketplace/${midrollProduct.id}`) as any);
+                  }}
+                />
+              ) : (
+                <View style={styles.midrollPlaceholder} />
+              )}
+              <Text style={styles.midrollNote}>Free plan ad break</Text>
+            </View>
+          </View>
+        ) : null}
+        {!showControls && !isLocked && !midrollActive ? (
           <Pressable style={styles.touchCatcher} onPress={handleSurfacePress} />
         ) : null}
         {showControls && !isLocked && (
@@ -2144,30 +2762,45 @@ useEffect(() => {
                   <Text style={styles.timeText}>{totalTimeLabel}</Text>
                 </View>
                 <View style={styles.progressContainerNoCard}>
-                  <Slider
-                    style={styles.progressBar}
-                    minimumValue={0}
-                    maximumValue={durationMillis || 1}
-                    value={seekPosition}
-                    onSlidingStart={() => {
-                      setIsSeeking(true);
-                      bumpControlsLife();
-                    }}
-                    onValueChange={val => {
-                      setSeekPosition(val);
-                      bumpControlsLife();
-                    }}
-                    onSlidingComplete={async val => {
-                      setIsSeeking(false);
-                      await videoRef.current?.setPositionAsync(val);
-                      // Snap captions immediately after a seek.
-                      updateActiveCaption(val, true);
-                      bumpControlsLife();
-                    }}
-                    minimumTrackTintColor="#ff5f6d"
-                    maximumTrackTintColor="rgba(255,255,255,0.2)"
-                    thumbTintColor="#fff"
-                  />
+                  <View style={styles.progressTrackWrap}>
+                    <View style={styles.progressTrackBase} />
+                    <View
+                      style={[
+                        styles.progressTrackBuffered,
+                        { width: `${Math.round(bufferedPctForUi * 1000) / 10}%` },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        styles.progressTrackPlayed,
+                        { width: `${Math.round(playedPctForUi * 1000) / 10}%` },
+                      ]}
+                    />
+                    <Slider
+                      style={styles.progressBarOverlay}
+                      minimumValue={0}
+                      maximumValue={durationForUi}
+                      value={seekPosition}
+                      onSlidingStart={() => {
+                        setIsSeeking(true);
+                        bumpControlsLife();
+                      }}
+                      onValueChange={(val) => {
+                        setSeekPosition(val);
+                        bumpControlsLife();
+                      }}
+                      onSlidingComplete={async (val) => {
+                        setIsSeeking(false);
+                        await videoRef.current?.setPositionAsync(val);
+                        // Snap captions immediately after a seek.
+                        updateActiveCaption(val, true);
+                        bumpControlsLife();
+                      }}
+                      minimumTrackTintColor="transparent"
+                      maximumTrackTintColor="transparent"
+                      thumbTintColor="#fff"
+                    />
+                  </View>
                 </View>
               </View>
               {/* Bottom actions */}
@@ -2194,7 +2827,7 @@ useEffect(() => {
                     {isLocked ? "Locked" : "Lock"}
                   </Text>
                 </TouchableOpacity>
-                {isPipSupported ? (
+                {pipUiEnabled ? (
                   <TouchableOpacity
                     style={styles.bottomButton}
                     onPress={handlePipToggle}
@@ -2300,6 +2933,18 @@ const MovieFlixLoader: React.FC<{ message: string; variant?: 'solid' | 'transpar
     </View>
   );
 };
+
+const BufferingPill: React.FC<{ message: string }> = ({ message }) => {
+  if (!message) return null;
+  return (
+    <View pointerEvents="none" style={styles.bufferPillWrap}>
+      <View style={styles.bufferPill}>
+        <ActivityIndicator size="small" color="#fff" style={{ marginRight: 10 }} />
+        <Text style={styles.bufferPillText}>{message}</Text>
+      </View>
+    </View>
+  );
+};
 function parseCaptionPayload(payload: string, type: 'srt' | 'vtt'): CaptionCue[] {
   const sanitized = payload.replace(/\r/g, '').replace('\uFEFF', '');
   const content = type === 'vtt' ? sanitized.replace(/^WEBVTT.*\n/, '') : sanitized;
@@ -2356,7 +3001,12 @@ function parseHlsAudioTracks(manifest: string): AudioTrackOption[] {
     const isDefault = attrs.DEFAULT === 'YES';
 
     options.push({
-      id: `${groupId || 'audio'}:${language || name || idx}`,
+      id: buildAudioTrackOptionId({
+        groupId,
+        language,
+        name,
+        index: idx,
+      }),
       name,
       language,
       groupId,
@@ -2365,6 +3015,30 @@ function parseHlsAudioTracks(manifest: string): AudioTrackOption[] {
   });
 
   return options;
+}
+
+function buildAudioTrackOptionId(params: {
+  groupId?: string;
+  language?: string;
+  name?: string;
+  index: number;
+}): string {
+  const segments = [params.groupId, params.language, params.name]
+    .map((segment) => sanitizeKeySegment(segment))
+    .filter(Boolean) as string[];
+  const base = segments.length ? segments.join('__') : 'audio-track';
+  return `${base}-${params.index}`;
+}
+
+function sanitizeKeySegment(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || undefined;
 }
 function parseHlsQualityOptions(manifest: string, manifestUrl: string): QualityOption[] {
   const lines = manifest.split('\n');
@@ -2451,7 +3125,10 @@ async function preloadQualityVariant(uri: string, headers?: Record<string, strin
       .find((line) => line.length > 0 && !line.startsWith('#'));
     if (firstSegment) {
       const absoluteSegment = resolveRelativeUrl(firstSegment, uri);
-      fetch(absoluteSegment, { headers }).catch(() => {});
+      const segRes = await fetch(absoluteSegment, { headers, signal: controller.signal });
+      if (!segRes.ok) {
+        throw new Error(`Segment request failed (${segRes.status})`);
+      }
     }
   } finally {
     clearTimeout(timeout);
@@ -2463,6 +3140,7 @@ type PreloadStreamWindowOptions = {
   maxSegments: number;
   concurrency: number;
   seen?: Set<string>;
+  startAtSeconds?: number;
 };
 
 function isHlsMasterManifest(text: string): boolean {
@@ -2593,10 +3271,28 @@ async function preloadStreamWindow(
     const concurrency = Math.max(1, options.concurrency);
     const seen = options.seen;
 
+    const isVod = variantText.includes('#EXT-X-ENDLIST');
+    let startIndex = 0;
+    if (!isVod) {
+      // For live streams, prefetch the newest segments.
+      startIndex = Math.max(0, segments.length - Math.min(maxSegments, 30));
+    } else if (typeof options.startAtSeconds === 'number' && options.startAtSeconds > 0) {
+      let accSeconds = 0;
+      for (let i = 0; i < segments.length; i += 1) {
+        accSeconds += segments[i].duration ?? 6;
+        if (accSeconds >= options.startAtSeconds) {
+          startIndex = Math.min(segments.length - 1, i + 1);
+          break;
+        }
+      }
+    }
+
     const toFetch: string[] = [];
     let accSeconds = 0;
-    for (const seg of segments) {
+    for (let i = startIndex; i < segments.length; i += 1) {
       if (toFetch.length >= maxSegments) break;
+
+      const seg = segments[i];
       if (seen && seen.has(seg.uri)) continue;
 
       toFetch.push(seg.uri);
@@ -2699,6 +3395,54 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 18,
     justifyContent: 'space-between',
+  },
+  midrollOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    paddingHorizontal: 18,
+    paddingVertical: 24,
+    justifyContent: 'space-between',
+  },
+  midrollHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  midrollBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(229,9,20,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.30)',
+  },
+  midrollBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+  },
+  midrollCountdown: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  midrollBody: {
+    alignItems: 'center',
+    gap: 14,
+  },
+  midrollPlaceholder: {
+    height: 86,
+    width: '100%',
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  midrollNote: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 12,
+    fontWeight: '700',
   },
   topGradient: {
     position: 'absolute',
@@ -2973,10 +3717,47 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 32,
   },
+  progressBarOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: '100%',
+    height: 32,
+  },
   progressContainerNoCard: {
     width: '100%',
     marginTop: 8,
     paddingHorizontal: 6,
+  },
+  progressTrackWrap: {
+    width: '100%',
+    height: 32,
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  progressTrackBase: {
+    width: '100%',
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  progressTrackBuffered: {
+    position: 'absolute',
+    left: 0,
+    top: 13,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.30)',
+  },
+  progressTrackPlayed: {
+    position: 'absolute',
+    left: 0,
+    top: 13,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#ff5f6d',
   },
   progressLabels: {
     flexDirection: 'row',
@@ -3229,6 +4010,28 @@ const styles = StyleSheet.create({
   },
   loaderOverlayTransparent: {
     backgroundColor: 'rgba(5,6,15,0.45)',
+  },
+  bufferPillWrap: {
+    position: 'absolute',
+    top: 16,
+    alignSelf: 'center',
+    zIndex: 40,
+  },
+  bufferPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(5,6,15,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  bufferPillText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.2,
   },
   loaderTitle: {
     color: '#e50914',

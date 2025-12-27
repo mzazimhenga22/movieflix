@@ -4,6 +4,7 @@ import {
     arrayUnion,
     collection,
     doc,
+    deleteDoc,
     getDocs,
     increment,
     limit,
@@ -360,6 +361,53 @@ export function useSocialReactions() {
     Alert.alert('Share', `Share review ${id}`);
   };
 
+  const deleteReview = useCallback(
+    async (id: ReviewItem['id']) => {
+      const target = reviews.find((r) => r.id === id);
+      if (!target) return;
+      if (!user?.uid || !target.userId || String(target.userId) !== String(user.uid)) return;
+
+      // optimistic
+      setReviews((prev) => prev.filter((r) => r.id !== id));
+
+      try {
+        if (target.origin === 'supabase') {
+          if (!supabaseConfigured) return;
+          const { error } = await supabase
+            .from('posts')
+            .delete()
+            .eq('id', target.id)
+            .or(`userId.eq.${user.uid},user_id.eq.${user.uid}`);
+          if (error) throw error;
+          return;
+        }
+
+        const docId = target.docId ?? (typeof target.id === 'string' ? target.id : null);
+        if (!docId) return;
+
+        // best-effort delete subcollection comments first
+        try {
+          const commentsRef = collection(firestore, 'reviews', docId, 'comments');
+          const commentsSnap = await getDocs(query(commentsRef, limit(250)));
+          await Promise.all(commentsSnap.docs.map((d) => deleteDoc(d.ref)));
+        } catch (err) {
+          console.warn('Failed to delete review comments', err);
+        }
+
+        await deleteDoc(doc(firestore, 'reviews', docId));
+      } catch (err) {
+        console.warn('Failed to delete review', err);
+        // rollback
+        setReviews((prev) => {
+          const exists = prev.some((r) => r.id === id);
+          if (exists) return prev;
+          return [target, ...prev];
+        });
+      }
+    },
+    [reviews, user?.uid],
+  );
+
   const shuffleReviews = useCallback(() => {
     setReviews((prev) => {
       const a = [...prev];
@@ -383,6 +431,7 @@ export function useSocialReactions() {
     handleComment,
     handleWatch,
     handleShare,
+    deleteReview,
   } as const;
 }
 

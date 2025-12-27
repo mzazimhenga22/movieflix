@@ -23,6 +23,8 @@ import {
   getActiveDownloads,
   subscribeToDownloadEvents,
 } from '../../lib/downloadEvents';
+import { cancelDownload, pauseDownload, resumeDownload } from '../../lib/downloadManager';
+import { removeDownloadRecord } from '../../lib/fileUtils';
 import { getProfileScopedKey } from '../../lib/profileStorage';
 import { DownloadItem } from '../../types';
 
@@ -155,13 +157,13 @@ const DownloadsScreen = () => {
     (event: DownloadEvent) => {
       setActiveDownloads((prev) => {
         const rest = prev.filter((e) => e.sessionId !== event.sessionId);
-        if (event.status === 'completed' || event.status === 'error') {
+        if (event.status === 'completed' || event.status === 'error' || event.status === 'cancelled') {
           return rest;
         }
         return [...rest, event];
       });
 
-      if (event.status === 'completed' || event.status === 'error') {
+      if (event.status === 'completed' || event.status === 'error' || event.status === 'cancelled') {
         loadDownloads();
       }
     },
@@ -267,10 +269,16 @@ const DownloadsScreen = () => {
         style: 'destructive',
         onPress: async () => {
           try {
+            await cancelDownload(item.id);
+          } catch {}
+          try {
             await FileSystem.deleteAsync(
               item.containerPath ?? item.localUri,
               { idempotent: true },
             );
+          } catch {}
+          try {
+            await removeDownloadRecord(item.id);
           } catch {}
           setDownloads((prev) => prev.filter((d) => d.id !== item.id));
         },
@@ -338,10 +346,26 @@ const DownloadsScreen = () => {
                     {item.title}
                   </Text>
                   <View style={styles.activeDownloadControls}>
-                    <TouchableOpacity style={styles.controlButton}>
-                      <Ionicons name="pause" size={16} color="#fff" />
+                    <TouchableOpacity
+                      style={styles.controlButton}
+                      onPress={() => {
+                        if (item.status === 'paused') {
+                          void resumeDownload(item.sessionId);
+                        } else if (item.status === 'downloading' || item.status === 'preparing' || item.status === 'queued') {
+                          void pauseDownload(item.sessionId);
+                        }
+                      }}
+                    >
+                      <Ionicons
+                        name={item.status === 'paused' ? 'play' : 'pause'}
+                        size={16}
+                        color="#fff"
+                      />
                     </TouchableOpacity>
-                    <TouchableOpacity style={[styles.controlButton, styles.cancelButton]}>
+                    <TouchableOpacity
+                      style={[styles.controlButton, styles.cancelButton]}
+                      onPress={() => void cancelDownload(item.sessionId)}
+                    >
                       <Ionicons name="close" size={16} color="#ffb0b0" />
                     </TouchableOpacity>
                   </View>
@@ -354,7 +378,15 @@ const DownloadsScreen = () => {
                     ]}
                   />
                 </View>
-                <Text style={styles.activeDownloadPercent}>{pct}%</Text>
+                <Text style={styles.activeDownloadPercent}>
+                  {item.status === 'queued'
+                    ? 'Queued'
+                    : item.status === 'preparing'
+                    ? 'Preparing'
+                    : item.status === 'paused'
+                    ? `Paused • ${pct}%`
+                    : `${pct}%`}
+                </Text>
               </View>
             );
           })}

@@ -8,6 +8,7 @@ import {
 } from 'firebase/auth'
 
 import { notifyPush } from '@/lib/pushApi'
+import { setLastAuthUid } from '@/lib/profileStorage'
 
 import {
     DatabaseReference,
@@ -271,6 +272,8 @@ export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
         // Signed in
         lastUid = user.uid
         lastPresenceUid = user.uid
+
+        void setLastAuthUid(user.uid)
 
         // Firestore status update (optional but good)
         void updateUserStatus(user.uid, 'online')

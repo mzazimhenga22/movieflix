@@ -8,7 +8,6 @@ import type {
   Stream,
 } from '../../providers-temp/lib/index.js';
 import {
-  createM3U8ProxyUrl,
   makeProviders,
   makeStandardFetcher,
   targets,
@@ -24,6 +23,11 @@ export type PStreamPlayback = {
   stream: Stream;
   sourceId: string;
   embedId?: string;
+};
+
+export type PStreamScrapeOptions = {
+  sourceOrder?: string[];
+  debugTag?: string;
 };
 
 type Embed = {
@@ -122,6 +126,26 @@ type LastKnownProvider = {
 
 const LAST_KNOWN_COLLECTION = 'pstreamLastKnown';
 
+const MEMORY_CACHE_TTL_MS = 2 * 60 * 1000;
+const playbackMemoryCache = new Map<string, { playback: PStreamPlayback; storedAt: number }>();
+const inflightScrapes = new Map<string, Promise<PStreamPlayback>>();
+const lastKnownMemoryCache = new Map<string, { value: LastKnownProvider; storedAt: number }>();
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('timeout')), ms);
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+  });
+}
+
 function normalizeKeySegment(value: string | number | undefined | null) {
   if (value === undefined || value === null) return 'na';
   return String(value).replace(/[^a-zA-Z0-9-_:.]/g, '_');
@@ -146,11 +170,18 @@ function buildMediaKey(media: ScrapeMedia): string {
 }
 
 async function fetchLastKnownProvider(media: ScrapeMedia): Promise<LastKnownProvider | null> {
+  const key = buildMediaKey(media);
+  const cached = lastKnownMemoryCache.get(key);
+  if (cached && Date.now() - cached.storedAt < MEMORY_CACHE_TTL_MS) {
+    return cached.value;
+  }
   try {
-    const ref = doc(firestore, LAST_KNOWN_COLLECTION, buildMediaKey(media));
+    const ref = doc(firestore, LAST_KNOWN_COLLECTION, key);
     const snap = await getDoc(ref);
     if (!snap.exists()) return null;
-    return snap.data() as LastKnownProvider;
+    const data = snap.data() as LastKnownProvider;
+    lastKnownMemoryCache.set(key, { value: data, storedAt: Date.now() });
+    return data;
   } catch (err) {
     console.warn('[PStream] Last-known lookup failed', err);
     return null;
@@ -159,7 +190,21 @@ async function fetchLastKnownProvider(media: ScrapeMedia): Promise<LastKnownProv
 
 function persistLastKnownProvider(media: ScrapeMedia, playback: PStreamPlayback) {
   try {
-    const ref = doc(firestore, LAST_KNOWN_COLLECTION, buildMediaKey(media));
+    const key = buildMediaKey(media);
+    lastKnownMemoryCache.set(
+      key,
+      {
+        value: {
+          sourceId: playback.sourceId,
+          embedId: playback.embedId ?? null,
+          updatedAt: Date.now(),
+          type: (media as any)?.type ?? 'unknown',
+        },
+        storedAt: Date.now(),
+      },
+    );
+
+    const ref = doc(firestore, LAST_KNOWN_COLLECTION, key);
     void setDoc(
       ref,
       {
@@ -211,9 +256,43 @@ function prioritizeEmbeds(embeds: Embed[], preferred?: string | null): Embed[] {
 
 const QUALITY_ORDER: Qualities[] = ['4k', '1080', '720', '480', '360', 'unknown'];
 
+function sanitizeStreamHeaders(incoming?: Record<string, string>) {
+  if (!incoming) return undefined;
+  const out: Record<string, string> = {};
+
+  for (const [rawKey, rawValue] of Object.entries(incoming)) {
+    if (!rawKey) continue;
+    if (rawValue === undefined || rawValue === null) continue;
+    const value = String(rawValue);
+    if (!value) continue;
+    const lower = rawKey.trim().toLowerCase();
+    if (!lower) continue;
+
+    // Avoid pinning Host; native players/CDN redirects may require Host to change.
+    if (lower === 'host' || lower === 'content-length') continue;
+
+    switch (lower) {
+      case 'user-agent':
+        out['User-Agent'] = value;
+        break;
+      case 'referer':
+        out.Referer = value;
+        break;
+      case 'origin':
+        out.Origin = value;
+        break;
+      default:
+        out[rawKey] = value;
+        break;
+    }
+  }
+
+  return Object.keys(out).length ? out : undefined;
+}
+
 function mergeHeaders(stream: Stream) {
-  const h = { ...(stream.headers ?? {}), ...(stream.preferredHeaders ?? {}) };
-  return Object.keys(h).length ? h : undefined;
+  const merged = { ...(stream.headers ?? {}), ...(stream.preferredHeaders ?? {}) };
+  return sanitizeStreamHeaders(merged);
 }
 
 function pickFileQuality(stream: Stream): string | null {
@@ -278,19 +357,57 @@ function tryUnproxyM3U8ProxyUrl(
   }
 }
 
+async function validatePlayback(playback: PStreamPlayback): Promise<boolean> {
+  const uri = playback?.uri;
+  if (!uri) return false;
+  const headers = (playback.headers ?? {}) as Record<string, string>;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5500);
+  try {
+    const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
+    if (isHls) {
+      // Try a small ranged fetch first (faster on some CDNs), fall back to full manifest.
+      try {
+        const res = await fetch(uri, {
+          headers: { ...headers, Range: 'bytes=0-2047' },
+          signal: controller.signal,
+        });
+        if (!res.ok) return false;
+        const text = await res.text();
+        return text.includes('#EXTM3U');
+      } catch {
+        const res = await fetch(uri, { headers, signal: controller.signal });
+        if (!res.ok) return false;
+        const text = await res.text();
+        return text.includes('#EXTM3U');
+      }
+    }
+
+    // Prefer HEAD, fall back to a small ranged GET.
+    try {
+      const head = await fetch(uri, { method: 'HEAD', headers, signal: controller.signal });
+      if (head.ok) return true;
+    } catch {
+      // ignore
+    }
+    const ranged = await fetch(uri, {
+      headers: { ...headers, Range: 'bytes=0-1023' },
+      signal: controller.signal,
+    });
+    return ranged.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function buildPlayback(stream: Stream, sourceId: string, embedId?: string): PStreamPlayback {
   let uri: string | null = null;
   let headers = mergeHeaders(stream);
 
   if (stream.type === 'hls') {
     uri = stream.playlist;
-
-    // HLS often needs the proxy so headers (referer/origin/etc) apply to the playlist AND every segment.
-    // Also protects against playlists that reference hosts the device cannot resolve.
-    if (headers && Object.keys(headers).length) {
-      uri = createM3U8ProxyUrl(uri, undefined, headers);
-      headers = undefined;
-    }
   } else if (stream.type === 'file') {
     uri = pickFileQuality(stream);
 
@@ -382,101 +499,142 @@ export function usePStream() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PStreamPlayback | null>(null);
 
-  const scrape = useCallback(
-    async (media: ScrapeMedia, options?: { sourceOrder?: string[]; debugTag?: string }) => {
-      setLoading(true);
-      setError(null);
-      setResult(null);
+  const scrape = useCallback(async (media: ScrapeMedia, options?: PStreamScrapeOptions) => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
 
-      try {
-        const providers = getProviders();
-        const lastKnown = await fetchLastKnownProvider(media);
-        const baseOrder = options?.sourceOrder?.length ? [...options.sourceOrder] : [...FALLBACK_SOURCES];
-        const sourceOrder = reorderWithPreference(baseOrder, lastKnown?.sourceId);
-        let abortSources = false;
-
-        if (options?.debugTag) console.log('[PStream]', options.debugTag, media);
-
-        const tryEmbed = async (sourceId: string, embedId: string): Promise<PStreamPlayback | null> => {
-          if (abortSources) return null;
-          try {
-            const embedRun = await providers.runAll({
-              media,
-              sourceOrder: [sourceId],
-              embedOrder: [embedId],
-              disableOpensubtitles: true,
-            });
-            if (embedRun?.stream) {
-              return buildPlayback(embedRun.stream, sourceId, embedId);
-            }
-          } catch (err: any) {
-            console.warn('[PStream] Embed failed:', embedId, err?.message ?? err);
-          }
-          return null;
-        };
-
-        const trySource = async (sourceId: string): Promise<PStreamPlayback | null> => {
-          if (abortSources) return null;
-          try {
-            const discovery: RunOutputWithEmbeds | null = await providers.runAll({
-              media,
-              sourceOrder: [sourceId],
-              disableOpensubtitles: true,
-            });
-
-            if (!discovery) return null;
-
-            if (discovery.stream) {
-              try {
-                return buildPlayback(discovery.stream, sourceId);
-              } catch (err: any) {
-                console.warn('[PStream] Stream build failed:', sourceId, err?.message ?? err);
-              }
-            }
-
-            let embeds = orderEmbedsEnglishFirst(discovery.embeds ?? []);
-            if (lastKnown?.sourceId === sourceId && lastKnown.embedId) {
-              embeds = prioritizeEmbeds(embeds, lastKnown.embedId);
-            }
-            if (!embeds.length) return null;
-
-            return runWithSlidingWindow(
-              embeds,
-              EMBED_CONCURRENCY,
-              (embed) => tryEmbed(sourceId, embed.embedScraperId),
-            );
-          } catch (err: any) {
-            console.warn('[PStream] Source failed:', sourceId, err?.message ?? err);
-            return null;
-          }
-        };
-
-        const playback = await runWithSlidingWindow(
-          sourceOrder,
-          SOURCE_CONCURRENCY,
-          trySource,
-          () => {
-            abortSources = true;
-          },
-        );
-        if (!playback) {
-          throw new Error('No playable stream found');
-        }
-
-        setResult(playback);
-        persistLastKnownProvider(media, playback);
-        return playback;
-      } catch (e: any) {
-        setError(e?.message ?? 'Stream error');
-        throw e;
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
+    try {
+      const playback = await scrapePStream(media, options);
+      setResult(playback);
+      return playback;
+    } catch (e: any) {
+      setError(e?.message ?? 'Stream error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   return { loading, error, result, scrape };
+}
+
+export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeOptions) {
+  const mediaKey = buildMediaKey(media);
+  const cached = playbackMemoryCache.get(mediaKey);
+  if (cached && Date.now() - cached.storedAt < MEMORY_CACHE_TTL_MS) {
+    return cached.playback;
+  }
+
+  const inflight = inflightScrapes.get(mediaKey);
+  if (inflight) return inflight;
+
+  const task = (async () => {
+    const providers = getProviders();
+    const lastKnownPromise = fetchLastKnownProvider(media);
+    const baseOrder = options?.sourceOrder?.length ? [...options.sourceOrder] : [...FALLBACK_SOURCES];
+
+    let lastKnown: LastKnownProvider | null = null;
+    try {
+      lastKnown = await withTimeout(lastKnownPromise, 650);
+    } catch {
+      lastKnown = null;
+    }
+
+    const sourceOrder = reorderWithPreference(baseOrder, lastKnown?.sourceId);
+    let abortSources = false;
+
+    if (options?.debugTag) console.log('[PStream]', options.debugTag, media);
+
+    const tryEmbed = async (sourceId: string, embedId: string): Promise<PStreamPlayback | null> => {
+      if (abortSources) return null;
+      try {
+        const embedRun = await providers.runAll({
+          media,
+          sourceOrder: [sourceId],
+          embedOrder: [embedId],
+          disableOpensubtitles: true,
+        });
+        if (embedRun?.stream) {
+          const playback = buildPlayback(embedRun.stream, sourceId, embedId);
+          const ok = await validatePlayback(playback);
+          if (!ok) {
+            console.warn('[PStream] Invalid stream (embed)', {
+              sourceId,
+              embedId,
+              type: playback.stream?.type,
+              uri: playback.uri.slice(0, 96),
+            });
+            return null;
+          }
+          return playback;
+        }
+      } catch (err: any) {
+        console.warn('[PStream] Embed failed:', embedId, err?.message ?? err);
+      }
+      return null;
+    };
+
+    const trySource = async (sourceId: string): Promise<PStreamPlayback | null> => {
+      if (abortSources) return null;
+      try {
+        const discovery: RunOutputWithEmbeds | null = await providers.runAll({
+          media,
+          sourceOrder: [sourceId],
+          disableOpensubtitles: true,
+        });
+
+        if (!discovery) return null;
+
+        if (discovery.stream) {
+          try {
+            const playback = buildPlayback(discovery.stream, sourceId);
+            const ok = await validatePlayback(playback);
+            if (ok) return playback;
+            console.warn('[PStream] Invalid stream (source)', {
+              sourceId,
+              type: playback.stream?.type,
+              uri: playback.uri.slice(0, 96),
+            });
+          } catch (err: any) {
+            console.warn('[PStream] Stream build failed:', sourceId, err?.message ?? err);
+          }
+        }
+
+        let embeds = orderEmbedsEnglishFirst(discovery.embeds ?? []);
+        if (lastKnown?.sourceId === sourceId && lastKnown.embedId) {
+          embeds = prioritizeEmbeds(embeds, lastKnown.embedId);
+        }
+        if (!embeds.length) return null;
+
+        return runWithSlidingWindow(embeds, EMBED_CONCURRENCY, (embed) =>
+          tryEmbed(sourceId, embed.embedScraperId),
+        );
+      } catch (err: any) {
+        console.warn('[PStream] Source failed:', sourceId, err?.message ?? err);
+        return null;
+      }
+    };
+
+    const playback = await runWithSlidingWindow(sourceOrder, SOURCE_CONCURRENCY, trySource, () => {
+      abortSources = true;
+    });
+
+    if (!playback) {
+      throw new Error('No playable stream found');
+    }
+
+    playbackMemoryCache.set(mediaKey, { playback, storedAt: Date.now() });
+    persistLastKnownProvider(media, playback);
+    return playback;
+  })();
+
+  inflightScrapes.set(mediaKey, task);
+  try {
+    return await task;
+  } finally {
+    inflightScrapes.delete(mediaKey);
+  }
 }
 
 export default usePStream;

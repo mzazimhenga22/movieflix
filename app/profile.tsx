@@ -33,6 +33,7 @@ import {
   arrayRemove,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -491,6 +492,54 @@ const ProfileScreen: React.FC = () => {
     Alert.alert('Coming soon', 'Sharing clips from your profile is coming soon.');
   }, []);
 
+  const handleReviewDelete = useCallback(
+    async (review: FeedCardItem) => {
+      if (!currentUser?.uid) return;
+      const ownerId = review.userId ? String(review.userId) : null;
+      if (!ownerId || ownerId !== String(currentUser.uid)) return;
+
+      // optimistic
+      setReviewFeed((prev) => prev.filter((it) => it.id !== review.id));
+      setReviewsCount((c) => Math.max(0, c - 1));
+
+      try {
+        if (review.origin === 'supabase') {
+          if (!supabaseConfigured) return;
+          const { error } = await supabase
+            .from('posts')
+            .delete()
+            .eq('id', review.id)
+            .or(`userId.eq.${currentUser.uid},user_id.eq.${currentUser.uid}`);
+          if (error) throw error;
+          return;
+        }
+
+        const docId = review.docId ?? (typeof review.id === 'string' ? review.id : null);
+        if (!docId) return;
+
+        try {
+          const commentsRef = collection(firestore, 'reviews', docId, 'comments');
+          const commentsSnap = await getDocs(query(commentsRef, limit(250)));
+          await Promise.all(commentsSnap.docs.map((d) => deleteDoc(d.ref)));
+        } catch (err) {
+          console.warn('[profile] failed to delete review comments', err);
+        }
+
+        await deleteDoc(doc(firestore, 'reviews', docId));
+      } catch (err) {
+        console.warn('[profile] failed to delete review', err);
+        // rollback
+        setReviewFeed((prev) => {
+          const exists = prev.some((it) => it.id === review.id);
+          if (exists) return prev;
+          return [review, ...prev];
+        });
+        setReviewsCount((c) => c + 1);
+      }
+    },
+    [currentUser?.uid, setReviewFeed, setReviewsCount],
+  );
+
   const favoriteGenres = userProfile?.favoriteGenres ?? [];
   const accentColor = getAccentFromPosterPath(
     userProfile?.favoriteColor || (favoriteGenres[0] as string | undefined)
@@ -823,6 +872,7 @@ const ProfileScreen: React.FC = () => {
                     onWatch={handleReviewWatch}
                     onShare={handleReviewShare}
                     onBookmark={handleReviewBookmark}
+                    onDelete={handleReviewDelete}
                     enableStreaks={false}
                   />
                 </View>

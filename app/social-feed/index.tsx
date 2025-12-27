@@ -83,6 +83,7 @@ const SocialFeed = () => {
     handleComment,
     handleWatch,
     handleShare,
+    deleteReview,
   } = useSocialReactions();
 
   const scrollY = useRef(new Animated.Value(0)).current;
@@ -663,6 +664,7 @@ const SocialFeed = () => {
                     onWatch={handleWatch}
                     onShare={handleShare}
                     onBookmark={handleBookmark}
+                    onDelete={(it) => deleteReview((it as any).id)}
                     currentPlan={currentPlan}
                     enableStreaks
                   />

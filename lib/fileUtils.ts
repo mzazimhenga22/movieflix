@@ -30,7 +30,7 @@ export async function persistDownloadRecord(record: Partial<DownloadItem>): Prom
   const stored = await AsyncStorage.getItem(key);
   const existing: DownloadItem[] = stored ? JSON.parse(stored) : [];
   const entry: DownloadItem = {
-    id: `${record.mediaId ?? 'download'}-${Date.now()}`,
+    id: record.id ?? `${record.mediaId ?? 'download'}-${Date.now()}`,
     ...record,
   } as DownloadItem;
   try {
@@ -40,4 +40,12 @@ export async function persistDownloadRecord(record: Partial<DownloadItem>): Prom
     throw err;
   }
   return entry;
+}
+
+export async function removeDownloadRecord(id: string): Promise<void> {
+  const key = await getProfileScopedKey('downloads');
+  const stored = await AsyncStorage.getItem(key);
+  const existing: DownloadItem[] = stored ? JSON.parse(stored) : [];
+  const next = existing.filter((item) => item?.id !== id);
+  await AsyncStorage.setItem(key, JSON.stringify(next));
 }

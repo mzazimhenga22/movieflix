@@ -1,5 +1,13 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
+export type HlsVariantOption = {
+  id: string;
+  label: string;
+  url: string;
+  bandwidth?: number;
+  resolution?: string;
+};
+
 export type DownloadHlsResult = {
   playlistPath: string;
   directory: string;
@@ -13,6 +21,8 @@ type DownloadHlsOptions = {
   rootDir: string;
   sessionName: string;
   onProgress?: (completed: number, total: number) => void;
+  concurrency?: number;
+  shouldCancel?: () => boolean | 'pause' | 'cancel';
 };
 
 // Helpers
@@ -58,6 +68,78 @@ async function fetchPlaylist(url: string, headers?: Record<string, string>) {
   return await res.text();
 }
 
+const getResolutionHeight = (resolution?: string) => {
+  if (!resolution) return 0;
+  const parts = resolution.split('x');
+  if (parts.length !== 2) return 0;
+  const height = parseInt(parts[1], 10);
+  return Number.isFinite(height) ? height : 0;
+};
+
+const formatBandwidth = (bandwidth?: number) => {
+  if (!bandwidth || !Number.isFinite(bandwidth) || bandwidth <= 0) return '';
+  const kbps = bandwidth / 1000;
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${Math.round(kbps)} kbps`;
+};
+
+const buildVariantLabel = (resolution?: string, bandwidth?: number) => {
+  const height = getResolutionHeight(resolution);
+  if (height) {
+    const bw = formatBandwidth(bandwidth);
+    return bw ? `${height}p • ${bw}` : `${height}p`;
+  }
+  const bw = formatBandwidth(bandwidth);
+  return bw || 'Variant';
+};
+
+export async function getHlsVariantOptions(
+  playlistUrl: string,
+  headers?: Record<string, string>,
+): Promise<HlsVariantOption[] | null> {
+  const text = await fetchPlaylist(playlistUrl, headers);
+  if (!text.includes('#EXT-X-STREAM-INF')) return null;
+
+  const lines = text.split('\n');
+  const options: HlsVariantOption[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+    const [, attrString = ''] = line.split(':', 2);
+    const attrs = parseAttributeDictionary(attrString);
+    const resolution = stripQuotes(attrs.RESOLUTION);
+    const bandwidth = attrs.BANDWIDTH ? parseInt(attrs.BANDWIDTH, 10) : undefined;
+
+    let j = i + 1;
+    let uriLine: string | undefined;
+    while (j < lines.length) {
+      const candidate = lines[j].trim();
+      j += 1;
+      if (!candidate || candidate.startsWith('#')) continue;
+      uriLine = candidate;
+      break;
+    }
+    if (!uriLine) continue;
+    const url = resolveUrl(playlistUrl, uriLine);
+    options.push({
+      id: `${bandwidth ?? 0}-${resolution ?? url}`,
+      label: buildVariantLabel(resolution, bandwidth),
+      url,
+      bandwidth,
+      resolution,
+    });
+  }
+
+  return options.sort((a, b) => {
+    const aH = getResolutionHeight(a.resolution);
+    const bH = getResolutionHeight(b.resolution);
+    if (aH && bH) return bH - aH;
+    if (a.bandwidth && b.bandwidth) return (b.bandwidth || 0) - (a.bandwidth || 0);
+    return 0;
+  });
+}
+
 const pickBestVariantUrl = (playlistText: string, baseUrl: string) => {
   let bestUrl: string | null = null;
   let bestBandwidth = -1;
@@ -97,6 +179,8 @@ export async function downloadHlsPlaylist({
   rootDir,
   sessionName,
   onProgress,
+  concurrency = 3,
+  shouldCancel,
 }: DownloadHlsOptions): Promise<DownloadHlsResult | null> {
   try {
     const sessionDir = `${rootDir}/${sessionName}`;
@@ -121,22 +205,56 @@ export async function downloadHlsPlaylist({
     let totalBytes = 0;
     let completedSegments = 0;
     const rewrittenLines: string[] = [];
+    const tasks: Array<() => Promise<void>> = [];
 
     const downloadBinary = async (sourceUrl: string, destination: string) => {
-      try {
-        const download = FileSystem.createDownloadResumable(
-          sourceUrl,
-          destination,
-          headers ? { headers } : undefined
-        );
-        const result = await download.downloadAsync();
-if (!result || result.status >= 400) throw new Error('Segment download failed');
-        if (result.status >= 400) throw new Error('Segment download failed');
-        const info = await FileSystem.getInfoAsync(destination);
-        if (info.exists && !info.isDirectory) totalBytes += info.size;
-      } catch (err) {
-        console.warn(`[HLS] Failed to download ${sourceUrl}:`, (err as Error).message);
+      const cancelState = shouldCancel?.();
+      if (cancelState === 'pause') throw new Error('Paused');
+      if (cancelState === true || cancelState === 'cancel') throw new Error('Cancelled');
+      const existing = await FileSystem.getInfoAsync(destination);
+      if (existing.exists && !existing.isDirectory && existing.size > 0) {
+        totalBytes += existing.size;
+        return;
       }
+
+      let lastErr: Error | null = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const state = shouldCancel?.();
+        if (state === 'pause') throw new Error('Paused');
+        if (state === true || state === 'cancel') throw new Error('Cancelled');
+        try {
+          const download = FileSystem.createDownloadResumable(
+            sourceUrl,
+            destination,
+            headers ? { headers } : undefined,
+          );
+          const result = await download.downloadAsync();
+          if (!result || result.status >= 400) throw new Error('Segment download failed');
+          const info = await FileSystem.getInfoAsync(destination);
+          if (info.exists && !info.isDirectory) totalBytes += info.size;
+          return;
+        } catch (err) {
+          lastErr = err as Error;
+        }
+      }
+      throw lastErr ?? new Error('Segment download failed');
+    };
+
+    const runPool = async () => {
+      let next = 0;
+      const workers = Array.from({ length: Math.max(1, concurrency) }).map(async () => {
+        while (next < tasks.length) {
+          const state = shouldCancel?.();
+          if (state === 'pause') throw new Error('Paused');
+          if (state === true || state === 'cancel') throw new Error('Cancelled');
+          const idx = next;
+          next += 1;
+          await tasks[idx]();
+          completedSegments += 1;
+          onProgress?.(completedSegments, segmentUrls.length);
+        }
+      });
+      await Promise.all(workers);
     };
 
     for (const rawLine of lines) {
@@ -168,13 +286,13 @@ if (!result || result.status >= 400) throw new Error('Segment download failed');
 
       const resolvedSegment = resolveUrl(activePlaylistUrl, trimmed);
       const ext = inferExtension(trimmed, 'ts');
-      const localName = `seg-${String(completedSegments).padStart(5, '0')}.${ext}`;
+      const localName = `seg-${String(tasks.length).padStart(5, '0')}.${ext}`;
       const localPath = `${sessionDir}/${localName}`;
-      await downloadBinary(resolvedSegment, localPath);
-      completedSegments += 1;
-      if (onProgress) onProgress(completedSegments, segmentUrls.length);
+      tasks.push(() => downloadBinary(resolvedSegment, localPath));
       rewrittenLines.push(localName);
     }
+
+    await runPool();
 
     const playlistPath = `${sessionDir}/index.m3u8`;
     await FileSystem.writeAsStringAsync(playlistPath, rewrittenLines.join('\n'));

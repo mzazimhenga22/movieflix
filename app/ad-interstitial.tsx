@@ -55,6 +55,8 @@ export default function AdInterstitialScreen() {
     '/video-player';
   const secondsTotal = Math.max(1, Math.min(120, Number(params.__seconds || '30') || 30));
 
+  const incomingPrefetchKey = typeof params.__prefetchKey === 'string' ? params.__prefetchKey : undefined;
+
   const baseNextParams = useMemo(() => {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(params)) {
@@ -67,9 +69,12 @@ export default function AdInterstitialScreen() {
   const nextParams = useMemo(() => {
     const overrideParams = navState?.pendingNext?.params;
     const merged = { ...baseNextParams, ...(overrideParams ?? {}) };
-    const prefetchKeyForNext = createPrefetchKey({ pathname: nextPathname, params: merged });
+    const existing =
+      (overrideParams && typeof (overrideParams as any).__prefetchKey === 'string' && (overrideParams as any).__prefetchKey) ||
+      incomingPrefetchKey;
+    const prefetchKeyForNext = existing || createPrefetchKey({ pathname: nextPathname, params: merged });
     return { ...merged, __prefetchKey: prefetchKeyForNext };
-  }, [baseNextParams, navState?.pendingNext?.params, nextPathname]);
+  }, [baseNextParams, navState?.pendingNext?.params, nextPathname, incomingPrefetchKey]);
 
   const prefetchKey = typeof nextParams.__prefetchKey === 'string' ? (nextParams.__prefetchKey as string) : undefined;
 

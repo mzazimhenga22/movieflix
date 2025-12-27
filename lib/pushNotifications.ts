@@ -13,6 +13,50 @@ Notifications.setNotificationHandler({
   }),
 });
 
+export const prepareNotificationsAsync = async (): Promise<Notifications.PermissionStatus | null> => {
+  if (Platform.OS === 'web') return null;
+  if (!Device.isDevice) return null;
+
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'MovieFlix',
+      importance: Notifications.AndroidImportance.DEFAULT,
+      vibrationPattern: [0, 150],
+      lightColor: '#e50914',
+    });
+
+    await Notifications.setNotificationChannelAsync('messages', {
+      name: 'Messages',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#e50914',
+    });
+
+    await Notifications.setNotificationChannelAsync('calls', {
+      name: 'Calls',
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 500, 250, 500],
+      lightColor: '#e50914',
+    });
+
+    await Notifications.setNotificationChannelAsync('downloads', {
+      name: 'Downloads',
+      importance: Notifications.AndroidImportance.DEFAULT,
+      vibrationPattern: [0, 150],
+      lightColor: '#e50914',
+    });
+  }
+
+  const existing = await Notifications.getPermissionsAsync();
+  let status = existing.status;
+  if (status !== 'granted') {
+    const requested = await Notifications.requestPermissionsAsync();
+    status = requested.status;
+  }
+
+  return status;
+};
+
 const getExpoProjectId = (): string | undefined => {
   return (
     (Constants.easConfig as any)?.projectId ||
@@ -26,21 +70,7 @@ export const registerForPushNotificationsAsync = async (userId: string): Promise
   if (Platform.OS === 'web') return null;
   if (!Device.isDevice) return null;
 
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('default', {
-      name: 'default',
-      importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
-      lightColor: '#e50914',
-    });
-  }
-
-  const existing = await Notifications.getPermissionsAsync();
-  let status = existing.status;
-  if (status !== 'granted') {
-    const requested = await Notifications.requestPermissionsAsync();
-    status = requested.status;
-  }
+  const status = await prepareNotificationsAsync();
   if (status !== 'granted') return null;
 
   let token: string;
