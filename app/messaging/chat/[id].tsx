@@ -13,14 +13,16 @@ import {
   Platform,
   SafeAreaView,
   StyleSheet,
-  Text,
   TextInput,
   TouchableOpacity,
   UIManager,
   View,
   Dimensions,
   Modal,
+  Pressable,
 } from 'react-native';
+import * as RN from 'react-native';
+import { Text as WebText } from 'react-native-web';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 import {
@@ -64,6 +66,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useMessagingSettings } from '@/hooks/useMessagingSettings';
 import { ResizeMode, Video } from 'expo-av';
+import { BlurView } from 'expo-blur';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -75,6 +78,23 @@ import MessageInput from './components/MessageInput';
 import MessagingErrorBoundary, { useErrorHandler } from '../components/ErrorBoundary';
 import { useAccent } from '../../components/AccentContext';
 import { accentGradient, darkenColor, withAlpha } from '../../../lib/colorUtils';
+
+const Text = (Platform.OS === 'web' ? (WebText as unknown as typeof RN.Text) : RN.Text);
+
+const localReadStorageKey = (uid: string) => `chat_local_lastReadAtBy_${uid}`;
+
+const markLocalConversationRead = async (uid: string, conversationId: string) => {
+  if (!uid || !conversationId) return;
+  try {
+    const key = localReadStorageKey(uid);
+    const raw = await AsyncStorage.getItem(key);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    const next = { ...(parsed && typeof parsed === 'object' ? parsed : {}), [conversationId]: Date.now() };
+    await AsyncStorage.setItem(key, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+};
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -127,10 +147,11 @@ const ChatScreen = () => {
   const [participantProfiles, setParticipantProfiles] = useState<Record<string, Profile>>({});
   const [isOtherTyping, setIsOtherTyping] = useState(false);
   const keyboardOffset = useRef(new Animated.Value(0)).current;
-  const [keyboardInset, setKeyboardInset] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [inputDockHeight, setInputDockHeight] = useState(0);
   const [selectedMessage, setSelectedMessage] = useState<ChatMessage | null>(null);
   const [selectedMessageRect, setSelectedMessageRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const spotlightAnim = useRef(new Animated.Value(0)).current;
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [pendingMedia, setPendingMedia] = useState<{ uri: string; type: 'image' | 'video' | 'file' } | null>(null);
@@ -154,22 +175,24 @@ const ChatScreen = () => {
       const effectiveHeight = Math.max(0, rawHeight - (isIOS ? insets.bottom : 0));
       const duration = typeof e?.duration === 'number' ? e.duration : isIOS ? 250 : 150;
 
-      setKeyboardInset(effectiveHeight);
+      setKeyboardHeight(effectiveHeight);
 
       Animated.timing(keyboardOffset, {
-        toValue: effectiveHeight + (isIOS ? 10 : 0),
+        // Move only the input dock above the keyboard.
+        toValue: -effectiveHeight,
         duration,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }).start();
     };
 
     const onHide = (e: any) => {
       const duration = typeof e?.duration === 'number' ? e.duration : isIOS ? 250 : 150;
-      setKeyboardInset(0);
+
+      setKeyboardHeight(0);
       Animated.timing(keyboardOffset, {
         toValue: 0,
         duration,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }).start();
     };
 
@@ -181,6 +204,29 @@ const ChatScreen = () => {
       subHide.remove();
     };
   }, [insets.bottom, keyboardOffset]);
+
+  const closeSpotlight = useCallback(() => {
+    Animated.timing(spotlightAnim, {
+      toValue: 0,
+      duration: 160,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (!finished) return;
+      setSelectedMessage(null);
+      setSelectedMessageRect(null);
+    });
+  }, [spotlightAnim]);
+
+  useEffect(() => {
+    if (selectedMessage && selectedMessageRect) {
+      spotlightAnim.setValue(0);
+      Animated.timing(spotlightAnim, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [selectedMessage, selectedMessageRect, spotlightAnim]);
   const [isStartingCall, setIsStartingCall] = useState(false);
   const [lastSeen, setLastSeen] = useState<Date | null>(null);
   const [isSearchMode, setSearchMode] = useState(false);
@@ -324,6 +370,7 @@ const ChatScreen = () => {
         if (now - lastMarkedRef.current > 3000) {
           lastMarkedRef.current = now;
           if (conversationIdStr && conversation.lastMessageSenderId && conversation.lastMessageSenderId !== user.uid) {
+            void markLocalConversationRead(user.uid, conversationIdStr);
             void markConversationRead(conversationIdStr, settings.readReceipts);
           }
         }
@@ -386,6 +433,7 @@ const ChatScreen = () => {
     if (!conversation || !user?.uid) return;
     try {
       if (conversationIdStr && conversation.lastMessageSenderId && conversation.lastMessageSenderId !== user.uid) {
+        void markLocalConversationRead(user.uid, conversationIdStr);
         void markConversationRead(conversationIdStr, settings.readReceipts);
       }
     } catch (err) {
@@ -808,10 +856,32 @@ const ChatScreen = () => {
   );
 
   const uploadChatMedia = useCallback(
-    async (uri: string, type: 'image' | 'video' | 'file'): Promise<{ url: string; mediaType: 'image' | 'video' | 'file' } | null> => {
+    async (uri: string, type: 'image' | 'video' | 'audio' | 'file'): Promise<{ url: string; mediaType: 'image' | 'video' | 'audio' | 'file' } | null> => {
       if (!user || !supabaseConfigured) return null;
 
       try {
+        const ext = (uri.split('?')[0]?.split('#')[0]?.split('.').pop() || '').toLowerCase();
+        const audioContentType = (() => {
+          switch (ext) {
+            case 'm4a':
+              return 'audio/m4a';
+            case 'mp3':
+              return 'audio/mpeg';
+            case 'wav':
+              return 'audio/wav';
+            case 'aac':
+              return 'audio/aac';
+            case 'caf':
+              return 'audio/x-caf';
+            case '3gp':
+              return 'audio/3gpp';
+            case 'amr':
+              return 'audio/amr';
+            default:
+              return 'audio/m4a';
+          }
+        })();
+
         const finalUri = uri;
         const base64Data = await FileSystem.readAsStringAsync(finalUri, { encoding: 'base64' });
         const binary: string = atob(base64Data);
@@ -830,6 +900,8 @@ const ChatScreen = () => {
                 ? 'image/jpeg'
                 : type === 'video'
                 ? 'video/mp4'
+                : type === 'audio'
+                ? audioContentType
                 : 'application/octet-stream',
             upsert: true,
           });
@@ -1191,6 +1263,44 @@ const ChatScreen = () => {
     setPendingCaption('');
   };
 
+  const handleAudioPicked = async (uri: string) => {
+    if (!user) return;
+    if (isBroadcastReadOnly) {
+      Alert.alert('Read only', 'Only admins can post in this channel.');
+      return;
+    }
+    if (!baseSendPermission) {
+      Alert.alert('Request pending', 'Wait until the recipient accepts before sending audio.');
+      return;
+    }
+
+    const uploaded = await uploadChatMedia(uri, 'audio');
+    if (!uploaded) return;
+
+    const clientId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tempId = `temp-${clientId}`;
+    const pending: ChatMessage = {
+      id: tempId,
+      text: 'Voice message',
+      sender: user.uid,
+      mediaUrl: uploaded.url,
+      mediaType: uploaded.mediaType,
+      createdAt: Date.now(),
+      clientId,
+    };
+    setPendingMessages((prev) => [...prev, pending]);
+
+    try {
+      if (!conversationIdStr) throw new Error('Missing conversation id');
+      void sendMessage(conversationIdStr, {
+        ...(pending as any),
+        id: undefined,
+      });
+    } catch (err) {
+      setPendingMessages((prev) => prev.map((p) => (p.clientId === clientId ? { ...p, failed: true } : p)));
+    }
+  };
+
   const handleCropPendingMedia = async () => {
     if (!pendingMedia || pendingMedia.type !== 'image') return;
     try {
@@ -1483,182 +1593,210 @@ const ChatScreen = () => {
                 </View>
               )}
 
-              {/* Messages List */}
-              <View style={styles.messagesContainer}>
-                <FlashList
-                  ref={flatListRef}
-                  data={visibleMessages}
-                  renderItem={({ item, index }: { item: ChatMessage; index: number }) => {
-                    const isMe = item.sender === user?.uid;
-                    const replySenderId = (item as any).replyToSenderId as string | undefined;
-                    const existingReplyName = (item as any).replyToSenderName as string | undefined;
-                    const shouldResolveReplyName =
-                      !existingReplyName || existingReplyName === 'Someone' || existingReplyName === 'Unknown';
-                    const resolvedReplyName = replySenderId
-                      ? (shouldResolveReplyName ? resolveDisplayName(replySenderId) : existingReplyName)
-                      : undefined;
-                    const decoratedItem = resolvedReplyName && (item as any).replyToSenderName !== resolvedReplyName
-                      ? ({ ...item, replyToSenderName: resolvedReplyName } as any)
-                      : item;
-
-                    const senderName = isMe ? user?.displayName || 'You' : resolveDisplayName(item.sender);
-                    const avatarUri = !isMe
-                      ? resolveAvatarUri(item.sender) || otherUser?.photoURL || ''
-                      : '';
-
-                    return (
-                      <MessageBubble
-                        item={decoratedItem}
-                        isMe={isMe}
-                        groupPosition={getBubbleGroupPosition(index)}
-                        avatar={avatarUri}
-                        senderName={senderName}
-                        onLongPress={(msg, rect) => {
-                          setSelectedMessage(msg);
-                          setSelectedMessageRect(rect);
-                        }}
-                        onPressMedia={handleOpenMedia}
-                        onPressReaction={(emoji) => handleReactionPress(item, emoji)}
-                      />
-                    );
-                  }}
-                  keyExtractor={(item: ChatMessage, index: number) => item.id ?? item.clientId ?? `message-${index}`}
-                  estimatedItemSize={80}
-                  showsVerticalScrollIndicator={false}
-                  onScroll={handleScroll}
-                  keyboardDismissMode="interactive"
-                  keyboardShouldPersistTaps="handled"
-                  inverted={false}
-                  contentContainerStyle={[
-                    styles.messageList,
-                    {
-                      flexGrow: 1,
-                      justifyContent: 'flex-end',
-                      paddingBottom: Math.max(10, inputDockHeight + 10 + keyboardInset),
-                    },
-                  ]}
-                />
-              </View>
-
-              {/* Message Input */}
-              <Animated.View
-                style={[
-                  styles.inputDock,
-                  {
-                    paddingBottom: (Platform.OS === 'ios' ? 10 : 6) + insets.bottom,
-                    bottom: keyboardOffset,
-                  },
-                ]}
-                onLayout={(e) => {
-                  const h = e.nativeEvent.layout.height;
-                  if (typeof h === 'number' && h > 0 && Math.abs(h - inputDockHeight) > 1) {
-                    setInputDockHeight(h);
-                  }
-                }}
-              >
-                <View style={styles.inputContainer}>
-                {isBroadcastReadOnly && (
-                  <View style={styles.readOnlyBanner}>
-                    <Ionicons name="megaphone-outline" size={16} color="rgba(255,255,255,0.85)" />
-                    <Text style={styles.readOnlyText} numberOfLines={2}>
-                      Official announcements channel · Only MovieFlix admins can post updates here.
-                    </Text>
-                  </View>
-                )}
-                {isUserBlocked ? (
-                  <View style={styles.blockedBanner}>
-                    <Ionicons name="ban-outline" size={16} color="rgba(255,255,255,0.9)" />
-                    <Text style={styles.blockedText} numberOfLines={2}>
-                      You blocked {otherUser?.displayName ?? 'this user'}. Unblock to send messages.
-                    </Text>
-                    <TouchableOpacity
-                      style={styles.blockedCta}
-                      onPress={handleToggleBlock}
-                      disabled={isBlockingUserAction}
-                    >
-                      {isBlockingUserAction ? (
-                        <ActivityIndicator color="#fff" size="small" />
-                      ) : (
-                        <Text style={styles.blockedCtaText}>Unblock</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                ) : canAccept ? (
-                  <View style={styles.requestBar}>
-                    <View style={styles.requestInfo}>
-                      <Text style={styles.requestTitle}>Message request</Text>
-                      <Text style={styles.requestSubtitle} numberOfLines={2}>
-                        Allow this chat to reply, call, and see when you’ve read messages.
-                      </Text>
-                    </View>
-                    <View style={styles.requestButtons}>
-                      <TouchableOpacity
-                        onPress={handleDeclineRequest}
-                        style={styles.declineButton}
-                        disabled={isAcceptingRequest}
-                      >
-                        <Text style={styles.declineButtonText}>Decline</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        onPress={handleAcceptRequest}
-                        style={[styles.acceptButton, isAcceptingRequest && styles.acceptButtonDisabled]}
-                        disabled={isAcceptingRequest}
-                      >
-                        <Text style={styles.acceptButtonText}>
-                          {isAcceptingRequest ? 'Allowing…' : 'Allow'}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  <MessageInput
-                    onSendMessage={handleSendMessage}
-                    onTypingChange={handleTypingChange}
-                    onPickMedia={handleMediaPicked}
-                    disabled={!canSend}
-                    disabledPlaceholder={
-                      isBroadcastReadOnly
-                        ? 'Only admins can share updates in this channel'
-                        : !baseSendPermission
-                          ? 'Your request is pending approval'
-                          : isUserBlocked
-                            ? 'Unblock to message'
-                          : undefined
-                    }
-                    replyLabel={replyTo ? (replyTo.text || '').slice(0, 60) : undefined}
-                    isEditing={!!editingMessage}
+              <View style={{ flex: 1 }}>
+                <View style={styles.messagesContainer}>
+                  <LinearGradient
+                    colors={[withAlpha(accent, 0.14), 'rgba(0,0,0,0.28)', 'rgba(0,0,0,0.72)']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={StyleSheet.absoluteFillObject}
                   />
-                )}
-                {showInitiatorPendingBanner && (
-                  <View style={styles.pendingNoticeBanner}>
-                    <Ionicons name="hourglass-outline" size={16} color="rgba(255,255,255,0.85)" />
-                    <Text style={styles.pendingNoticeText}>
-                      Waiting for them to accept your request.
-                    </Text>
-                  </View>
-                )}
+                  <LinearGradient
+                    colors={['rgba(255,255,255,0.10)', 'rgba(255,255,255,0.00)']}
+                    start={{ x: 0.1, y: 0 }}
+                    end={{ x: 0.8, y: 1 }}
+                    style={styles.messagesHighlight}
+                  />
+                  <FlashList
+                    ref={flatListRef}
+                    data={visibleMessages}
+                    renderItem={({ item, index }: { item: ChatMessage; index: number }) => {
+                      const isMe = item.sender === user?.uid;
+                      const replySenderId = (item as any).replyToSenderId as string | undefined;
+                      const existingReplyName = (item as any).replyToSenderName as string | undefined;
+                      const shouldResolveReplyName =
+                        !existingReplyName || existingReplyName === 'Someone' || existingReplyName === 'Unknown';
+                      const resolvedReplyName = replySenderId
+                        ? (shouldResolveReplyName ? resolveDisplayName(replySenderId) : existingReplyName)
+                        : undefined;
+                      const decoratedItem =
+                        resolvedReplyName && (item as any).replyToSenderName !== resolvedReplyName
+                          ? ({ ...item, replyToSenderName: resolvedReplyName } as any)
+                          : item;
+
+                      const senderName = isMe ? user?.displayName || 'You' : resolveDisplayName(item.sender);
+                      const avatarUri = !isMe ? resolveAvatarUri(item.sender) || otherUser?.photoURL || '' : '';
+
+                      return (
+                        <MessageBubble
+                          item={decoratedItem}
+                          isMe={isMe}
+                          groupPosition={getBubbleGroupPosition(index)}
+                          avatar={avatarUri}
+                          senderName={senderName}
+                          onLongPress={(msg, rect) => {
+                            setSelectedMessage(msg);
+                            setSelectedMessageRect(rect);
+                          }}
+                          onPressMedia={handleOpenMedia}
+                          onPressReaction={(emoji) => handleReactionPress(item, emoji)}
+                        />
+                      );
+                    }}
+                    keyExtractor={(item: ChatMessage, index: number) => item.id ?? item.clientId ?? `message-${index}`}
+                    estimatedItemSize={80}
+                    showsVerticalScrollIndicator={false}
+                    onScroll={handleScroll}
+                    keyboardDismissMode="interactive"
+                    keyboardShouldPersistTaps="handled"
+                    inverted={false}
+                    contentContainerStyle={[
+                      styles.messageList,
+                      {
+                        flexGrow: 1,
+                        justifyContent: 'flex-end',
+                        paddingBottom: Math.max(10, inputDockHeight + keyboardHeight + 10),
+                      },
+                    ]}
+                  />
                 </View>
-              </Animated.View>
+
+                <Animated.View
+                  style={{ transform: [{ translateY: keyboardOffset }] }}
+                >
+                  <View
+                    style={[
+                      styles.inputDock,
+                      {
+                        paddingBottom: (Platform.OS === 'ios' ? 10 : 6) + insets.bottom,
+                      },
+                    ]}
+                    onLayout={(e) => {
+                      const h = e.nativeEvent.layout.height;
+                      if (typeof h === 'number' && h > 0 && Math.abs(h - inputDockHeight) > 1) {
+                        setInputDockHeight(h);
+                      }
+                    }}
+                  >
+                  <View style={styles.inputContainer}>
+                    {isBroadcastReadOnly && (
+                      <View style={styles.readOnlyBanner}>
+                        <Ionicons name="megaphone-outline" size={16} color="rgba(255,255,255,0.85)" />
+                        <Text style={styles.readOnlyText} numberOfLines={2}>
+                          Official announcements channel · Only MovieFlix admins can post updates here.
+                        </Text>
+                      </View>
+                    )}
+                    {isUserBlocked ? (
+                      <View style={styles.blockedBanner}>
+                        <Ionicons name="ban-outline" size={16} color="rgba(255,255,255,0.9)" />
+                        <Text style={styles.blockedText} numberOfLines={2}>
+                          You blocked {otherUser?.displayName ?? 'this user'}. Unblock to send messages.
+                        </Text>
+                        <TouchableOpacity
+                          style={styles.blockedCta}
+                          onPress={handleToggleBlock}
+                          disabled={isBlockingUserAction}
+                        >
+                          {isBlockingUserAction ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                          ) : (
+                            <Text style={styles.blockedCtaText}>Unblock</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    ) : canAccept ? (
+                      <View style={styles.requestBar}>
+                        <View style={styles.requestInfo}>
+                          <Text style={styles.requestTitle}>Message request</Text>
+                          <Text style={styles.requestSubtitle} numberOfLines={2}>
+                            Allow this chat to reply, call, and see when you’ve read messages.
+                          </Text>
+                        </View>
+                        <View style={styles.requestButtons}>
+                          <TouchableOpacity
+                            onPress={handleDeclineRequest}
+                            style={styles.declineButton}
+                            disabled={isAcceptingRequest}
+                          >
+                            <Text style={styles.declineButtonText}>Decline</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={handleAcceptRequest}
+                            style={[styles.acceptButton, isAcceptingRequest && styles.acceptButtonDisabled]}
+                            disabled={isAcceptingRequest}
+                          >
+                            <Text style={styles.acceptButtonText}>
+                              {isAcceptingRequest ? 'Allowing…' : 'Allow'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : (
+                      <>
+                        {showInitiatorPendingBanner ? (
+                          <View style={styles.pendingNoticeBanner}>
+                            <Ionicons name="hourglass-outline" size={16} color="rgba(255,255,255,0.85)" />
+                            <Text style={styles.pendingNoticeText}>
+                              Waiting for them to accept your request.
+                            </Text>
+                          </View>
+                        ) : null}
+                        <MessageInput
+                          onSendMessage={handleSendMessage}
+                          onTypingChange={handleTypingChange}
+                          onPickMedia={handleMediaPicked}
+                          onPickAudio={handleAudioPicked}
+                          disabled={!canSend}
+                          disabledPlaceholder={
+                            isBroadcastReadOnly
+                              ? 'Only admins can share updates in this channel'
+                              : !baseSendPermission
+                                ? 'Your request is pending approval'
+                                : isUserBlocked
+                                  ? 'Unblock to message'
+                                  : undefined
+                          }
+                          replyLabel={replyTo ? (replyTo.text || '').slice(0, 60) : undefined}
+                          isEditing={!!editingMessage}
+                        />
+                      </>
+                    )}
+                  </View>
+                  </View>
+                </Animated.View>
+              </View>
             </View>
           </View>
         </SafeAreaView>
 
-        {selectedMessage && selectedMessageRect && (
-          <View style={styles.spotlightOverlay} pointerEvents="box-none">
-            {/* Heavy blur over entire chat */}
-            <TouchableOpacity
-              style={styles.spotlightTouch}
-              activeOpacity={1}
-              onPress={() => {
-                setSelectedMessage(null);
-                setSelectedMessageRect(null);
-              }}
-            >
-              <View style={styles.spotlightBackdrop} />
-            </TouchableOpacity>
+        <Modal
+          visible={!!(selectedMessage && selectedMessageRect)}
+          transparent
+          animationType="none"
+          onRequestClose={closeSpotlight}
+        >
+          {selectedMessage && selectedMessageRect ? (
+            <View style={styles.spotlightOverlay}>
+              <Animated.View
+                style={[
+                  styles.spotlightBackdrop,
+                  {
+                    opacity: spotlightAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 1] }),
+                  },
+                ]}
+              >
+                <BlurView intensity={70} tint="dark" style={StyleSheet.absoluteFillObject} />
+                <LinearGradient
+                  colors={['rgba(0,0,0,0.08)', 'rgba(0,0,0,0.70)', 'rgba(0,0,0,0.62)']}
+                  start={{ x: 0.2, y: 0 }}
+                  end={{ x: 0.8, y: 1 }}
+                  style={StyleSheet.absoluteFillObject}
+                />
+              </Animated.View>
 
-            {/* Elevated bubble */}
-            <View style={[styles.spotlightBubbleContainer, { top: selectedMessageRect.y }]}>
+              <Pressable style={styles.spotlightTouch} onPress={closeSpotlight} />
+
               {(() => {
                 const isMe = selectedMessage.sender === user?.uid;
                 const replySenderId = (selectedMessage as any).replyToSenderId as string | undefined;
@@ -1668,97 +1806,140 @@ const ChatScreen = () => {
                 const resolvedReplyName = replySenderId
                   ? (shouldResolveReplyName ? resolveDisplayName(replySenderId) : existingReplyName)
                   : undefined;
-                const decoratedItem = resolvedReplyName && (selectedMessage as any).replyToSenderName !== resolvedReplyName
-                  ? ({ ...selectedMessage, replyToSenderName: resolvedReplyName } as any)
-                  : selectedMessage;
+                const decoratedItem =
+                  resolvedReplyName && (selectedMessage as any).replyToSenderName !== resolvedReplyName
+                    ? ({ ...selectedMessage, replyToSenderName: resolvedReplyName } as any)
+                    : selectedMessage;
 
                 const senderName = isMe ? user?.displayName || 'You' : resolveDisplayName(selectedMessage.sender);
                 const avatarUri = !isMe
                   ? resolveAvatarUri(selectedMessage.sender) || otherUser?.photoURL || ''
                   : '';
 
+                const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+                const top = clamp(
+                  selectedMessageRect.y - 14,
+                  Math.max(10, insets.top + 72),
+                  Dimensions.get('window').height - 240,
+                );
+
                 return (
-                  <MessageBubble
-                    item={decoratedItem}
-                    isMe={isMe}
-                    avatar={avatarUri}
-                    senderName={senderName}
-                    onLongPress={() => {}}
-                    onPressReaction={(emoji) => handleReactionPress(selectedMessage, emoji)}
-                  />
+                  <>
+                    <Animated.View
+                      style={[
+                        styles.spotlightBubbleContainer,
+                        {
+                          top,
+                          opacity: spotlightAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 1] }),
+                          transform: [
+                            {
+                              translateY: spotlightAnim.interpolate({ inputRange: [0, 1], outputRange: [10, 0] }),
+                            },
+                            {
+                              scale: spotlightAnim.interpolate({ inputRange: [0, 1], outputRange: [0.985, 1] }),
+                            },
+                          ],
+                        },
+                      ]}
+                    >
+                      <View style={styles.spotlightBubbleShadow}>
+                        <MessageBubble
+                          item={decoratedItem}
+                          isMe={isMe}
+                          avatar={avatarUri}
+                          senderName={senderName}
+                          onLongPress={() => {}}
+                          onPressReaction={(emoji) => handleReactionPress(selectedMessage, emoji)}
+                        />
+                      </View>
+                    </Animated.View>
+
+                    <Animated.View
+                      style={[
+                        styles.spotlightActionBar,
+                        {
+                          opacity: spotlightAnim,
+                          transform: [
+                            {
+                              translateY: spotlightAnim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }),
+                            },
+                          ],
+                        },
+                      ]}
+                    >
+                      <BlurView intensity={85} tint="dark" style={styles.spotlightActionBarBlur} />
+                      <View style={styles.spotlightActionRow}>
+                        <TouchableOpacity
+                          style={styles.spotlightActionBtn}
+                          onPress={() => {
+                            setReplyTo(selectedMessage);
+                            closeSpotlight();
+                          }}
+                        >
+                          <Ionicons name="return-up-back" size={18} color="#fff" />
+                          <Text style={styles.spotlightActionText}>Reply</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.spotlightActionBtn}
+                          onPress={() => {
+                            if (selectedMessage?.id && user?.uid) {
+                              const alreadyPinned =
+                                Array.isArray(selectedMessage.pinnedBy) &&
+                                selectedMessage.pinnedBy.includes(user.uid);
+                              if (conversationIdStr) {
+                                void (alreadyPinned
+                                  ? unpinMessage(conversationIdStr, selectedMessage.id, user.uid)
+                                  : pinMessage(conversationIdStr, selectedMessage.id, user.uid));
+                              }
+                            }
+                            closeSpotlight();
+                          }}
+                        >
+                          <Ionicons
+                            name={
+                              Array.isArray(selectedMessage?.pinnedBy) && user?.uid && selectedMessage.pinnedBy.includes(user.uid)
+                                ? 'pin-outline'
+                                : 'pin'
+                            }
+                            size={18}
+                            color="#fff"
+                          />
+                          <Text style={styles.spotlightActionText}>
+                            {Array.isArray(selectedMessage?.pinnedBy) && user?.uid && selectedMessage.pinnedBy.includes(user.uid)
+                              ? 'Unpin'
+                              : 'Pin'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.spotlightActionBtn, styles.spotlightActionBtnDanger]}
+                          onPress={() => {
+                            if (selectedMessage?.id && user?.uid) {
+                              if (selectedMessage.sender === user.uid) {
+                                if (conversationIdStr) {
+                                  void deleteMessageForAll(conversationIdStr, selectedMessage.id);
+                                }
+                              } else {
+                                if (conversationIdStr) {
+                                  void deleteMessageForMe(conversationIdStr, selectedMessage.id, user.uid);
+                                }
+                              }
+                            }
+                            closeSpotlight();
+                          }}
+                        >
+                          <Ionicons name="trash" size={18} color="#ff6b6b" />
+                          <Text style={styles.spotlightActionTextDanger}>Delete</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </Animated.View>
+                  </>
                 );
               })()}
             </View>
-
-            {/* Vertical actions under bubble */}
-            <View
-              style={[
-                styles.spotlightActionsContainer,
-                { top: selectedMessageRect.y + selectedMessageRect.height + 8 },
-              ]}
-            >
-              <TouchableOpacity
-                style={styles.spotlightPill}
-                onPress={() => {
-                  setReplyTo(selectedMessage);
-                  setSelectedMessage(null);
-                  setSelectedMessageRect(null);
-                }}
-              >
-                <Text style={styles.spotlightPillText}>Reply</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.spotlightPill}
-                onPress={() => {
-                  if (selectedMessage?.id && user?.uid) {
-                    const alreadyPinned =
-                      Array.isArray(selectedMessage.pinnedBy) &&
-                      selectedMessage.pinnedBy.includes(user.uid);
-                    if (alreadyPinned) {
-                      if (conversationIdStr) {
-                        void unpinMessage(conversationIdStr, selectedMessage.id, user.uid);
-                      }
-                    } else {
-                      if (conversationIdStr) {
-                        void pinMessage(conversationIdStr, selectedMessage.id, user.uid);
-                      }
-                    }
-                  }
-                  setSelectedMessage(null);
-                  setSelectedMessageRect(null);
-                }}
-              >
-                <Text style={styles.spotlightPillText}>
-                  {Array.isArray(selectedMessage?.pinnedBy) &&
-                  user?.uid &&
-                  selectedMessage.pinnedBy.includes(user.uid)
-                    ? 'Unpin'
-                    : 'Pin'}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.spotlightPill, styles.spotlightPillDanger]}
-                onPress={() => {
-                  if (selectedMessage?.id && user?.uid) {
-                    if (selectedMessage.sender === user.uid) {
-                      if (conversationIdStr) {
-                        void deleteMessageForAll(conversationIdStr, selectedMessage.id);
-                      }
-                    } else {
-                      if (conversationIdStr) {
-                        void deleteMessageForMe(conversationIdStr, selectedMessage.id, user.uid);
-                      }
-                    }
-                  }
-                  setSelectedMessage(null);
-                  setSelectedMessageRect(null);
-                }}
-              >
-                <Text style={styles.spotlightPillDangerText}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+          ) : null}
+        </Modal>
 
           {pendingMedia && (
           <View style={styles.mediaSheetOverlay} pointerEvents="box-none">
@@ -2243,10 +2424,21 @@ const styles = StyleSheet.create({
   },
   messagesContainer: {
     flex: 1,
+    marginHorizontal: 12,
+    marginTop: 6,
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  messagesHighlight: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.85,
   },
   messageList: {
     paddingHorizontal: 12,
-    paddingTop: 4,
+    paddingTop: 10,
     paddingBottom: 10,
   },
   inputDock: {
@@ -2563,11 +2755,11 @@ const styles = StyleSheet.create({
   },
   spotlightOverlay: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 50,
+    justifyContent: 'flex-start',
   },
   spotlightBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.82)',
+    backgroundColor: 'rgba(0,0,0,0.42)',
   },
   spotlightTouch: {
     ...StyleSheet.absoluteFillObject,
@@ -2578,33 +2770,58 @@ const styles = StyleSheet.create({
     right: 0,
     paddingHorizontal: 8,
   },
-  spotlightActionsContainer: {
+  spotlightBubbleShadow: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  spotlightActionBar: {
     position: 'absolute',
-    right: 40,
-    paddingHorizontal: 8,
+    left: 12,
+    right: 12,
+    bottom: 18,
+    borderRadius: 18,
+    overflow: 'hidden',
   },
-  spotlightPill: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(0,0,0,0.9)',
+  spotlightActionBarBlur: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  spotlightActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(15,15,25,0.55)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    marginBottom: 8,
+    borderColor: 'rgba(255,255,255,0.14)',
   },
-  spotlightPillText: {
+  spotlightActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  spotlightActionText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '800',
   },
-  spotlightPillDanger: {
-    backgroundColor: 'rgba(255,75,75,0.15)',
-    borderColor: 'rgba(255,75,75,0.6)',
+  spotlightActionBtnDanger: {
+    backgroundColor: 'rgba(255,75,75,0.14)',
+    borderColor: 'rgba(255,75,75,0.28)',
   },
-  spotlightPillDangerText: {
-    color: '#ff4b4b',
+  spotlightActionTextDanger: {
+    color: '#ff6b6b',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '900',
   },
   chatSearchRow: {
     flexDirection: 'row',

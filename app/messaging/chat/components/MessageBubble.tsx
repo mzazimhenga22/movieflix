@@ -50,17 +50,15 @@ const MessageBubble = ({ item, isMe, groupPosition = 'single', avatar, senderNam
     withAlpha(accent, 0.96),
     withAlpha(darkenColor(accent, 0.28), 0.98),
   ];
-  const otherGradientColors: readonly [string, string] = [
-    'rgba(255,255,255,0.09)',
-    'rgba(255,255,255,0.045)',
+  // Make incoming bubbles visibly gradient (previously too subtle and looked flat).
+  const otherGradientColors: readonly [string, string, string] = [
+    'rgba(255,255,255,0.13)',
+    'rgba(255,255,255,0.08)',
+    'rgba(0,0,0,0.22)',
   ];
-  const replyAccent = isMe ? 'rgba(255,255,255,0.55)' : withAlpha(accent, 0.7);
-  const replyGradientColors: readonly [string, string] = isMe
-    ? ['rgba(0,0,0,0.22)', 'rgba(0,0,0,0.10)']
-    : [
-        withAlpha(lightenColor(accent, 0.2), 0.22),
-        withAlpha(darkenColor(accent, 0.55), 0.12),
-      ];
+  // Reply preview should be a solid gradient (not glass) and distinct from the accent gradient.
+  const replyStripe = '#c4b5fd';
+  const replyGradientColors: readonly [string, string, string] = ['#4c1d95', '#7c3aed', '#1e1b4b'];
 
   const time = (() => {
     const createdAt = item.createdAt;
@@ -321,9 +319,9 @@ const MessageBubble = ({ item, isMe, groupPosition = 'single', avatar, senderNam
                 colors={replyGradientColors}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
-                style={[styles.replyContainer, { borderLeftColor: replyAccent }]}
+                style={styles.replyContainer}
               >
-                <View style={[styles.replyLine, { backgroundColor: replyAccent }]} />
+                <View style={[styles.replyLine, { backgroundColor: replyStripe }]} />
                 <Text style={styles.replySender} numberOfLines={1}>
                   {item.replyToSenderName || 'Unknown'}
                 </Text>
@@ -586,18 +584,19 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
   replyContainer: {
-    borderLeftWidth: 3,
-    paddingLeft: 8,
-    marginBottom: 8,
-    borderRadius: 6,
-    paddingVertical: 4,
+    marginBottom: 10,
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingLeft: 14,
+    paddingRight: 10,
+    overflow: 'hidden',
   },
   replyLine: {
     position: 'absolute',
-    left: -3,
+    left: 0,
     top: 0,
     bottom: 0,
-    width: 3,
+    width: 4,
   },
   replySender: {
     fontSize: 12,

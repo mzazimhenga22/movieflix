@@ -560,6 +560,9 @@ const upcoming: Array<{
       return;
     }
 
+    const episodeRuntimeMinutes =
+      typeof episode?.runtime === 'number' && episode.runtime > 0 ? episode.runtime : runtimeMinutes;
+
     const payload = {
       type: 'show' as const,
       title: movie.name || movie.title || 'TV Show',
@@ -580,7 +583,8 @@ const upcoming: Array<{
 
     const title = payload.title;
     const episodeLabel = `S${String(payload.season.number).padStart(2, '0')}E${String(payload.episode.number).padStart(2, '0')}`;
-    const subtitleParts = ['Episode', episodeLabel, runtimeMinutes ? `${runtimeMinutes}m` : null].filter(Boolean);
+    const subtitleParts = ['Episode', episodeLabel, episode?.name ?? null, episodeRuntimeMinutes ? `${episodeRuntimeMinutes}m` : null]
+      .filter(Boolean);
     const subtitle = subtitleParts.length ? subtitleParts.join(' • ') : null;
     const epKey = String(episode.id ?? payload.episode.tmdbId ?? `${payload.season.number}-${payload.episode.number}`);
 
@@ -598,13 +602,13 @@ const upcoming: Array<{
           mediaId: movie.id ?? undefined,
           mediaType: normalizedMediaType,
           subtitle,
-          runtimeMinutes,
+          runtimeMinutes: episodeRuntimeMinutes,
           seasonNumber: payload.season.number,
           episodeNumber: payload.episode.number,
           releaseDate: releaseDateValue,
-          posterPath: movie.poster_path,
+          posterPath: episode?.still_path || movie.poster_path,
           backdropPath: movie.backdrop_path,
-          overview: movie.overview ?? null,
+          overview: (episode?.overview || movie.overview) ?? null,
           downloadType: isHls ? 'hls' : 'file',
           sourceUrl: opt.url,
           headers,

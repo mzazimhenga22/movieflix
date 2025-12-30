@@ -33,6 +33,9 @@ const UPDATE_FEED_URL = (() => {
   const explicit = (process.env.EXPO_PUBLIC_APP_UPDATE_FEED_URL ?? '').trim();
   if (explicit) return explicit;
 
+  const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+  if (supabaseUrl) return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/app-update`;
+
   return '';
 })();
 
@@ -153,7 +156,7 @@ export default function UpdateGate({ children }: Props) {
       {children}
 
       {prompt ? (
-        <View style={styles.overlay} pointerEvents="box-none">
+        <View style={styles.overlay} pointerEvents="auto">
           <View style={styles.card}>
             <Text style={styles.title}>Update available</Text>
             <Text style={styles.subtitle}>{prompt.message}</Text>
@@ -196,8 +199,12 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
+    top: 0,
     bottom: 0,
-    padding: 16,
+    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   card: {
     width: '100%',

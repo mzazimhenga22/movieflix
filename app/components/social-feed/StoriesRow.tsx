@@ -13,7 +13,8 @@ import {
     useWindowDimensions,
     Animated,
 } from 'react-native';
-import { onStoriesUpdate } from './storiesController';
+import { useUser } from '../../../hooks/use-user';
+import { onStoriesUpdateForViewer } from './storiesController';
 
 interface Props {
   showAddStory?: boolean;
@@ -22,6 +23,7 @@ interface Props {
 export default function StoriesRow({ showAddStory = false }: Props) {
   const router = useRouter();
   const { width } = useWindowDimensions();
+  const { user } = useUser();
   const [stories, setStories] = useState<any[]>([]);
   const [pressedStory, setPressedStory] = useState<string | null>(null);
 
@@ -33,7 +35,9 @@ export default function StoriesRow({ showAddStory = false }: Props) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    const unsubscribe = onStoriesUpdate((rawStories) => {
+    const viewerId = (user as any)?.uid ? String((user as any).uid) : null;
+    const unsubscribe = onStoriesUpdateForViewer(
+      (rawStories) => {
       const grouped: Record<string, any[]> = {};
       rawStories.forEach((s) => {
         const uid = s.userId || 'unknown';
@@ -57,26 +61,30 @@ export default function StoriesRow({ showAddStory = false }: Props) {
             id: userId,
             userId,
             username: first?.username ?? 'Story',
-            photoURL: last?.photoURL ?? null,
+            photoURL: last?.photoURL ?? last?.mediaUrl ?? null,
             avatar: last?.userAvatar ?? last?.avatar ?? null,
             media: sorted
-              .filter((s) => !!s?.photoURL)
+              .filter((s) => !!(s?.photoURL || (s as any)?.mediaUrl))
               .slice(0, 40)
               .map((s) => ({
-                type: 'image' as const,
-                uri: String(s.photoURL),
+                type: ((s as any)?.mediaType === 'video' ? 'video' : 'image') as 'image' | 'video',
+                uri: String(s.photoURL || (s as any)?.mediaUrl),
                 storyId: String(s.id),
                 caption: typeof s.caption === 'string' ? s.caption : undefined,
                 overlayText: typeof s.overlayText === 'string' ? s.overlayText : undefined,
+                createdAtMs:
+                  s.createdAt && typeof s.createdAt?.toMillis === 'function' ? s.createdAt.toMillis() : null,
               })),
           };
         })
         .filter(Boolean);
 
       setStories(groups as any);
-    });
+      },
+      { viewerId },
+    );
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
   const handleStoryUpload = () => {
     router.push('/story-upload');

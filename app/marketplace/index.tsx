@@ -7,7 +7,7 @@ import { Alert, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpac
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { useAccent } from '../components/AccentContext';
-import { Product as APIProduct, getProducts } from './api';
+import { Product as APIProduct, getProducts, trackPromotionClick } from './api';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
 import ProductCard from './components/ProductCard';
 import { useActiveProfile } from '../../hooks/use-active-profile';
@@ -343,7 +343,13 @@ export default function MarketplaceScreen() {
                       <ProductCard
                         key={product.id}
                         product={product as any}
-                        onPress={() => router.push((`/marketplace/${product.id}`) as any)}
+                        onPress={() => {
+                          if ((product as any)?.id && (product as any)?.promoted) {
+                            const placement = ((product as any).promotionPlacement || 'feed') as any;
+                            void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => {});
+                          }
+                          router.push((`/marketplace/${product.id}`) as any);
+                        }}
                         onMessage={() => handleMessageSeller(product as any)}
                       />
                     ))}
@@ -367,7 +373,13 @@ export default function MarketplaceScreen() {
                       <ProductCard
                         key={product.id}
                         product={product as any}
-                        onPress={() => router.push((`/marketplace/${product.id}`) as any)}
+                        onPress={() => {
+                          if ((product as any)?.id && (product as any)?.promoted) {
+                            const placement = ((product as any).promotionPlacement || 'feed') as any;
+                            void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => {});
+                          }
+                          router.push((`/marketplace/${product.id}`) as any);
+                        }}
                         onMessage={() => handleMessageSeller(product as any)}
                       />
                     ))}

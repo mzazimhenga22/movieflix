@@ -8,6 +8,7 @@ import {
   getDoc,
   setDoc,
   updateDoc,
+  increment,
   serverTimestamp,
 } from 'firebase/firestore';
 import app from '../../../constants/firebase';
@@ -96,6 +97,16 @@ export enum ProductType {
   EVENT = 'Event',
 }
 
+export type PromotionPlacement = 'search' | 'story' | 'feed';
+
+export type PromotionMetrics = {
+  totalImpressions?: number;
+  totalClicks?: number;
+  byPlacement?: Partial<Record<PromotionPlacement, { impressions?: number; clicks?: number }>>;
+  lastImpressionAt?: any;
+  lastClickAt?: any;
+};
+
 export interface Product {
   id?: string;
   name: string;
@@ -115,11 +126,12 @@ export interface Product {
   promoted?: boolean;
   promotionBid?: number;
   promotionEndsAt?: any;
-  promotionPlacement?: 'search' | 'story' | 'feed';
+  promotionPlacement?: PromotionPlacement;
   promotionDurationUnit?: 'hours' | 'days';
   promotionDurationValue?: number;
   promotionCost?: number;
   promotionWeight?: number;
+  promotionMetrics?: PromotionMetrics;
   createdAt: any;
 }
 
@@ -151,13 +163,41 @@ const toMillis = (value: any): number | null => {
 
 export const isProductPromoted = (
   product: Product,
-  placement?: 'search' | 'story' | 'feed'
+  placement?: PromotionPlacement
 ): boolean => {
   if (!product?.promoted) return false;
   if (placement && product.promotionPlacement && product.promotionPlacement !== placement) return false;
   const endsAtMs = toMillis((product as any).promotionEndsAt);
   if (typeof endsAtMs === 'number' && endsAtMs <= Date.now()) return false;
   return true;
+};
+
+export const trackPromotionImpression = async (args: {
+  productId: string;
+  placement: PromotionPlacement;
+}): Promise<void> => {
+  const productId = String(args.productId || '').trim();
+  const placement = args.placement;
+  if (!productId) return;
+  await updateDoc(doc(db, 'marketplace_products', productId), {
+    'promotionMetrics.totalImpressions': increment(1),
+    [`promotionMetrics.byPlacement.${placement}.impressions`]: increment(1),
+    'promotionMetrics.lastImpressionAt': serverTimestamp(),
+  } as any);
+};
+
+export const trackPromotionClick = async (args: {
+  productId: string;
+  placement: PromotionPlacement;
+}): Promise<void> => {
+  const productId = String(args.productId || '').trim();
+  const placement = args.placement;
+  if (!productId) return;
+  await updateDoc(doc(db, 'marketplace_products', productId), {
+    'promotionMetrics.totalClicks': increment(1),
+    [`promotionMetrics.byPlacement.${placement}.clicks`]: increment(1),
+    'promotionMetrics.lastClickAt': serverTimestamp(),
+  } as any);
 };
 
 export type SellerPaymentMethod = 'bank' | 'paypal' | 'momo';

@@ -115,6 +115,7 @@ const SelectProfileScreen = () => {
   const [pinEntry, setPinEntry] = useState('')
   const [pinError, setPinError] = useState<string | null>(null)
   const [keyboardVisible, setKeyboardVisible] = useState(false)
+  const [keyboardHeight, setKeyboardHeight] = useState(0)
   const [pinEntryFocused, setPinEntryFocused] = useState(false)
   const [profilePinFocused, setProfilePinFocused] = useState(false)
   const gradientFade = React.useRef(new Animated.Value(0)).current
@@ -167,8 +168,15 @@ const SelectProfileScreen = () => {
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide'
-    const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true))
-    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false))
+    const showSub = Keyboard.addListener(showEvent, (e: any) => {
+      setKeyboardVisible(true)
+      const h = Number(e?.endCoordinates?.height ?? 0)
+      setKeyboardHeight(Number.isFinite(h) ? h : 0)
+    })
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardVisible(false)
+      setKeyboardHeight(0)
+    })
     return () => {
       showSub.remove()
       hideSub.remove()
@@ -548,8 +556,43 @@ const SelectProfileScreen = () => {
       if (editingProfile) {
         const profileRef = doc(firestore, 'users', currentUser.uid, 'profiles', editingProfile.id)
         await updateDoc(profileRef, payload)
+
+        // Persist locally so the edited profile remains visible offline immediately.
+        if (profileCacheKey) {
+          const next = profiles.map((p) =>
+            p.id === editingProfile.id
+              ? {
+                  ...p,
+                  name: trimmedName,
+                  avatarColor: chosenColor,
+                  isKids: isKidsProfile,
+                  pin: normalizedPin.length === 4 ? normalizedPin : null,
+                  photoURL: uploadResult?.url ?? p.photoURL ?? null,
+                  photoPath: uploadResult?.path ?? p.photoPath ?? null,
+                }
+              : p,
+          )
+          setProfiles(next)
+          AsyncStorage.setItem(profileCacheKey, JSON.stringify(next)).catch(() => {})
+        }
       } else {
-        await addDoc(collection(firestore, 'users', currentUser.uid, 'profiles'), payload)
+        const docRef = await addDoc(collection(firestore, 'users', currentUser.uid, 'profiles'), payload)
+
+        // Persist locally so the new profile is available offline even before Firestore snapshot updates.
+        if (profileCacheKey) {
+          const created: HouseholdProfile = {
+            id: docRef.id,
+            name: trimmedName,
+            avatarColor: chosenColor,
+            photoURL: uploadResult?.url ?? null,
+            photoPath: uploadResult?.path ?? null,
+            isKids: isKidsProfile,
+            pin: normalizedPin.length === 4 ? normalizedPin : null,
+          }
+          const next = [...profiles, created]
+          setProfiles(next)
+          AsyncStorage.setItem(profileCacheKey, JSON.stringify(next)).catch(() => {})
+        }
       }
 
       resetForm()
@@ -899,6 +942,9 @@ const SelectProfileScreen = () => {
               pointerEvents={sheetVisible ? 'auto' : 'none'}
               style={[
                 styles.sheet,
+                Platform.OS === 'android' && keyboardVisible && keyboardHeight > 0
+                  ? { bottom: 24 + keyboardHeight }
+                  : null,
                 {
                   transform: [
                     {

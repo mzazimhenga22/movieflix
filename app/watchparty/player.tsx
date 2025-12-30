@@ -7,7 +7,7 @@ import * as Brightness from 'expo-brightness';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -876,6 +876,19 @@ const WatchPartyPlayerScreen = () => {
     }
   }, [rawHeaders]);
 
+  const [resolvedVideoUrl, setResolvedVideoUrl] = useState<string | undefined>(() => passedVideoUrl);
+  const [resolvedVideoHeaders, setResolvedVideoHeaders] = useState<Record<string, string> | undefined>(
+    () => parsedVideoHeaders,
+  );
+  const [resolvedStreamType, setResolvedStreamType] = useState<string | undefined>(() => passedStreamType);
+
+  useEffect(() => {
+    if (roomCode) return;
+    setResolvedVideoUrl(passedVideoUrl);
+    setResolvedVideoHeaders(parsedVideoHeaders);
+    setResolvedStreamType(passedStreamType);
+  }, [roomCode, passedVideoUrl, parsedVideoHeaders, passedStreamType]);
+
   // PStream hooks
   const { loading: scrapingInitial, scrape: scrapeInitial } = usePStream();
   const { loading: scrapingEpisode, scrape: scrapeEpisode } = usePStream();
@@ -885,8 +898,12 @@ const WatchPartyPlayerScreen = () => {
   const [scrapeError, setScrapeError] = useState<string | null>(null);
   const [episodeDrawerOpen, setEpisodeDrawerOpen] = useState(false);
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
-    passedVideoUrl
-      ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+    resolvedVideoUrl
+      ? createPlaybackSource({
+          uri: resolvedVideoUrl,
+          headers: resolvedVideoHeaders,
+          streamType: resolvedStreamType,
+        })
       : null,
   );
 
@@ -933,6 +950,146 @@ const WatchPartyPlayerScreen = () => {
   const [chatSending, setChatSending] = useState(false);
   const [showChat, setShowChat] = useState(true);
 
+  const watchPartyRef = useMemo(() => (roomCode ? doc(firestore, 'watchParties', roomCode) : null), [roomCode]);
+  const [watchPartyHostId, setWatchPartyHostId] = useState<string | null>(null);
+  const isWatchPartyHost = Boolean(roomCode && user?.uid && watchPartyHostId && user.uid === watchPartyHostId);
+
+  const playbackSourceRef = useRef<PlaybackSource | null>(playbackSource);
+  useEffect(() => {
+    playbackSourceRef.current = playbackSource;
+  }, [playbackSource]);
+
+  const applyingRemotePlaybackRef = useRef(false);
+  const pendingRemotePlaybackRef = useRef<{
+    isPlaying: boolean;
+    positionMillis: number;
+    updatedAtMillis: number;
+  } | null>(null);
+  const lastRemoteUpdatedAtRef = useRef(0);
+  const lastPlaybackPublishRef = useRef({ ts: 0, positionMillis: 0, isPlaying: false });
+
+  const publishWatchPartyPlayback = useCallback(
+    async (next: { isPlaying: boolean; positionMillis: number }, opts?: { force?: boolean }) => {
+      if (!watchPartyRef) return;
+      if (!isWatchPartyHost) return;
+      if (!user?.uid) return;
+
+      const now = Date.now();
+      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 900) return;
+      lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
+
+      await updateDoc(watchPartyRef, {
+        isOpen: true,
+        playback: {
+          isPlaying: next.isPlaying,
+          positionMillis: Math.max(0, Math.floor(next.positionMillis)),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp(),
+        },
+      }).catch(() => {});
+    },
+    [isWatchPartyHost, user?.uid, watchPartyRef],
+  );
+
+  const applyRemotePlayback = useCallback(
+    async (remote: { isPlaying: boolean; positionMillis: number; updatedAtMillis: number }) => {
+      const video = videoRef.current;
+      if (!video) {
+        pendingRemotePlaybackRef.current = remote;
+        return;
+      }
+
+      const updatedAtMillis = remote.updatedAtMillis || 0;
+      if (updatedAtMillis && updatedAtMillis <= lastRemoteUpdatedAtRef.current) return;
+      if (updatedAtMillis) lastRemoteUpdatedAtRef.current = updatedAtMillis;
+
+      let desiredPosition = remote.positionMillis;
+      if (remote.isPlaying && updatedAtMillis) {
+        desiredPosition += Math.max(0, Date.now() - updatedAtMillis);
+      }
+      desiredPosition = Math.max(0, desiredPosition);
+      if (durationMillis > 0) {
+        desiredPosition = Math.min(desiredPosition, Math.max(0, durationMillis - 250));
+      }
+
+      const diff = Math.abs(positionMillisRef.current - desiredPosition);
+      applyingRemotePlaybackRef.current = true;
+      try {
+        if (diff > 1500) {
+          await video.setPositionAsync(desiredPosition);
+        }
+        if (remote.isPlaying) {
+          await video.playAsync();
+        } else {
+          await video.pauseAsync();
+        }
+      } catch {
+        pendingRemotePlaybackRef.current = remote;
+      } finally {
+        applyingRemotePlaybackRef.current = false;
+      }
+    },
+    [durationMillis],
+  );
+
+  useEffect(() => {
+    if (!watchPartyRef) return;
+    const unsub = onSnapshot(watchPartyRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      const hostId = typeof data.hostId === 'string' ? data.hostId : null;
+      setWatchPartyHostId(hostId);
+
+      if (!passedVideoUrl && typeof data.videoUrl === 'string' && data.videoUrl) {
+        setResolvedVideoUrl((prev) => prev ?? data.videoUrl);
+      }
+      if (!parsedVideoHeaders && data.videoHeaders && typeof data.videoHeaders === 'object') {
+        setResolvedVideoHeaders((prev) => prev ?? (data.videoHeaders as Record<string, string>));
+      }
+      if (!passedStreamType && typeof data.streamType === 'string' && data.streamType) {
+        setResolvedStreamType((prev) => prev ?? data.streamType);
+      }
+
+      const playback = data.playback;
+      const hostNow = Boolean(user?.uid && hostId && user.uid === hostId);
+      if (hostNow) return;
+      if (!playback || typeof playback !== 'object') return;
+
+      const isPlaying = Boolean(playback.isPlaying);
+      const positionMillis = typeof playback.positionMillis === 'number' ? playback.positionMillis : 0;
+      const updatedAtMillis =
+        typeof playback.updatedAt?.toMillis === 'function'
+          ? playback.updatedAt.toMillis()
+          : typeof playback.updatedAt === 'number'
+            ? playback.updatedAt
+            : 0;
+
+      const remote = { isPlaying, positionMillis, updatedAtMillis };
+      pendingRemotePlaybackRef.current = remote;
+      if (playbackSourceRef.current?.uri) {
+        void applyRemotePlayback(remote);
+      }
+    });
+    return () => unsub();
+  }, [applyRemotePlayback, parsedVideoHeaders, passedStreamType, passedVideoUrl, user?.uid, watchPartyRef]);
+
+  useEffect(() => {
+    if (!watchPartyRef) return;
+    if (!user?.uid) return;
+
+    void updateDoc(watchPartyRef, {
+      isOpen: true,
+      videoUrl: resolvedVideoUrl ?? null,
+      videoHeaders: resolvedVideoHeaders ?? null,
+      streamType: resolvedStreamType ?? null,
+    }).catch(() => {});
+
+    return () => {
+      if (!isWatchPartyHost) return;
+      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => {});
+    };
+  }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
+
   const [videoReloadKey, setVideoReloadKey] = useState(0);
 
   const resumeAppliedRef = useRef(false);
@@ -975,6 +1132,7 @@ const WatchPartyPlayerScreen = () => {
     initialEpisodeNumber,
     initialSeasonTitleValue,
   ]);
+
 
   const watchEntryRef = useRef<Media | null>(null);
   const watchHistoryPersistRef = useRef(0);
@@ -1120,8 +1278,12 @@ const WatchPartyPlayerScreen = () => {
   // Reset state when video URL changes
   useEffect(() => {
     setPlaybackSource(
-      passedVideoUrl
-        ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+      resolvedVideoUrl
+        ? createPlaybackSource({
+            uri: resolvedVideoUrl,
+            headers: resolvedVideoHeaders,
+            streamType: resolvedStreamType,
+          })
         : null,
     );
     setScrapeError(null);
@@ -1141,7 +1303,7 @@ const WatchPartyPlayerScreen = () => {
     hlsProxyRetryRef.current = false;
     hlsVariantRetryRef.current = false;
     setVideoReloadKey((prev) => prev + 1);
-  }, [passedVideoUrl, parsedVideoHeaders, passedStreamType]);
+  }, [resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl]);
 
   // Update master playlist ref
   useEffect(() => {
@@ -1535,7 +1697,12 @@ const WatchPartyPlayerScreen = () => {
           .catch(() => {});
       }
     }
-  }, []);
+
+    const pendingRemote = pendingRemotePlaybackRef.current;
+    if (pendingRemote) {
+      void applyRemotePlayback(pendingRemote);
+    }
+  }, [applyRemotePlayback]);
 
   // ============================================================================
   // FIXED: Probe the playback source properly for different video hosts
@@ -2215,6 +2382,18 @@ const WatchPartyPlayerScreen = () => {
       setSeekPosition(currentPosition);
     }
     setPositionMillis(currentPosition);
+
+    if (roomCode && isWatchPartyHost && !applyingRemotePlaybackRef.current) {
+      const now = Date.now();
+      const last = lastPlaybackPublishRef.current;
+      const shouldSyncWhilePlaying =
+        playingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
+      const shouldSyncWhilePaused =
+        !playingNow && now - last.ts > 5000 && Math.abs(currentPosition - last.positionMillis) > 1200;
+      if (shouldSyncWhilePlaying || shouldSyncWhilePaused) {
+        void publishWatchPartyPlayback({ isPlaying: playingNow, positionMillis: currentPosition });
+      }
+    }
     updateActiveCaption(currentPosition);
 
     if (status.durationMillis) {
@@ -2233,8 +2412,11 @@ const WatchPartyPlayerScreen = () => {
     isSeeking,
     maybeAutoDowngradeQuality,
     movieSettings.autoLowerQualityOnBuffer,
+    isWatchPartyHost,
     persistWatchProgress,
+    publishWatchPartyPlayback,
     resumeMillisParam,
+    roomCode,
     selectedQualityId,
     showBufferingOverlay,
     updateActiveCaption,
@@ -2254,6 +2436,12 @@ const WatchPartyPlayerScreen = () => {
     const video = videoRef.current;
     if (!video) return;
     bumpControlsLife();
+
+    const nextPlaying = !isPlaying;
+    void publishWatchPartyPlayback(
+      { isPlaying: nextPlaying, positionMillis: positionMillisRef.current },
+      { force: true },
+    );
 
     try {
       if (isPlaying) {
@@ -2284,6 +2472,8 @@ const WatchPartyPlayerScreen = () => {
     );
     await video.setPositionAsync(next);
     setSeekPosition(next);
+
+    void publishWatchPartyPlayback({ isPlaying, positionMillis: next }, { force: true });
   };
 
   // Toggle playback rate

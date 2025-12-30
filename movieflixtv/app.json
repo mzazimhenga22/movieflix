@@ -1,0 +1,76 @@
+{
+  "expo": {
+    "name": "MovieFlix TV",
+    "slug": "movieflix",
+    "version": "1.0.0",
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/56b697d6-b709-4b80-909a-27b3a97856c1",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
+    "orientation": "landscape",
+    "icon": "./assets/images/logo.png",
+    "scheme": "movieflixtv",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.movieflix.tv",
+      "backgroundColor": "#05060f"
+    },
+    "android": {
+      "package": "com.movieflix.tv",
+      "adaptiveIcon": {
+        "backgroundColor": "#05060f",
+        "foregroundImage": "./assets/images/logo.png"
+      },
+      "backgroundColor": "#05060f",
+      "edgeToEdgeEnabled": true
+    },
+    "splash": {
+      "image": "./assets/images/movies-splash.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#05060f"
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/movies-splash.png",
+          "resizeMode": "cover",
+          "backgroundColor": "#05060f",
+          "dark": {
+            "image": "./assets/images/movies-splash.png",
+            "backgroundColor": "#05060f"
+          }
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "56b697d6-b709-4b80-909a-27b3a97856c1"
+      }
+    },
+    "owner": "vivescharris"
+  }
+}

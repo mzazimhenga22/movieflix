@@ -8,7 +8,6 @@ import { buildProfileScopedKey } from '../../../../lib/profileStorage';
 import { Media, Genre } from '../../../../types/index';
 import { shuffleArray, KIDS_GENRE_IDS } from '../utils/constants';
 import { useFocusEffect } from 'expo-router';
-import { doc, getDoc } from 'firebase/firestore';
 
 const HOME_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -94,21 +93,67 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
   const buildKidsUrl = useCallback(
     (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
       if (!isKidsProfile) return input;
-      const url = new URL(input);
-      url.searchParams.set('include_adult', 'false');
-      url.searchParams.set('with_genres', '10751');
+      // NOTE: Avoid `new URL()` in RN release builds (it may not be available depending on runtime/polyfills).
+      const upsertQueryParams = (url: string, updates: Record<string, string>) => {
+        const hashIndex = url.indexOf('#');
+        const hash = hashIndex >= 0 ? url.slice(hashIndex) : '';
+        const withoutHash = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+
+        const qIndex = withoutHash.indexOf('?');
+        const base = qIndex >= 0 ? withoutHash.slice(0, qIndex) : withoutHash;
+        const query = qIndex >= 0 ? withoutHash.slice(qIndex + 1) : '';
+
+        const params: Record<string, string> = {};
+        if (query) {
+          for (const part of query.split('&')) {
+            if (!part) continue;
+            const eq = part.indexOf('=');
+            const rawKey = eq >= 0 ? part.slice(0, eq) : part;
+            const rawVal = eq >= 0 ? part.slice(eq + 1) : '';
+            let key = rawKey;
+            let val = rawVal;
+            try {
+              key = decodeURIComponent(rawKey);
+            } catch {
+              // keep as-is
+            }
+            try {
+              val = decodeURIComponent(rawVal);
+            } catch {
+              // keep as-is
+            }
+            if (key) params[key] = val;
+          }
+        }
+
+        for (const [k, v] of Object.entries(updates)) {
+          params[k] = v;
+        }
+
+        const qs = Object.entries(params)
+          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+          .join('&');
+        return `${base}${qs ? `?${qs}` : ''}${hash}`;
+      };
+
+      const updates: Record<string, string> = {
+        include_adult: 'false',
+        with_genres: '10751',
+      };
+
       if (type === 'movie' || type === 'discover') {
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'G');
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'G';
       } else if (type === 'tv') {
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'TV-Y');
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'TV-Y';
       } else if (type === 'all') {
         // when mixing media, prefer the most restrictive rating
-        url.searchParams.set('certification_country', 'US');
-        url.searchParams.set('certification.lte', 'TV-Y');
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'TV-Y';
       }
-      return url.toString();
+
+      return upsertQueryParams(input, updates);
     },
     [isKidsProfile],
   );
@@ -187,12 +232,22 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
     (payload: HomeFeedCachePayload): HomeFeedDerivedState => {
       const movieStoriesList = filterForKids((payload.movieStoriesData?.results || []) as Media[]);
       const tvStoriesList = filterForKids((payload.tvStoriesData?.results || []) as Media[]);
-      const combinedStories = [...movieStoriesList, ...tvStoriesList].map((item: any) => ({
-        id: item.id,
-        title: item.title || item.name || 'Untitled',
-        image: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-        media_type: item.media_type,
-      }));
+      const combinedStories = [...movieStoriesList, ...tvStoriesList]
+        .map((item: any) => {
+          const image = item?.poster_path ? `${IMAGE_BASE_URL}${item.poster_path}` : '';
+          const title = item?.title || item?.name || 'Untitled';
+          const id = item?.id;
+
+          return {
+            id,
+            title,
+            image,
+            avatar: image,
+            media_type: item?.media_type,
+            media: image ? [{ type: 'image', uri: image, storyId: id }] : [],
+          };
+        })
+        .filter((s: any) => Boolean(s?.image));
 
       const trendingRaw = (payload.trendingData?.results || []) as Media[];
       const trendingResults = filterForKids(trendingRaw);
@@ -223,6 +278,82 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       };
     },
     [filterForKids]
+  );
+
+  const fetchTrailersForMovies = useCallback(
+    async (movies: Media[]) => {
+      if (!movies || movies.length === 0) return;
+      console.log('[MovieTrailers] Starting fetch for movies:', movies.length);
+      const cacheKey = `movieTrailers:${homeFeedCacheScope}`;
+
+      try {
+        // Read cached trailers first
+        try {
+          const cached = await AsyncStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached) as (Media & { trailerUrl: string })[];
+            if (parsed?.length) {
+              setMovieTrailers(parsed);
+            }
+          }
+        } catch (err) {
+          console.warn('[MovieTrailers] Failed to read cache', err);
+        }
+
+        InteractionManager.runAfterInteractions(() => {
+          void (async () => {
+            const concurrency = 2;
+            const results: (Media & { trailerUrl: string })[] = [];
+            const queue = movies.slice(0, 6);
+            let index = 0;
+
+            const worker = async () => {
+              while (true) {
+                const i = index++;
+                if (i >= queue.length) return;
+                const movie = queue[i];
+                try {
+                  let imdbId = movie.imdb_id;
+                  if (!imdbId && movie.id) {
+                    const externalIdsUrl = `${API_BASE_URL}/movie/${movie.id}/external_ids?api_key=${API_KEY}`;
+                    const externalRes = await fetch(externalIdsUrl);
+                    if (externalRes.ok) {
+                      const externalData = await externalRes.json();
+                      imdbId = externalData.imdb_id;
+                    }
+                  }
+
+                  if (imdbId) {
+                    const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
+                    if (trailer?.url) {
+                      results.push({ ...movie, imdb_id: imdbId, trailerUrl: trailer.url });
+                      setMovieTrailers([...results]);
+                    }
+                  }
+                } catch (err) {
+                  console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
+                }
+              }
+            };
+
+            const workers = [] as Promise<void>[];
+            for (let w = 0; w < concurrency; w++) workers.push(worker());
+            await Promise.all(workers);
+
+            try {
+              await AsyncStorage.setItem(cacheKey, JSON.stringify(results));
+            } catch (err) {
+              console.warn('[MovieTrailers] Failed to persist cache', err);
+            }
+
+            console.log('[MovieTrailers] Completed, found:', results.length);
+          })();
+        });
+      } catch (err) {
+        console.error('[MovieTrailers] Unexpected error:', err);
+      }
+    },
+    [homeFeedCacheScope]
   );
 
   const applyDerivedState = useCallback(
@@ -352,82 +483,6 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       fetchWithKids,
       homeFeedCacheKey,
     ]
-  );
-
-  const fetchTrailersForMovies = useCallback(
-    async (movies: Media[]) => {
-      if (!movies || movies.length === 0) return;
-      console.log('[MovieTrailers] Starting fetch for movies:', movies.length);
-      const cacheKey = `movieTrailers:${homeFeedCacheScope}`;
-
-      try {
-        // Read cached trailers first
-        try {
-          const cached = await AsyncStorage.getItem(cacheKey);
-          if (cached) {
-            const parsed = JSON.parse(cached) as (Media & { trailerUrl: string })[];
-            if (parsed?.length) {
-              setMovieTrailers(parsed);
-            }
-          }
-        } catch (err) {
-          console.warn('[MovieTrailers] Failed to read cache', err);
-        }
-
-        InteractionManager.runAfterInteractions(() => {
-          void (async () => {
-            const concurrency = 2;
-            const results: (Media & { trailerUrl: string })[] = [];
-            const queue = movies.slice(0, 6);
-            let index = 0;
-
-            const worker = async () => {
-              while (true) {
-                const i = index++;
-                if (i >= queue.length) return;
-                const movie = queue[i];
-                try {
-                  let imdbId = movie.imdb_id;
-                  if (!imdbId && movie.id) {
-                    const externalIdsUrl = `${API_BASE_URL}/movie/${movie.id}/external_ids?api_key=${API_KEY}`;
-                    const externalRes = await fetch(externalIdsUrl);
-                    if (externalRes.ok) {
-                      const externalData = await externalRes.json();
-                      imdbId = externalData.imdb_id;
-                    }
-                  }
-
-                  if (imdbId) {
-                    const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
-                    if (trailer?.url) {
-                      results.push({ ...movie, imdb_id: imdbId, trailerUrl: trailer.url });
-                      setMovieTrailers([...results]);
-                    }
-                  }
-                } catch (err) {
-                  console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
-                }
-              }
-            };
-
-            const workers = [] as Promise<void>[];
-            for (let w = 0; w < concurrency; w++) workers.push(worker());
-            await Promise.all(workers);
-
-            try {
-              await AsyncStorage.setItem(cacheKey, JSON.stringify(results));
-            } catch (err) {
-              console.warn('[MovieTrailers] Failed to persist cache', err);
-            }
-
-            console.log('[MovieTrailers] Completed, found:', results.length);
-          })();
-        });
-      } catch (err) {
-        console.error('[MovieTrailers] Unexpected error:', err);
-      }
-    },
-    [homeFeedCacheScope]
   );
 
   useEffect(() => {

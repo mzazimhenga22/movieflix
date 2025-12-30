@@ -306,7 +306,8 @@ const MessageInput = ({
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
-        quality: 1,
+        videoExportPreset: ImagePicker.VideoExportPreset.HEVC_1920x1080,
+        quality: 0.9,
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const asset = result.assets[0];
@@ -440,6 +441,26 @@ const MessageInput = ({
               >
                 <View style={styles.emojiModalHandle} />
                 <SafeEmojiPicker onEmojiSelected={appendEmoji} columns={9} showSearchBar />
+                <View style={styles.emojiModalActions}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setShowEmojis(false);
+                      setTimeout(() => inputRef.current?.focus(), 0);
+                    }}
+                    style={styles.emojiModalActionBtn}
+                  >
+                    <Ionicons name="create-outline" size={18} color="#fff" />
+                    <Text style={styles.emojiModalActionText}>Type message</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => setShowEmojis(false)}
+                    style={[styles.emojiModalActionBtn, styles.emojiModalCloseBtn]}
+                  >
+                    <Ionicons name="close" size={18} color="#fff" />
+                    <Text style={styles.emojiModalActionText}>Close</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </KeyboardAvoidingView>
           </View>
@@ -688,6 +709,34 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.18)',
     marginTop: 10,
     marginBottom: 6,
+  },
+  emojiModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+  },
+  emojiModalActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  emojiModalCloseBtn: {
+    backgroundColor: 'rgba(255,75,75,0.18)',
+    borderColor: 'rgba(255,75,75,0.5)',
+  },
+  emojiModalActionText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
   },
   attachSheet: {
     backgroundColor: 'rgba(42, 42, 42, 0.95)',

@@ -1,7 +1,8 @@
 import { useRouter } from 'expo-router';
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
+import { trackPromotionClick, trackPromotionImpression } from '../../app/marketplace/api';
 import { usePromotedProducts } from '../../hooks/use-promoted-products';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 
@@ -11,10 +12,20 @@ export default function AdBanner({ placement = 'feed' }: { placement?: 'feed' | 
   const { products } = usePromotedProducts({ placement, limit: 20 });
 
   const pickRef = useRef(Math.floor(Math.random() * 10_000));
+  const lastImpressionIdRef = useRef<string | null>(null);
   const product = useMemo(() => {
     if (!products.length) return null;
     return products[pickRef.current % products.length];
   }, [products]);
+
+  // best-effort: count one impression per picked product per mount
+  useEffect(() => {
+    if (currentPlan !== 'free') return;
+    if (!product?.id) return;
+    if (lastImpressionIdRef.current === product.id) return;
+    lastImpressionIdRef.current = product.id;
+    void trackPromotionImpression({ productId: product.id, placement }).catch(() => {});
+  }, [currentPlan, placement, product?.id]);
 
   if (currentPlan !== 'free') return null;
   if (!product?.id) return null;
@@ -22,7 +33,10 @@ export default function AdBanner({ placement = 'feed' }: { placement?: 'feed' | 
   return (
     <TouchableOpacity
       activeOpacity={0.9}
-      onPress={() => router.push((`/marketplace/${product.id}`) as any)}
+      onPress={() => {
+        void trackPromotionClick({ productId: product.id, placement }).catch(() => {});
+        router.push((`/marketplace/${product.id}`) as any);
+      }}
       style={styles.wrap}
     >
       <View style={styles.badge}>

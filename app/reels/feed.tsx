@@ -49,6 +49,7 @@ import { useSubscription } from '../../providers/SubscriptionProvider'
 import { injectAdsWithPattern } from '../../lib/ads/sequence'
 import ReelAdSlide from '../../components/ads/ReelAdSlide'
 import { usePromotedProducts } from '../../hooks/use-promoted-products'
+import { trackPromotionClick, trackPromotionImpression } from '../marketplace/api'
 
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window')
 
@@ -181,6 +182,17 @@ export default function FeedReelsScreen() {
   }, [currentIndex])
   const [items, setItems] = useState<ReelItem[]>(queueWithAds)
 
+  const adImpressionsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const cur: any = items[currentIndex]
+    if (!cur || cur.type !== 'ad') return
+    const productId = String(cur.productId || '')
+    if (!productId) return
+    if (adImpressionsRef.current.has(productId)) return
+    adImpressionsRef.current.add(productId)
+    void trackPromotionImpression({ productId, placement: 'feed' }).catch(() => {})
+  }, [currentIndex, items])
+
   // ✅ only update state when queue actually changes (prevents render loops)
   useEffect(() => {
     setItems(queueWithAds)
@@ -229,7 +241,12 @@ export default function FeedReelsScreen() {
         return (
           <ReelAdSlide
             product={product as any}
-            onPress={() => router.push((`/marketplace/${product.id}`) as any)}
+            onPress={() => {
+              if (product?.id) {
+                void trackPromotionClick({ productId: String(product.id), placement: 'feed' }).catch(() => {})
+              }
+              router.push((`/marketplace/${product.id}`) as any)
+            }}
           />
         )
       }

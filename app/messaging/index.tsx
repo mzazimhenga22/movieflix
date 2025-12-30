@@ -31,7 +31,7 @@ import type { User } from 'firebase/auth'
 import { useMessagingSettings } from '@/hooks/useMessagingSettings'
 import ScreenWrapper from '../../components/ScreenWrapper'
 import { Media } from '../../types'
-import { onStoriesUpdate } from '../components/social-feed/storiesController'
+import { onStoriesUpdateForViewer } from '../components/social-feed/storiesController'
 import { useActiveProfile } from '../../hooks/use-active-profile'
 import { useAccent } from '../components/AccentContext'
 import { accentGradient, darkenColor, withAlpha } from '../../lib/colorUtils'
@@ -147,6 +147,54 @@ const MessagingScreen = () => {
   const activeProfile = useActiveProfile()
   const profileGreetingName = activeProfile?.name ?? 'streamer'
 
+  // Local read tracking (used when read receipts are disabled and as a fast UI fallback).
+  const localReadStorageKey = user?.uid ? `chat_local_lastReadAtBy_${user.uid}` : null
+  const [localReadAtByConversation, setLocalReadAtByConversation] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    if (!localReadStorageKey) {
+      setLocalReadAtByConversation({})
+      return
+    }
+
+    let alive = true
+    void AsyncStorage.getItem(localReadStorageKey)
+      .then((raw) => {
+        if (!alive) return
+        if (!raw) {
+          setLocalReadAtByConversation({})
+          return
+        }
+        try {
+          const parsed = JSON.parse(raw) as Record<string, number>
+          setLocalReadAtByConversation(parsed && typeof parsed === 'object' ? parsed : {})
+        } catch {
+          setLocalReadAtByConversation({})
+        }
+      })
+      .catch(() => {
+        if (alive) setLocalReadAtByConversation({})
+      })
+
+    return () => {
+      alive = false
+    }
+  }, [localReadStorageKey])
+
+  const markLocalConversationRead = useCallback(
+    (conversationId: string) => {
+      if (!localReadStorageKey) return
+      const now = Date.now()
+
+      setLocalReadAtByConversation((prev) => {
+        const next = { ...prev, [conversationId]: now }
+        void AsyncStorage.setItem(localReadStorageKey, JSON.stringify(next)).catch(() => {})
+        return next
+      })
+    },
+    [localReadStorageKey],
+  )
+
   const incomingCall = useIncomingCall(user?.uid)
   const { accentColor } = useAccent()
   const accent = accentColor || '#e50914'
@@ -261,13 +309,28 @@ const MessagingScreen = () => {
         .map((st) => {
           const uri = String(st.photoURL || (st as any).mediaUrl || '')
           if (!uri) return null
+          const explicitType = (st as any)?.mediaType
           const lower = uri.toLowerCase()
-          const type = lower.includes('.mp4') || lower.includes('.m3u8') ? ('video' as const) : ('image' as const)
+          const type =
+            explicitType === 'video'
+              ? ('video' as const)
+              : explicitType === 'image'
+                ? ('image' as const)
+                : lower.includes('.mp4') || lower.includes('.m3u8')
+                  ? ('video' as const)
+                  : ('image' as const)
+
+          const createdAtMs =
+            st.createdAt && typeof (st.createdAt as any)?.toMillis === 'function'
+              ? (st.createdAt as any).toMillis()
+              : null
           return {
             type,
             uri,
             storyId: String(st.id),
             caption: typeof st.caption === 'string' ? st.caption : undefined,
+            overlayText: typeof (st as any).overlayText === 'string' ? (st as any).overlayText : undefined,
+            createdAtMs,
           }
         })
         .filter(Boolean)
@@ -421,9 +484,12 @@ const MessagingScreen = () => {
       setConversations(list)
       setConversationsLoading(false)
     })
-    const unsubStories = onStoriesUpdate((list) => {
-      if (alive) setStories(list as any)
-    })
+    const unsubStories = onStoriesUpdateForViewer(
+      (list) => {
+        if (alive) setStories(list as any)
+      },
+      { viewerId: user.uid },
+    )
     const unsubCallHistory = listenToCallHistory(user.uid, (calls) => {
       if (alive) setCallHistory(calls)
     })
@@ -594,19 +660,26 @@ const MessagingScreen = () => {
       const lastRead = (c as any)?.lastReadAtBy?.[uid]
       const lastReadMs =
         lastRead && typeof lastRead?.toMillis === 'function' ? lastRead.toMillis() : null
+
+      const localReadMs = localReadAtByConversation[c.id] ?? null
+      const effectiveLastReadMs = Math.max(lastReadMs ?? 0, localReadMs ?? 0) || null
       const updatedAt = (c as any)?.updatedAt
       const updatedAtMs =
         updatedAt && typeof updatedAt?.toMillis === 'function' ? updatedAt.toMillis() : null
 
       const readCoversLatest =
-        lastReadMs && updatedAtMs ? lastReadMs >= updatedAtMs - 500 /* small clock skew */ : false
+        effectiveLastReadMs && updatedAtMs
+          ? effectiveLastReadMs >= updatedAtMs - 500 /* small clock skew */
+          : false
 
       const unread =
-        hasLastMessage && lastSenderIsNotMe && (lastReadMs ? !readCoversLatest : true) ? 1 : 0
+        hasLastMessage && lastSenderIsNotMe && (effectiveLastReadMs ? !readCoversLatest : true)
+          ? 1
+          : 0
 
       return { ...c, unread }
     })
-  }, [conversations, user?.uid])
+  }, [conversations, localReadAtByConversation, user?.uid])
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -664,12 +737,13 @@ const MessagingScreen = () => {
     (id: string) => {
       void (async () => {
         try {
+          markLocalConversationRead(id)
           await markConversationRead(id, settings.readReceipts)
         } catch {}
         router.push({ pathname: '/messaging/chat/[id]', params: { id } })
       })()
     },
-    [router, settings.readReceipts],
+    [markLocalConversationRead, router, settings.readReceipts],
   )
 
   const handleMessageLongPress = useCallback(
@@ -1278,6 +1352,7 @@ const MessagingScreen = () => {
                 <TouchableOpacity
                   style={styles.spotlightPill}
                   onPress={() => {
+                    markLocalConversationRead(spotlightConversation.id)
                     void markConversationRead(spotlightConversation.id, settings.readReceipts)
                     handleCloseSpotlight()
                   }}

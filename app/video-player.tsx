@@ -1,12 +1,12 @@
 ﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
-import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, ResizeMode, Video } from 'expo-av';
+import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, InterruptionModeAndroid, InterruptionModeIOS, ResizeMode, Video } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppStateStatus } from 'react-native';
 import {
@@ -32,6 +32,7 @@ import { firestore } from '../constants/firebase';
 import { API_BASE_URL, API_KEY } from '../constants/api';
 import { useUser } from '../hooks/use-user';
 import { usePromotedProducts } from '../hooks/use-promoted-products';
+import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
 import { logInteraction } from '../lib/algo';
 import { syncMovieMatchProfile } from '../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../lib/profileStorage';
@@ -89,6 +90,7 @@ type QualityOption = {
   uri: string;
   resolution?: string;
   bandwidth?: number;
+  codecs?: string;
 };
 const CONTROLS_HIDE_DELAY_PLAYING = 10500;
 const CONTROLS_HIDE_DELAY_PAUSED = 16500;
@@ -98,53 +100,25 @@ const DEFAULT_STREAM_UA =
 const RGSHOWS_REFERER = 'https://www.rgshows.ru/';
 const RGSHOWS_ORIGIN = 'https://www.rgshows.ru';
 
-function getM3U8ProxyBase(): string | null {
+function normalizePlaybackUri(uri: string): string {
   try {
-    const env =
-      (typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
-      (typeof process !== 'undefined' && (process.env as any)?.NEXT_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
-      (typeof process !== 'undefined' && (process.env as any)?.PSTREAM_M3U8_PROXY_URL) ||
-      (typeof process !== 'undefined' && (process.env as any)?.M3U8_PROXY_URL);
-    const normalized = typeof env === 'string' ? env.trim() : '';
-    return normalized ? normalized : null;
-  } catch {
-    return null;
-  }
-}
-
-function isM3U8ProxyUrl(uri?: string): boolean {
-  if (!uri) return false;
-  return uri.includes('m3u8-proxy') && uri.includes('url=');
-}
-
-function encodeBase64Url(value: string): string {
-  return Buffer.from(value, 'utf8').toString('base64url');
-}
-
-function pickHlsProxyHeaders(headers?: Record<string, string>): Record<string, string> {
-  const incoming = headers ?? {};
-  const pick = (key: string) => incoming[key] ?? incoming[key.toLowerCase()] ?? incoming[key.toUpperCase()];
-  const out: Record<string, string> = {};
-  const referer = pick('referer');
-  const origin = pick('origin');
-  const ua = pick('user-agent');
-  const accept = pick('accept');
-  const acceptLang = pick('accept-language');
-  if (typeof referer === 'string' && referer) out.referer = referer;
-  if (typeof origin === 'string' && origin) out.origin = origin;
-  if (typeof ua === 'string' && ua) out['user-agent'] = ua;
-  if (typeof accept === 'string' && accept) out.accept = accept;
-  if (typeof acceptLang === 'string' && acceptLang) out['accept-language'] = acceptLang;
-  return out;
-}
-
-function buildM3U8ProxyUrl(uri: string, headers?: Record<string, string>): string | null {
-  const base = getM3U8ProxyBase();
-  if (!base) return null;
-  const urlParam = encodeBase64Url(uri);
-  const h = pickHlsProxyHeaders(headers);
-  const hParam = Object.keys(h).length ? `&h=${encodeURIComponent(encodeBase64Url(JSON.stringify(h)))}` : '';
-  return `${base}?url=${urlParam}${hParam}`;
+    const urlObj = new URL(uri);
+    if (urlObj.hostname === 'proxy.pstream.mov' && urlObj.pathname === '/m3u8-proxy') {
+      const encodedUrl = urlObj.searchParams.get('url');
+      if (!encodedUrl) return uri;
+      try {
+        const decoded = decodeURIComponent(encodedUrl);
+        if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
+      } catch {}
+      try {
+        const base64 = encodedUrl.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+        const decoded = Buffer.from(padded, 'base64').toString('utf8');
+        if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
+      } catch {}
+    }
+  } catch {}
+  return uri;
 }
 
 type TmdbEnrichment = { imdbId?: string; releaseYear?: number };
@@ -244,6 +218,11 @@ function buildPlaybackHeaders(
     headers.Origin = headers.Origin ?? RGSHOWS_ORIGIN;
   }
 
+  if (headers['User-Agent'] && !headers['user-agent']) headers['user-agent'] = headers['User-Agent'];
+  if (headers.Referer && !headers.referer) headers.referer = headers.Referer;
+  if (headers.Origin && !headers.origin) headers.origin = headers.Origin;
+  if (headers.Cookie && !headers.cookie) headers.cookie = headers.Cookie;
+
   return headers;
 }
 
@@ -255,14 +234,15 @@ function createPlaybackSource(params: {
   sourceId?: string;
   embedId?: string;
 }): PlaybackSource {
-  const { uri, headers, streamType, captions, sourceId, embedId } = params;
+  const normalizedUri = normalizePlaybackUri(params.uri);
+  const { headers, streamType, captions, sourceId, embedId } = params;
   return {
-    uri,
+    uri: normalizedUri,
     streamType,
     captions,
     sourceId,
     embedId,
-    headers: buildPlaybackHeaders(uri, sourceId, embedId, headers),
+    headers: buildPlaybackHeaders(normalizedUri, sourceId, embedId, headers),
   };
 }
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
@@ -503,14 +483,31 @@ const VideoPlayerScreen = () => {
       return undefined;
     }
   }, [rawHeaders]);
+
+  const [resolvedVideoUrl, setResolvedVideoUrl] = useState<string | undefined>(() => passedVideoUrl);
+  const [resolvedVideoHeaders, setResolvedVideoHeaders] = useState<Record<string, string> | undefined>(
+    () => parsedVideoHeaders,
+  );
+  const [resolvedStreamType, setResolvedStreamType] = useState<string | undefined>(() => passedStreamType);
+
+  useEffect(() => {
+    if (roomCode) return;
+    setResolvedVideoUrl(passedVideoUrl);
+    setResolvedVideoHeaders(parsedVideoHeaders);
+    setResolvedStreamType(passedStreamType);
+  }, [roomCode, passedStreamType, passedVideoUrl, parsedVideoHeaders]);
   const { loading: scrapingInitial, scrape: scrapeInitial } = usePStream();
   const { loading: scrapingEpisode, scrape: scrapeEpisode } = usePStream();
   const isFetchingStream = scrapingInitial || scrapingEpisode;
   const [scrapeError, setScrapeError] = useState<string | null>(null);
   const [episodeDrawerOpen, setEpisodeDrawerOpen] = useState(false);
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
-    passedVideoUrl
-      ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+    resolvedVideoUrl
+      ? createPlaybackSource({
+          uri: resolvedVideoUrl,
+          headers: resolvedVideoHeaders,
+          streamType: resolvedStreamType,
+        })
       : null,
   );
 
@@ -546,8 +543,8 @@ const VideoPlayerScreen = () => {
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
         staysActiveInBackground: false,
-        interruptionModeIOS: Audio.INTERRUPTION_MODE_IOS_DUCK_OTHERS,
-        interruptionModeAndroid: Audio.INTERRUPTION_MODE_ANDROID_DUCK_OTHERS,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
@@ -603,6 +600,17 @@ const VideoPlayerScreen = () => {
   const midrollCuePointsRef = useRef<number[]>([]);
   const midrollScheduleKeyRef = useRef('');
   const [midrollProduct, setMidrollProduct] = useState<any>(null);
+  const midrollImpressionsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (currentPlan !== 'free') return;
+    if (!midrollActive) return;
+    const productId = midrollProduct?.id ? String(midrollProduct.id) : '';
+    if (!productId) return;
+    if (midrollImpressionsRef.current.has(productId)) return;
+    midrollImpressionsRef.current.add(productId);
+    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => {});
+  }, [currentPlan, midrollActive, midrollProduct?.id]);
   const pendingBrightnessRef = useRef(brightness);
   const pendingVolumeRef = useRef(volume);
   const brightnessApplyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -656,6 +664,144 @@ const VideoPlayerScreen = () => {
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
   const [showChat, setShowChat] = useState(true);
+
+  const watchPartyRef = useMemo(() => (roomCode ? doc(firestore, 'watchParties', roomCode) : null), [roomCode]);
+  const [watchPartyHostId, setWatchPartyHostId] = useState<string | null>(null);
+  const isWatchPartyHost = Boolean(roomCode && user?.uid && watchPartyHostId && user.uid === watchPartyHostId);
+
+  const applyingRemotePlaybackRef = useRef(false);
+  const pendingRemotePlaybackRef = useRef<{
+    isPlaying: boolean;
+    positionMillis: number;
+    updatedAtMillis: number;
+  } | null>(null);
+  const lastRemoteUpdatedAtRef = useRef(0);
+  const lastPlaybackPublishRef = useRef({ ts: 0, positionMillis: 0, isPlaying: false });
+
+  const publishWatchPartyPlayback = useCallback(
+    async (next: { isPlaying: boolean; positionMillis: number }, opts?: { force?: boolean }) => {
+      if (!watchPartyRef) return;
+      if (!isWatchPartyHost) return;
+      if (!user?.uid) return;
+
+      const now = Date.now();
+      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 900) return;
+      lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
+
+      await updateDoc(watchPartyRef, {
+        isOpen: true,
+        playback: {
+          isPlaying: next.isPlaying,
+          positionMillis: Math.max(0, Math.floor(next.positionMillis)),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp(),
+        },
+      }).catch(() => {});
+    },
+    [isWatchPartyHost, user?.uid, watchPartyRef],
+  );
+
+  const applyRemotePlayback = useCallback(
+    async (remote: { isPlaying: boolean; positionMillis: number; updatedAtMillis: number }) => {
+      const video = videoRef.current;
+      if (!video) {
+        pendingRemotePlaybackRef.current = remote;
+        return;
+      }
+
+      const updatedAtMillis = remote.updatedAtMillis || 0;
+      if (updatedAtMillis && updatedAtMillis <= lastRemoteUpdatedAtRef.current) return;
+      if (updatedAtMillis) lastRemoteUpdatedAtRef.current = updatedAtMillis;
+
+      let desiredPosition = remote.positionMillis;
+      if (remote.isPlaying && updatedAtMillis) {
+        desiredPosition += Math.max(0, Date.now() - updatedAtMillis);
+      }
+      desiredPosition = Math.max(0, desiredPosition);
+      if (durationMillis > 0) {
+        desiredPosition = Math.min(desiredPosition, Math.max(0, durationMillis - 250));
+      }
+
+      const diff = Math.abs(positionMillisRef.current - desiredPosition);
+      applyingRemotePlaybackRef.current = true;
+      try {
+        if (diff > 1500) {
+          await video.setPositionAsync(desiredPosition);
+        }
+        if (remote.isPlaying) {
+          await ensurePlaybackAudioMode();
+          await video.playAsync();
+        } else {
+          await video.pauseAsync();
+        }
+      } catch {
+        pendingRemotePlaybackRef.current = remote;
+      } finally {
+        applyingRemotePlaybackRef.current = false;
+      }
+    },
+    [durationMillis, ensurePlaybackAudioMode],
+  );
+
+  useEffect(() => {
+    if (!watchPartyRef) return;
+    const unsub = onSnapshot(watchPartyRef, (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      const hostId = typeof data.hostId === 'string' ? data.hostId : null;
+      setWatchPartyHostId(hostId);
+
+      if (!passedVideoUrl && typeof data.videoUrl === 'string' && data.videoUrl) {
+        setResolvedVideoUrl((prev) => prev ?? data.videoUrl);
+      }
+      if (!parsedVideoHeaders && data.videoHeaders && typeof data.videoHeaders === 'object') {
+        setResolvedVideoHeaders((prev) => prev ?? (data.videoHeaders as Record<string, string>));
+      }
+      if (!passedStreamType && typeof data.streamType === 'string' && data.streamType) {
+        setResolvedStreamType((prev) => prev ?? data.streamType);
+      }
+
+      const playback = data.playback;
+      const hostNow = Boolean(user?.uid && hostId && user.uid === hostId);
+      if (hostNow) return;
+      if (!playback || typeof playback !== 'object') return;
+
+      const isPlaying = Boolean(playback.isPlaying);
+      const positionMillis = typeof playback.positionMillis === 'number' ? playback.positionMillis : 0;
+      const updatedAtMillis =
+        typeof playback.updatedAt?.toMillis === 'function'
+          ? playback.updatedAt.toMillis()
+          : typeof playback.updatedAt === 'number'
+            ? playback.updatedAt
+            : 0;
+
+      const remote = { isPlaying, positionMillis, updatedAtMillis };
+      pendingRemotePlaybackRef.current = remote;
+
+      if (playbackSourceRef.current?.uri) {
+        void applyRemotePlayback(remote);
+      }
+    });
+    return () => unsub();
+  }, [applyRemotePlayback, parsedVideoHeaders, passedStreamType, passedVideoUrl, user?.uid, watchPartyRef]);
+
+  useEffect(() => {
+    if (!watchPartyRef) return;
+    if (!user?.uid) return;
+
+    void updateDoc(watchPartyRef, {
+      isOpen: true,
+      videoUrl: resolvedVideoUrl ?? null,
+      videoHeaders: resolvedVideoHeaders ?? null,
+      streamType: resolvedStreamType ?? null,
+    }).catch(() => {});
+
+    return () => {
+      if (!isWatchPartyHost) return;
+      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => {});
+    };
+  }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
+
   const [videoReloadKey, setVideoReloadKey] = useState(0);
   const prefetchKey = typeof params.__prefetchKey === 'string' ? params.__prefetchKey : undefined;
   const [prefetchChecked, setPrefetchChecked] = useState(() => !prefetchKey);
@@ -721,19 +867,17 @@ const VideoPlayerScreen = () => {
   }, [videoReloadKey, playbackSource?.uri, qualityOverrideUri]);
   const [showBufferingOverlay, setShowBufferingOverlay] = useState(false);
   const bufferingOverlayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoDowngradeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSeekAfterReloadRef = useRef<number | null>(null);
   const pendingShouldPlayAfterReloadRef = useRef<boolean | null>(null);
   const prevPositionRef = useRef<number>(0);
   const lastAdvanceTsRef = useRef<number>(Date.now());
   const statusLogRef = useRef<{ lastTs: number; lastKey: string }>({ lastTs: 0, lastKey: '' });
-  const qualityOptionsRef = useRef<QualityOption[]>([]);
   const autoQualityStepRef = useRef(0);
   const lastAutoDowngradeTsRef = useRef(0);
   const [avDrawerOpen, setAvDrawerOpen] = useState(false);
   const hlsWarmupRef = useRef<{ key: string; seen: Set<string> }>({ key: '', seen: new Set() });
-  const hlsProxyRetryRef = useRef(false);
-  const hlsVariantRetryRef = useRef(false);
+  const triedVariantUrisRef = useRef<Set<string>>(new Set());
+  const triedHttpsUpgradeRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     watchEntryRef.current = watchHistoryEntry;
   }, [watchHistoryEntry]);
@@ -762,16 +906,8 @@ const VideoPlayerScreen = () => {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
       }
-      if (autoDowngradeTimeoutRef.current) {
-        clearTimeout(autoDowngradeTimeoutRef.current);
-        autoDowngradeTimeoutRef.current = null;
-      }
     };
   }, []);
-
-  useEffect(() => {
-    qualityOptionsRef.current = qualityOptions;
-  }, [qualityOptions]);
 
   useEffect(() => {
     // Reset auto-downgrade state when the stream changes.
@@ -815,11 +951,16 @@ const VideoPlayerScreen = () => {
   );
   useEffect(() => {
     setPlaybackSource(
-      passedVideoUrl
-        ? createPlaybackSource({ uri: passedVideoUrl, headers: parsedVideoHeaders, streamType: passedStreamType })
+      resolvedVideoUrl
+        ? createPlaybackSource({
+            uri: resolvedVideoUrl,
+            headers: resolvedVideoHeaders,
+            streamType: resolvedStreamType,
+          })
         : null,
     );
-    hlsProxyRetryRef.current = false;
+    triedVariantUrisRef.current = new Set();
+    triedHttpsUpgradeRef.current = new Set();
     setScrapeError(null);
     setCaptionSources([]);
     setSelectedCaptionId('off');
@@ -833,7 +974,7 @@ const VideoPlayerScreen = () => {
     setQualityOverrideUri(null);
     setQualityLoadingId(null);
     setVideoReloadKey((prev) => prev + 1);
-  }, [passedVideoUrl, parsedVideoHeaders, passedStreamType]);
+  }, [resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl]);
   useEffect(() => {
     masterPlaylistRef.current = playbackSource?.uri ?? null;
   }, [playbackSource?.uri]);
@@ -869,8 +1010,8 @@ const VideoPlayerScreen = () => {
   const applyPlaybackResult = useCallback(
     (playback: PStreamPlayback, options?: { title?: string }) => {
       if (!playback) return;
-      hlsProxyRetryRef.current = false;
-      hlsVariantRetryRef.current = false;
+      triedVariantUrisRef.current = new Set();
+      triedHttpsUpgradeRef.current = new Set();
       if (__DEV__) {
         console.log('[VideoPlayer] Applying playback result', {
           streamType: playback.stream?.type,
@@ -1217,11 +1358,7 @@ const VideoPlayerScreen = () => {
     })();
   }, [showBufferingOverlay, transitionReady, isHlsSource, playbackSource?.uri, qualityOverrideUri, activeStreamHeaders]);
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
-  const shouldShowMovieFlixLoader =
-    !!qualityLoadingId ||
-    isFetchingStream ||
-    isInitialStreamPending ||
-    !transitionReady;
+  const shouldShowMovieFlixLoader = isFetchingStream || isInitialStreamPending || !transitionReady;
   let loaderMessage = 'Fetching stream...';
   if (qualityLoadingId) {
     loaderMessage = 'Switching quality...';
@@ -1232,8 +1369,9 @@ const VideoPlayerScreen = () => {
   } else if (isInitialStreamPending) {
     loaderMessage = 'Preparing stream...';
   }
-  const isBlockingLoader = Boolean(qualityLoadingId || isFetchingStream || isInitialStreamPending);
-  const loaderVariant: 'solid' | 'transparent' = isBlockingLoader ? 'solid' : 'transparent';
+  const isBlockingLoader = Boolean(isFetchingStream || isInitialStreamPending);
+  const loaderVariant: 'solid' | 'transparent' = qualityLoadingId ? 'transparent' : isBlockingLoader ? 'solid' : 'transparent';
+  const showQualitySwitchPill = Boolean(qualityLoadingId) && !isFetchingStream && !isInitialStreamPending && transitionReady;
   const hasSubtitleOptions = captionSources.length > 0;
   const hasAudioOptions = audioTrackOptions.length > 0;
   const hasQualityOptions = qualityOptions.length > 0;
@@ -1560,78 +1698,7 @@ useEffect(() => {
     [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
   );
 
-  const getSortedQualityOptions = useCallback(() => {
-    const options = qualityOptionsRef.current ?? [];
-    return [...options]
-      .filter((o) => o && o.uri)
-      .sort((a, b) => {
-        const bwA = typeof a.bandwidth === 'number' ? a.bandwidth : -1;
-        const bwB = typeof b.bandwidth === 'number' ? b.bandwidth : -1;
-        if (bwA !== bwB) return bwB - bwA;
-        return (b.resolution ?? '').localeCompare(a.resolution ?? '');
-      });
-  }, []);
-
-  const maybeAutoDowngradeQuality = useCallback(
-    async (reason: 'stall' | 'error') => {
-      if (!isHlsSource) return;
-      if (!playbackSource?.headers) return;
-      if (qualityLoadingId) return;
-      if (selectedQualityId !== 'auto') return;
-
-      const now = Date.now();
-      if (now - lastAutoDowngradeTsRef.current < 25_000) return;
-
-      const sorted = getSortedQualityOptions();
-      if (sorted.length < 2) return;
-
-      const currentUri = qualityOverrideUri;
-      let idx = 0;
-      if (currentUri) {
-        const found = sorted.findIndex((o) => o.uri === currentUri);
-        if (found >= 0) idx = found;
-      } else {
-        idx = autoQualityStepRef.current;
-      }
-
-      const nextIdx = Math.min(sorted.length - 1, Math.max(0, idx + 1));
-      const next = sorted[nextIdx];
-      if (!next?.uri) return;
-      if (next.uri === currentUri) return;
-
-      try {
-        if (__DEV__) {
-          console.log('[VideoPlayer] Auto-downgrading quality', {
-            reason,
-            from: currentUri ?? 'auto',
-            to: next.resolution ?? next.label,
-            toBw: next.bandwidth,
-          });
-        }
-        await preloadQualityVariant(next.uri, playbackSource.headers);
-        autoQualityStepRef.current = nextIdx;
-        lastAutoDowngradeTsRef.current = now;
-        pendingSeekAfterReloadRef.current = positionMillis;
-        pendingShouldPlayAfterReloadRef.current = isPlaying;
-        setQualityOverrideUri(next.uri);
-        setVideoReloadKey((prev) => prev + 1);
-      } catch (err) {
-        if (__DEV__) {
-          console.warn('[VideoPlayer] Auto-downgrade preload failed', err);
-        }
-      }
-    },
-    [
-      getSortedQualityOptions,
-      isHlsSource,
-      playbackSource?.headers,
-      qualityLoadingId,
-      qualityOverrideUri,
-      selectedQualityId,
-      positionMillis,
-      isPlaying,
-    ],
-  );
+  // Prefer native ABR for HLS (ExoPlayer/AVPlayer).
 
   const handleVideoError = useCallback(
     (error: any) => {
@@ -1639,64 +1706,53 @@ useEffect(() => {
 
       const message = String(error?.message ?? error ?? '');
       const hasPlayback = Boolean(playbackSource?.uri);
-      const isHls = playbackSource?.streamType === 'hls';
+      const isHls = Boolean(isHlsSource || playbackSource?.streamType === 'hls');
 
-      if (hasPlayback && isHls && !hlsVariantRetryRef.current && qualityOptions.length) {
-        hlsVariantRetryRef.current = true;
-        const baseUri = qualityOverrideUri ?? playbackSource!.uri;
-        const headers = playbackSource!.headers;
-        void (async () => {
-          for (const option of qualityOptions) {
-            if (!option?.uri || option.uri === baseUri) continue;
-            try {
-              await preloadQualityVariant(option.uri, headers);
-              setQualityOverrideUri(option.uri);
-              setSelectedQualityId(option.id);
-              setVideoReloadKey((prev) => prev + 1);
-              return;
-            } catch {
-              // try next variant
-            }
-          }
-        })();
+      const activeUri = qualityOverrideUri ?? playbackSource?.uri;
+      if (
+        Platform.OS === 'android' &&
+        activeUri &&
+        activeUri.startsWith('http://') &&
+        message.toLowerCase().includes('cleartext') &&
+        !triedHttpsUpgradeRef.current.has(activeUri)
+      ) {
+        triedHttpsUpgradeRef.current.add(activeUri);
+        const httpsUri = `https://${activeUri.slice('http://'.length)}`;
+        if (qualityOverrideUri) {
+          setQualityOverrideUri(httpsUri);
+        } else if (playbackSource) {
+          setPlaybackSource(
+            createPlaybackSource({
+              uri: httpsUri,
+              headers: playbackSource.headers,
+              streamType: playbackSource.streamType,
+              captions: playbackSource.captions,
+              sourceId: playbackSource.sourceId,
+              embedId: playbackSource.embedId,
+            }),
+          );
+        }
+        setVideoReloadKey((prev) => prev + 1);
         return;
       }
 
-      if (
-        hasPlayback &&
-        isHls &&
-        !hlsProxyRetryRef.current &&
-        !isM3U8ProxyUrl(playbackSource?.uri) &&
-        (message.includes('UnknownHostException') ||
-          message.includes('Unable to resolve host') ||
-          message.includes('InvalidResponseCodeException') ||
-          message.includes('Response code'))
-      ) {
-        const proxied = buildM3U8ProxyUrl(playbackSource!.uri, playbackSource!.headers);
-        if (proxied) {
-          hlsProxyRetryRef.current = true;
-          setScrapeError(null);
-          setPlaybackSource(
-            createPlaybackSource({
-              uri: proxied,
-              streamType: playbackSource!.streamType,
-              captions: playbackSource!.captions,
-              sourceId: playbackSource!.sourceId,
-              embedId: playbackSource!.embedId,
-            }),
-          );
+      if (hasPlayback && isHls && qualityOptions.length) {
+        const baseUri = qualityOverrideUri ?? playbackSource!.uri;
+        triedVariantUrisRef.current.add(baseUri);
+
+        const ordered = orderQualityOptionsForCompatibility(qualityOptions);
+        const next = ordered.find((opt) => opt?.uri && !triedVariantUrisRef.current.has(opt.uri));
+        if (next?.uri) {
+          setQualityOverrideUri(next.uri);
+          setSelectedQualityId(next.id);
           setVideoReloadKey((prev) => prev + 1);
           return;
         }
       }
 
-      if (hasPlayback && isHls) {
-        void maybeAutoDowngradeQuality('error');
-      }
-
       Alert.alert('Playback error', error?.message || 'Video failed to load.');
     },
-    [playbackSource, qualityOptions, qualityOverrideUri, maybeAutoDowngradeQuality],
+    [playbackSource, qualityOptions, qualityOverrideUri, isHlsSource],
   );
   const handleVideoLoad = useCallback((payload: any) => {
     if (__DEV__) {
@@ -1732,7 +1788,12 @@ useEffect(() => {
     if (video) {
       video.setVolumeAsync(pendingVolumeRef.current).catch(() => {});
     }
-  }, []);
+
+    const pendingRemote = pendingRemotePlaybackRef.current;
+    if (pendingRemote) {
+      void applyRemotePlayback(pendingRemote);
+    }
+  }, [applyRemotePlayback]);
   const handleStatusUpdate = (status: AVPlaybackStatusSuccess | any) => {
     if (!status || !status.isLoaded) return;
     const playingNow = Boolean(status.isPlaying);
@@ -1783,20 +1844,10 @@ useEffect(() => {
         }, 650);
       }
 
-      if (!autoDowngradeTimeoutRef.current) {
-        autoDowngradeTimeoutRef.current = setTimeout(() => {
-          autoDowngradeTimeoutRef.current = null;
-          void maybeAutoDowngradeQuality('stall');
-        }, 2500);
-      }
     } else {
       if (bufferingOverlayTimeoutRef.current) {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
-      }
-      if (autoDowngradeTimeoutRef.current) {
-        clearTimeout(autoDowngradeTimeoutRef.current);
-        autoDowngradeTimeoutRef.current = null;
       }
       if (showBufferingOverlay) {
         setShowBufferingOverlay(false);
@@ -1814,6 +1865,17 @@ useEffect(() => {
       if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
         bufferedMillisRef.current = nextBuffered;
         setBufferedMillis(nextBuffered);
+      }
+    }
+
+    if (roomCode && isWatchPartyHost && !applyingRemotePlaybackRef.current && !midrollActiveRef.current) {
+      const last = lastPlaybackPublishRef.current;
+      const shouldSyncWhilePlaying =
+        playingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
+      const shouldSyncWhilePaused =
+        !playingNow && now - last.ts > 5000 && Math.abs(currentPosition - last.positionMillis) > 1200;
+      if (shouldSyncWhilePlaying || shouldSyncWhilePaused) {
+        void publishWatchPartyPlayback({ isPlaying: playingNow, positionMillis: currentPosition });
       }
     }
 
@@ -1864,6 +1926,11 @@ useEffect(() => {
     setIsPlaying(nextPlaying);
     if (!nextPlaying) setShowControls(true);
 
+    void publishWatchPartyPlayback(
+      { isPlaying: nextPlaying, positionMillis: positionMillisRef.current },
+      { force: true },
+    );
+
     void (async () => {
       try {
         if (nextPlaying) {
@@ -1911,7 +1978,7 @@ useEffect(() => {
         Alert.alert('Playback error', msg);
       }
     })();
-  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying]);
+  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying, publishWatchPartyPlayback]);
   const seekBy = async (deltaMillis: number) => {
     const video = videoRef.current;
     if (!video) return;
@@ -1922,6 +1989,11 @@ useEffect(() => {
     );
     await video.setPositionAsync(next);
     setSeekPosition(next);
+
+    void publishWatchPartyPlayback(
+      { isPlaying: isPlayingRef.current, positionMillis: next },
+      { force: true },
+    );
   };
   const handleRateToggle = async () => {
     const video = videoRef.current;
@@ -2094,7 +2166,6 @@ useEffect(() => {
         setSelectedQualityId('auto');
         autoQualityStepRef.current = 0;
         lastAutoDowngradeTsRef.current = 0;
-        setVideoReloadKey((prev) => prev + 1);
         return;
       }
       if (selectedQualityId === option.id) return;
@@ -2107,7 +2178,6 @@ useEffect(() => {
         setSelectedQualityId(option.id);
         autoQualityStepRef.current = 0;
         lastAutoDowngradeTsRef.current = 0;
-        setVideoReloadKey((prev) => prev + 1);
       } catch (err) {
         console.warn('Quality preload failed', err);
         Alert.alert('Quality unavailable', 'Unable to switch to this quality right now.');
@@ -2344,12 +2414,13 @@ useEffect(() => {
             )}
           </View>
         )}
-        {shouldShowMovieFlixLoader && (
+        {shouldShowMovieFlixLoader ? (
           <MovieFlixLoader
             message={loaderMessage}
             variant={loaderVariant}
           />
-        )}
+        ) : null}
+        {showQualitySwitchPill ? <BufferingPill message="Switching quality…" /> : null}
         {transitionReady && videoPlaybackSource && showBufferingOverlay && !scrapeError ? (
           <BufferingPill message="Buffering…" />
         ) : null}
@@ -2372,6 +2443,7 @@ useEffect(() => {
                   product={midrollProduct}
                   onPress={() => {
                     if (!midrollProduct?.id) return;
+                    void trackPromotionClick({ productId: String(midrollProduct.id), placement: 'story' }).catch(() => {});
                     router.push((`/marketplace/${midrollProduct.id}`) as any);
                   }}
                 />
@@ -2718,7 +2790,7 @@ useEffect(() => {
                               <Ionicons name="checkmark" size={16} color="#fff" />
                             ) : null}
                           </View>
-                          <Text style={styles.avOptionLabel}>Auto</Text>
+                          <Text style={styles.avOptionLabel}>Auto (Adaptive)</Text>
                         </TouchableOpacity>
                         {qualityOptions.map((option) => (
                           <TouchableOpacity
@@ -3060,6 +3132,7 @@ function parseHlsQualityOptions(manifest: string, manifestUrl: string): QualityO
     if (!uriLine) continue;
     const resolution = stripQuotes(attrs.RESOLUTION);
     const bandwidth = attrs.BANDWIDTH ? parseInt(attrs.BANDWIDTH, 10) : undefined;
+    const codecs = stripQuotes(attrs.CODECS);
     const label = buildQualityLabel(resolution, bandwidth);
     const uri = resolveRelativeUrl(uriLine, manifestUrl);
     options.push({
@@ -3068,6 +3141,7 @@ function parseHlsQualityOptions(manifest: string, manifestUrl: string): QualityO
       uri,
       resolution,
       bandwidth,
+      codecs,
     });
   }
   return options.sort((a, b) => {
@@ -3077,6 +3151,40 @@ function parseHlsQualityOptions(manifest: string, manifestUrl: string): QualityO
     if (a.bandwidth && b.bandwidth) return (b.bandwidth || 0) - (a.bandwidth || 0);
     return 0;
   });
+}
+
+function orderQualityOptionsForCompatibility(options: QualityOption[]): QualityOption[] {
+  const desiredHeight = 720;
+  const maxHeight = 1080;
+  return [...options].sort((a, b) => {
+    const ar = getCodecRank(a.codecs);
+    const br = getCodecRank(b.codecs);
+    if (ar !== br) return ar - br;
+
+    const ah = getResolutionHeight(a.resolution);
+    const bh = getResolutionHeight(b.resolution);
+    const ap = getHeightPenalty(ah, desiredHeight, maxHeight);
+    const bp = getHeightPenalty(bh, desiredHeight, maxHeight);
+    if (ap !== bp) return ap - bp;
+
+    const ab = typeof a.bandwidth === 'number' ? a.bandwidth : Number.POSITIVE_INFINITY;
+    const bb = typeof b.bandwidth === 'number' ? b.bandwidth : Number.POSITIVE_INFINITY;
+    return ab - bb;
+  });
+}
+
+function getCodecRank(codecs?: string): number {
+  const value = codecs?.toLowerCase() ?? '';
+  if (!value) return 1;
+  if (value.includes('avc1')) return 0;
+  if (value.includes('hvc1') || value.includes('hev1') || value.includes('dvhe') || value.includes('dvh1')) return 2;
+  return 1;
+}
+
+function getHeightPenalty(height: number | null, desired: number, max: number): number {
+  if (!height) return 5000;
+  if (height > max) return 10000 + height;
+  return Math.abs(height - desired);
 }
 function buildQualityLabel(resolution?: string, bandwidth?: number): string {
   const height = getResolutionHeight(resolution);

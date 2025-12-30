@@ -30,6 +30,7 @@ import { getAccentFromPosterPath } from '../../constants/theme';
 import AdBanner from '../../components/ads/AdBanner';
 import { pushWithOptionalInterstitial } from '../../lib/ads/navigate';
 import { getFavoriteGenre, type FavoriteGenre } from '../../lib/favoriteGenreStorage';
+import { buildProfileScopedKey } from '../../lib/profileStorage';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types/index';
 import { useAccent } from '../components/AccentContext';
@@ -70,6 +71,39 @@ const HomeScreen: React.FC = () => {
   const previewTranslate = useRef(new Animated.Value(320)).current;
   const [storyIndex, setStoryIndex] = useState(0);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+
+  // Shared My List state (avoid AsyncStorage reads in every MovieList section)
+  const [myListIds, setMyListIds] = useState<number[]>([]);
+  const myListItemsRef = useRef<Media[]>([]);
+
+  // Scroll interaction guard (prevents background timers from causing jank mid-scroll)
+  const isListScrollingRef = useRef(false);
+  const scrollEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markListScrolling = useCallback(() => {
+    isListScrollingRef.current = true;
+    if (scrollEndTimerRef.current) {
+      clearTimeout(scrollEndTimerRef.current);
+      scrollEndTimerRef.current = null;
+    }
+  }, []);
+
+  const markListScrollEnd = useCallback(() => {
+    if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
+    scrollEndTimerRef.current = setTimeout(() => {
+      isListScrollingRef.current = false;
+      scrollEndTimerRef.current = null;
+    }, 180);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scrollEndTimerRef.current) {
+        clearTimeout(scrollEndTimerRef.current);
+        scrollEndTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Use the custom hook for data fetching
   const {
@@ -170,6 +204,56 @@ const HomeScreen: React.FC = () => {
   );
 
   useEffect(() => clearToastTimer, [clearToastTimer]);
+
+  const myListKey = useMemo(() => buildProfileScopedKey('myList', activeProfileId), [activeProfileId]);
+  useEffect(() => {
+    let alive = true;
+
+    if (!profileReady) {
+      myListItemsRef.current = [];
+      setMyListIds([]);
+      return () => {
+        alive = false;
+      };
+    }
+
+    InteractionManager.runAfterInteractions(() => {
+      void AsyncStorage.getItem(myListKey)
+        .then((stored) => {
+          if (!alive) return;
+          const parsed: Media[] = stored ? JSON.parse(stored) : [];
+          myListItemsRef.current = Array.isArray(parsed) ? parsed : [];
+          setMyListIds(myListItemsRef.current.map((m) => m.id));
+        })
+        .catch((err) => {
+          if (!alive) return;
+          console.warn('[movies] Failed to load My List', err);
+          myListItemsRef.current = [];
+          setMyListIds([]);
+        });
+    });
+
+    return () => {
+      alive = false;
+    };
+  }, [myListKey, profileReady]);
+
+  const toggleMyList = useCallback(
+    (item: Media) => {
+      if (!item?.id) return;
+
+      const existing = myListItemsRef.current || [];
+      const exists = existing.some((m) => m.id === item.id);
+      const updated = exists ? existing.filter((m) => m.id !== item.id) : [...existing, item];
+      myListItemsRef.current = updated;
+      setMyListIds(updated.map((m) => m.id));
+
+      void AsyncStorage.setItem(myListKey, JSON.stringify(updated)).catch((err) => {
+        console.warn('[movies] Failed to persist My List', err);
+      });
+    },
+    [myListKey],
+  );
 
   
 
@@ -491,6 +575,7 @@ const HomeScreen: React.FC = () => {
     if (trending.length <= 1) return;
 
     const interval = setInterval(() => {
+      if (isListScrollingRef.current) return;
       setFeaturedMovie((currentFeatured) => {
         if (!currentFeatured) return trending[0] || null;
         const currentIndex = trending.findIndex((m) => m.id === currentFeatured.id);
@@ -510,6 +595,7 @@ const HomeScreen: React.FC = () => {
     if (stories.length <= 4) return;
 
     const interval = setInterval(() => {
+      if (isListScrollingRef.current) return;
       setStoryIndex((prevIndex) => {
         const nextIndex = prevIndex + 4;
         return nextIndex >= stories.length ? 0 : nextIndex;
@@ -695,6 +781,38 @@ const HomeScreen: React.FC = () => {
     | { key: 'upcomingTheaters' }
     | { key: 'topRatedMovies' };
 
+  const getSectionItemType = useCallback((section: HomeSection) => {
+    switch (section.key) {
+      case 'featured':
+        return 'featured';
+      case 'trailers':
+        return 'trailers';
+      case 'songs':
+        return 'songs';
+      default:
+        return 'carousel';
+    }
+  }, []);
+
+  const overrideSectionLayout = useCallback(
+    (layout: { size?: number }, section: HomeSection) => {
+      switch (section.key) {
+        case 'featured':
+          layout.size = 290;
+          return;
+        case 'trailers':
+          layout.size = 400;
+          return;
+        case 'songs':
+          layout.size = 340;
+          return;
+        default:
+          layout.size = 330;
+      }
+    },
+    [],
+  );
+
   const sections = useMemo<HomeSection[]>(() => {
     if (isEmptyState) return [];
     const out: HomeSection[] = [];
@@ -758,6 +876,8 @@ const HomeScreen: React.FC = () => {
                   movies={continueWatching}
                   onItemPress={handleResumePlayback}
                   showProgress
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
                 />
               </View>
             </Animated.View>
@@ -771,6 +891,8 @@ const HomeScreen: React.FC = () => {
                   title={`Because you watched ${lastWatched.title || lastWatched.name}`}
                   movies={becauseYouWatched}
                   onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
                 />
               </View>
             </Animated.View>
@@ -784,6 +906,8 @@ const HomeScreen: React.FC = () => {
                   title={favoriteGenreLoading ? `Loading ${favoriteGenre.name} picks…` : `${favoriteGenre.name} Picks`}
                   movies={favoriteGenreMovies}
                   onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
                 />
               </View>
             </Animated.View>
@@ -811,7 +935,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Trending" movies={filteredTrending} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Trending"
+                  movies={filteredTrending}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -820,7 +950,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Recommended" movies={filteredRecommended} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Recommended"
+                  movies={filteredRecommended}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -829,7 +965,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Netflix Originals" movies={filteredNetflix} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Netflix Originals"
+                  movies={filteredNetflix}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -838,7 +980,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Amazon Prime Video" movies={filteredAmazon} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Amazon Prime Video"
+                  movies={filteredAmazon}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -847,7 +995,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="HBO Max" movies={filteredHbo} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="HBO Max"
+                  movies={filteredHbo}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -856,7 +1010,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Top Movies Today" movies={filteredTrendingMoviesOnly} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Top Movies Today"
+                  movies={filteredTrendingMoviesOnly}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -865,7 +1025,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Top TV Today" movies={filteredTrendingTvOnly} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Top TV Today"
+                  movies={filteredTrendingTvOnly}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -874,7 +1040,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Popular Movies" movies={filteredSongs} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Popular Movies"
+                  movies={filteredSongs}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -883,7 +1055,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Upcoming in Theaters" movies={filteredMovieReels} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Upcoming in Theaters"
+                  movies={filteredMovieReels}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -892,7 +1070,13 @@ const HomeScreen: React.FC = () => {
           return (
             <Animated.View style={sectionFadeStyle}>
               <View style={styles.sectionBlock}>
-                <MovieList title="Top Rated Movies" movies={filteredRecommended} onItemPress={handleOpenDetails} />
+                <MovieList
+                  title="Top Rated Movies"
+                  movies={filteredRecommended}
+                  onItemPress={handleOpenDetails}
+                  myListIds={myListIds}
+                  onToggleMyList={toggleMyList}
+                />
               </View>
             </Animated.View>
           );
@@ -921,11 +1105,13 @@ const HomeScreen: React.FC = () => {
       handleOpenDetails,
       handleResumePlayback,
       lastWatched,
+      myListIds,
       movieTrailers,
       openQuickPreview,
       router,
       sectionFadeStyle,
       songs,
+      toggleMyList,
     ],
   );
 
@@ -1132,7 +1318,16 @@ const HomeScreen: React.FC = () => {
               data={sections}
               renderItem={renderSection}
               keyExtractor={(it) => it.key}
-              estimatedItemSize={260}
+              getItemType={getSectionItemType}
+              overrideItemLayout={overrideSectionLayout}
+              estimatedItemSize={330}
+              drawDistance={Platform.OS === 'android' ? 900 : 1100}
+              decelerationRate="fast"
+              onScrollBeginDrag={markListScrolling}
+              onMomentumScrollBegin={markListScrolling}
+              onScrollEndDrag={markListScrollEnd}
+              onMomentumScrollEnd={markListScrollEnd}
+              scrollEventThrottle={16}
               contentContainerStyle={styles.scrollViewContent}
               ListHeaderComponent={
                 <>
@@ -1238,6 +1433,7 @@ const HomeScreen: React.FC = () => {
                 { key: 'mylist', icon: 'list-sharp', onPress: () => router.push('/my-list') },
                 { key: 'search', icon: 'search', onPress: () => router.push('/search') },
                 { key: 'watchparty', icon: 'people-outline', onPress: () => router.push('/watchparty') },
+                { key: 'tvlogin', icon: 'qr-code-outline', onPress: () => router.push('/tv-login/scan') },
               ];
 
               return (

@@ -17,6 +17,15 @@
         "buildType": "apk"
       }
     },
+    "preview-tv": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "APP_VARIANT": "tv"
+      }
+    },
     "production": {
       "autoIncrement": true,
       "distribution": "store",

@@ -1,6 +1,7 @@
 /* app/messaging/messagesController.tsx */
 import { updateStreakForContext } from '@/lib/streaks/streakManager'
 import type { User } from 'firebase/auth'
+import { AppState } from 'react-native'
 import {
     createUserWithEmailAndPassword,
     onAuthStateChanged,
@@ -166,6 +167,9 @@ let connectedHandler: ((snap: any) => void) | null = null
 let presenceUserRef: DatabaseReference | null = null
 let lastPresenceUid: string | null = null
 
+let presenceHeartbeat: ReturnType<typeof setInterval> | null = null
+let appStateSub: { remove: () => void } | null = null
+
 const detachPresenceListeners = () => {
   if (connectedRef && connectedHandler) {
     off(connectedRef, 'value', connectedHandler)
@@ -173,6 +177,15 @@ const detachPresenceListeners = () => {
   connectedRef = null
   connectedHandler = null
   presenceUserRef = null
+
+  if (presenceHeartbeat) {
+    clearInterval(presenceHeartbeat)
+    presenceHeartbeat = null
+  }
+  try {
+    appStateSub?.remove()
+  } catch {}
+  appStateSub = null
 }
 
 export const ensureGlobalBroadcastChannel = async (): Promise<void> => {
@@ -275,8 +288,44 @@ export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
 
         void setLastAuthUid(user.uid)
 
-        // Firestore status update (optional but good)
+        // Firestore presence (WhatsApp-like): heartbeat while active; set offline on background.
         void updateUserStatus(user.uid, 'online')
+        const userDocRef = doc(firestore, 'users', user.uid)
+
+        const touchPresence = async (state: 'online' | 'offline') => {
+          await setDoc(
+            userDocRef,
+            {
+              status: state,
+              lastSeen: serverTimestamp(),
+              presence: {
+                state,
+                lastActiveAt: serverTimestamp(),
+                lastSeen: serverTimestamp(),
+              },
+            },
+            { merge: true },
+          )
+        }
+
+        const HEARTBEAT_MS = 25_000
+        const markOnline = () => {
+          void touchPresence('online')
+        }
+        const markOffline = () => {
+          void touchPresence('offline')
+        }
+
+        if (presenceHeartbeat) clearInterval(presenceHeartbeat)
+        presenceHeartbeat = setInterval(markOnline, HEARTBEAT_MS)
+
+        try {
+          appStateSub?.remove()
+        } catch {}
+        appStateSub = AppState.addEventListener('change', (next) => {
+          if (next === 'active') markOnline()
+          else markOffline()
+        })
 
         // Setup RTDB presence (clean old listeners)
         detachPresenceListeners()
@@ -470,25 +519,45 @@ export const onUserPresence = (
   userId: string,
   callback: (status: { state: 'online' | 'offline'; last_changed: number | null }) => void,
 ): UnsubscribeFn => {
-  try {
-    const presenceRef = ref(realtimeDb, `/status/${userId}`)
-    const handler = (snap: any) => {
-      const val = snap.val()
-      if (!val) {
+  const userDocRef = doc(firestore, 'users', userId)
+  const unsub = onSnapshot(
+    userDocRef,
+    (snap) => {
+      if (!snap.exists()) {
         callback({ state: 'offline', last_changed: null })
         return
       }
-      const last = val.last_changed ?? null
-      // RTDB serverTimestamp may be a number or an object; normalize to millis if possible
-      const lastMillis = last && typeof last === 'object' && typeof last.toMillis === 'function' ? last.toMillis() : (typeof last === 'number' ? last : null)
-      callback({ state: val.state === 'online' ? 'online' : 'offline', last_changed: lastMillis })
-    }
 
-    onValue(presenceRef, handler)
-    return () => off(presenceRef, 'value', handler)
-  } catch (err) {
-    console.warn('[messagesController] onUserPresence failed', err)
-    return () => {}
+      const data = snap.data() as any
+      const presence = data?.presence ?? {}
+      const rawState = (presence.state ?? data.status ?? 'offline') as string
+
+      const ts = presence.lastActiveAt ?? presence.lastSeen ?? data.lastSeen ?? null
+      const lastMillis =
+        ts && typeof ts?.toMillis === 'function'
+          ? ts.toMillis()
+          : ts && typeof ts?.toDate === 'function'
+            ? ts.toDate().getTime()
+            : typeof ts === 'number'
+              ? ts
+              : null
+
+      const now = Date.now()
+      const onlineWindowMs = 45_000
+      const isFresh = typeof lastMillis === 'number' ? now - lastMillis <= onlineWindowMs : false
+      const nextState = rawState === 'online' && isFresh ? 'online' : 'offline'
+      callback({ state: nextState, last_changed: lastMillis })
+    },
+    (err) => {
+      console.warn('[messagesController] onUserPresence snapshot error', err)
+      callback({ state: 'offline', last_changed: null })
+    },
+  )
+
+  return () => {
+    try {
+      unsub()
+    } catch {}
   }
 }
 
@@ -1163,8 +1232,30 @@ export const blockUser = async (targetUserId: string): Promise<void> => {
 
   if (auth.currentUser.uid === targetUserId) throw new Error('You cannot block yourself')
 
-  const userDocRef = doc(firestore, 'users', auth.currentUser.uid)
-  await setDoc(userDocRef, { blockedUsers: arrayUnion(targetUserId) }, { merge: true })
+  const viewerId = auth.currentUser.uid
+  const viewerRef = doc(firestore, 'users', viewerId)
+  const targetRef = doc(firestore, 'users', targetUserId)
+
+  // Guard: blocking also severs any follower/following relationship both ways.
+  const batch = writeBatch(firestore)
+  batch.set(
+    viewerRef,
+    {
+      blockedUsers: arrayUnion(targetUserId),
+      following: arrayRemove(targetUserId),
+      followers: arrayRemove(targetUserId),
+    },
+    { merge: true },
+  )
+  batch.set(
+    targetRef,
+    {
+      following: arrayRemove(viewerId),
+      followers: arrayRemove(viewerId),
+    },
+    { merge: true },
+  )
+  await batch.commit()
 }
 
 export const unblockUser = async (targetUserId: string): Promise<void> => {

@@ -73,6 +73,9 @@ const getNotifyEndpoint = (): string | null => {
   const explicit = process.env.EXPO_PUBLIC_PUSH_NOTIFY_URL;
   if (explicit) return explicit;
 
+  const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+  if (supabaseUrl) return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/notify`;
+
   const fromSimpleProxy = deriveNetlifyFunctionsBase(process.env.EXPO_PUBLIC_PSTREAM_PROXY_URL);
   if (fromSimpleProxy) return `${fromSimpleProxy}/notify`;
 

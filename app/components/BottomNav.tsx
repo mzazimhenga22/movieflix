@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { LinearGradient } from 'expo-linear-gradient';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import { useAccent } from './AccentContext';
 
 type Props = BottomTabBarProps & {
@@ -58,89 +59,141 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
     }
   };
 
+  const handleSwipe = React.useCallback(
+    (direction: 'left' | 'right') => {
+      const tabRoutes = state.routes.filter((r) => visibleTabs.has(r.name));
+      if (tabRoutes.length <= 1) return;
+
+      const visibleIndex = tabRoutes.findIndex((r) => r.key === state.routes[state.index]?.key);
+      if (visibleIndex < 0) return;
+
+      const nextIndex =
+        direction === 'left'
+          ? Math.min(tabRoutes.length - 1, visibleIndex + 1)
+          : Math.max(0, visibleIndex - 1);
+
+      if (nextIndex === visibleIndex) return;
+
+      const next = tabRoutes[nextIndex];
+      if (!next?.name) return;
+      if (navInFlightRef.current) return;
+      navInFlightRef.current = true;
+
+      requestAnimationFrame(() => {
+        InteractionManager.runAfterInteractions(() => {
+          try {
+            navigation.navigate(next.name as never);
+          } finally {
+            navInFlightRef.current = false;
+          }
+        });
+      });
+    },
+    [navigation, state.index, state.routes],
+  );
+
+  const onPanStateChange = React.useCallback(
+    (evt: any) => {
+      if (evt?.nativeEvent?.state !== State.END) return;
+      const { translationX = 0, translationY = 0, velocityX = 0 } = evt.nativeEvent ?? {};
+
+      // Only treat strong horizontal swipes as navigation.
+      if (Math.abs(translationY) > 40) return;
+      if (Math.abs(translationX) < 70 && Math.abs(velocityX) < 600) return;
+
+      if (translationX < 0) handleSwipe('left');
+      else handleSwipe('right');
+    },
+    [handleSwipe],
+  );
+
   return (
     <View pointerEvents="box-none" style={[styles.outer, { bottom: bottomOffset }]}>
-      <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accentColor}55` }]}>
-        <View
-          style={[
-            styles.overlay,
-            { backgroundColor: 'rgba(15,15,25,0.55)' },
-          ]}
-        />
-        <LinearGradient
-          colors={[`${accentColor}33`, 'rgba(255,255,255,0.02)']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.glassSheen}
-        />
-        <View style={styles.inner}>
-          {state.routes.map((route, idx) => {
-            const focused = state.index === idx;
-            const routeName = route.name;
+      <PanGestureHandler activeOffsetX={[-18, 18]} failOffsetY={[-18, 18]} onHandlerStateChange={onPanStateChange}>
+        <View>
+          <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accentColor}55` }]}>
+            <View
+              style={[
+                styles.overlay,
+                { backgroundColor: 'rgba(15,15,25,0.55)' },
+              ]}
+            />
+            <LinearGradient
+              colors={[`${accentColor}33`, 'rgba(255,255,255,0.02)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.glassSheen}
+            />
+            <View style={styles.inner}>
+              {state.routes.map((route, idx) => {
+                const focused = state.index === idx;
+                const routeName = route.name;
 
-            if (routeName === 'marketplace' || !visibleTabs.has(routeName)) {
-              return null;
-            }
+                if (routeName === 'marketplace' || !visibleTabs.has(routeName)) {
+                  return null;
+                }
 
-            const onPress = () => {
-              const event = navigation.emit({
-                type: 'tabPress',
-                target: route.key,
-                canPreventDefault: true,
-              } as any);
+                const onPress = () => {
+                  const event = navigation.emit({
+                    type: 'tabPress',
+                    target: route.key,
+                    canPreventDefault: true,
+                  } as any);
 
-              if (focused || (event as any).defaultPrevented) return;
-              if (navInFlightRef.current) return;
-              navInFlightRef.current = true;
+                  if (focused || (event as any).defaultPrevented) return;
+                  if (navInFlightRef.current) return;
+                  navInFlightRef.current = true;
 
-              requestAnimationFrame(() => {
-                InteractionManager.runAfterInteractions(() => {
-                  try {
-                    navigation.navigate(routeName as never);
-                  } finally {
-                    navInFlightRef.current = false;
-                  }
-                });
-              });
-            };
+                  requestAnimationFrame(() => {
+                    InteractionManager.runAfterInteractions(() => {
+                      try {
+                        navigation.navigate(routeName as never);
+                      } finally {
+                        navInFlightRef.current = false;
+                      }
+                    });
+                  });
+                };
 
-            const onLongPress = () => {
-              navigation.emit({
-                type: 'tabLongPress',
-                target: route.key,
-              } as any);
-            };
+                const onLongPress = () => {
+                  navigation.emit({
+                    type: 'tabLongPress',
+                    target: route.key,
+                  } as any);
+                };
 
-            const iconName = iconForRoute(routeName, focused);
-            const label = labelForRoute(routeName);
+                const iconName = iconForRoute(routeName, focused);
+                const label = labelForRoute(routeName);
 
-            return (
-              <TouchableOpacity
-                key={route.key}
-                onPress={onPress}
-                onLongPress={onLongPress}
-                style={styles.item}
-                activeOpacity={0.85}
-                accessibilityRole="button"
-                accessibilityState={{ selected: focused }}
-              >
-                <View style={[styles.itemInner, focused && styles.itemInnerActive]}>
-                  {focused && (
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0.05, y: 0 }}
-                      end={{ x: 0.95, y: 1 }}
-                      style={styles.activePill}
-                    />
-                  )}
-                  <Ionicons name={iconName as any} size={22} color={focused ? '#ffffff' : '#f5f5f5'} />
-                  <Text style={[styles.text, focused ? styles.activeText : undefined]}>{label}</Text>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+                return (
+                  <TouchableOpacity
+                    key={route.key}
+                    onPress={onPress}
+                    onLongPress={onLongPress}
+                    style={styles.item}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: focused }}
+                  >
+                    <View style={[styles.itemInner, focused && styles.itemInnerActive]}>
+                      {focused && (
+                        <LinearGradient
+                          colors={['#e50914', '#b20710']}
+                          start={{ x: 0.05, y: 0 }}
+                          end={{ x: 0.95, y: 1 }}
+                          style={styles.activePill}
+                        />
+                      )}
+                      <Ionicons name={iconName as any} size={22} color={focused ? '#ffffff' : '#f5f5f5'} />
+                      <Text style={[styles.text, focused ? styles.activeText : undefined]}>{label}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </BlurView>
         </View>
-      </BlurView>
+      </PanGestureHandler>
     </View>
   );
 }

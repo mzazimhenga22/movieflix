@@ -12,10 +12,9 @@
   external_node_modules = ["firebase-admin"]
 
 [[redirects]]
-  from = "/updates/app-update.json"
-  to = "/.netlify/functions/app-update"
-  status = 200
-  force = true
+  from = "/download-apk"
+  to = "https://thorgxctdyxgqjpnmcwa.supabase.co/functions/v1/download-apk"
+  status = 302
 
 [[redirects]]
   from = "/"

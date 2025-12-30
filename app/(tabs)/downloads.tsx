@@ -247,6 +247,18 @@ const DownloadsScreen = () => {
       const available = await ensureDownloadAvailable(item);
       if (!available) return;
 
+      const seasonNumber = typeof item.seasonNumber === 'number' ? item.seasonNumber : undefined;
+      const episodeNumber = typeof item.episodeNumber === 'number' ? item.episodeNumber : undefined;
+
+      const maybeEpisodeParams =
+        item.mediaType === 'tv'
+          ? {
+              ...(seasonNumber ? { seasonNumber: String(seasonNumber) } : {}),
+              ...(episodeNumber ? { episodeNumber: String(episodeNumber) } : {}),
+              ...(seasonNumber ? { seasonTitle: `Season ${seasonNumber}` } : {}),
+            }
+          : {};
+
       router.push({
         pathname: '/video-player',
         params: {
@@ -255,6 +267,11 @@ const DownloadsScreen = () => {
           mediaType: item.mediaType,
           tmdbId: item.mediaId?.toString(),
           releaseYear: item.releaseDate?.slice(0, 4),
+          ...(item.posterPath ? { posterPath: item.posterPath } : {}),
+          ...(item.backdropPath ? { backdropPath: item.backdropPath } : {}),
+          ...(item.overview ? { overview: item.overview } : {}),
+          ...(item.releaseDate ? { releaseDate: item.releaseDate } : {}),
+          ...maybeEpisodeParams,
         },
       });
     },
@@ -287,6 +304,15 @@ const DownloadsScreen = () => {
   };
 
   const renderDownloadItem = (item: DownloadItem) => (
+    (() => {
+      const seasonNumber = typeof item.seasonNumber === 'number' ? item.seasonNumber : undefined;
+      const episodeNumber = typeof item.episodeNumber === 'number' ? item.episodeNumber : undefined;
+      const episodeLabel =
+        item.mediaType === 'tv' && seasonNumber && episodeNumber
+          ? `S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`
+          : null;
+
+      return (
     <View style={styles.downloadCard}>
       <TouchableOpacity onPress={() => handlePlay(item)} style={styles.posterWrap}>
         {item.posterPath ? (
@@ -307,8 +333,16 @@ const DownloadsScreen = () => {
         </Text>
 
         <Text style={styles.downloadSubtitle}>
+          {episodeLabel ? `Episode • ${episodeLabel}` : null}
+          {episodeLabel && item.bytesWritten ? ' • ' : null}
           {formatBytes(item.bytesWritten)}
         </Text>
+
+        {!!item.overview && (
+          <Text style={styles.downloadSubtitle} numberOfLines={2}>
+            {item.overview}
+          </Text>
+        )}
 
         <View style={styles.downloadActions}>
           <TouchableOpacity
@@ -329,6 +363,8 @@ const DownloadsScreen = () => {
         </View>
       </View>
     </View>
+      );
+    })()
   );
 
   const ListHeader = () => (
@@ -350,8 +386,18 @@ const DownloadsScreen = () => {
                       style={styles.controlButton}
                       onPress={() => {
                         if (item.status === 'paused') {
+                          setActiveDownloads((prev) =>
+                            prev.map((e) =>
+                              e.sessionId === item.sessionId ? { ...e, status: 'queued' } : e,
+                            ),
+                          );
                           void resumeDownload(item.sessionId);
                         } else if (item.status === 'downloading' || item.status === 'preparing' || item.status === 'queued') {
+                          setActiveDownloads((prev) =>
+                            prev.map((e) =>
+                              e.sessionId === item.sessionId ? { ...e, status: 'paused' } : e,
+                            ),
+                          );
                           void pauseDownload(item.sessionId);
                         }
                       }}
@@ -364,7 +410,10 @@ const DownloadsScreen = () => {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.controlButton, styles.cancelButton]}
-                      onPress={() => void cancelDownload(item.sessionId)}
+                      onPress={() => {
+                        setActiveDownloads((prev) => prev.filter((e) => e.sessionId !== item.sessionId));
+                        void cancelDownload(item.sessionId);
+                      }}
                     >
                       <Ionicons name="close" size={16} color="#ffb0b0" />
                     </TouchableOpacity>

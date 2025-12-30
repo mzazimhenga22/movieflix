@@ -531,6 +531,18 @@ const PremiumScreen = () => {
     [openPurchaseFor, refresh, selectedPlan]
   );
 
+  const handleBack = useCallback(() => {
+    if (source === 'profiles') {
+      router.replace('/select-profile');
+      return;
+    }
+    if (source === 'watchparty') {
+      router.replace('/watchparty');
+      return;
+    }
+    router.replace('/movies');
+  }, [router, source]);
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -541,7 +553,7 @@ const PremiumScreen = () => {
       />
 
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.replace('/movies')} style={styles.backButton}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Go Premium</Text>

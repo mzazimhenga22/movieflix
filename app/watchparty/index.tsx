@@ -113,6 +113,8 @@ const WatchPartyScreen = () => {
         videoUrl,
         selected?.title || selected?.name || null,
         selected?.media_type || null,
+        playback.headers ?? null,
+        (playback as any)?.stream?.type ?? null,
       );
       setCurrentParty(party);
 
@@ -196,6 +198,10 @@ const WatchPartyScreen = () => {
         params: {
           roomCode: party.code,
           videoUrl: party.videoUrl,
+          videoHeaders: party.videoHeaders
+            ? encodeURIComponent(JSON.stringify(party.videoHeaders))
+            : undefined,
+          streamType: party.streamType || undefined,
           title: party.title || selected?.title || selected?.name || 'Watch Party',
           mediaType: party.mediaType || selected?.media_type || 'movie',
         },

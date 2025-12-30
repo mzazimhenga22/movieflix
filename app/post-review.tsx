@@ -156,8 +156,14 @@ export default function PostReviewScreen() {
         const profileRef = doc(firestore, 'users', effectiveUser.uid);
         const profileSnap = await getDoc(profileRef);
         if (profileSnap.exists()) {
-          const followers = profileSnap.data()?.followers || [];
-          for (const followerId of followers) {
+          const data = profileSnap.data() as any;
+          const followers = Array.isArray(data?.followers) ? data.followers.map(String) : [];
+          const blocked = Array.isArray(data?.blockedUsers) ? data.blockedUsers.map(String) : [];
+          const recipients = Array.from(new Set(followers))
+            .filter((id) => id && id !== effectiveUser.uid)
+            .filter((id) => !blocked.includes(id));
+
+          for (const followerId of recipients) {
             await addDoc(collection(firestore, 'notifications'), {
               type: 'new_post',
               scope: 'social',

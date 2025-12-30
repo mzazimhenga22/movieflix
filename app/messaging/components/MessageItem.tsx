@@ -8,12 +8,15 @@ import {
   GestureResponderEvent,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Conversation, Profile } from '../controller';
 import { doc, getDoc } from 'firebase/firestore';
 import { firestore } from '../../../constants/firebase';
 import { User } from 'firebase/auth';
 import { Ionicons } from '@expo/vector-icons';
 import type { CallType } from '@/lib/calls/types';
+import { useAccent } from '../../components/AccentContext';
+import { darkenColor, withAlpha } from '@/lib/colorUtils';
 
 interface MessageItemProps {
   item: Conversation;
@@ -34,6 +37,10 @@ const MessageItem = ({
   callDisabled,
   isVerified = false,
 }: MessageItemProps) => {
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+  const accentDark = darkenColor(accent, 0.42);
+
   const [otherUser, setOtherUser] = useState<Profile | null>(null);
   const rowRef = useRef<View | null>(null);
   const time = item.updatedAt?.toDate ? item.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
@@ -106,7 +113,21 @@ const MessageItem = ({
       onLongPress={handleLongPress}
       activeOpacity={0.9}
     >
-      <BlurView intensity={50} tint="dark" style={styles.card}>
+      <View style={styles.cardOuter}>
+        <LinearGradient
+          colors={[withAlpha(accent, 0.16), withAlpha(accentDark, 0.08), 'rgba(0,0,0,0.72)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFillObject}
+        />
+        <LinearGradient
+          colors={['rgba(255,255,255,0.11)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.12, y: 0 }}
+          end={{ x: 0.9, y: 1 }}
+          style={styles.cardHighlight}
+        />
+
+        <BlurView intensity={50} tint="dark" style={styles.card}>
         {item.isGroup ? (
           <View style={styles.groupAvatar}>
             <Text style={styles.groupAvatarText}>
@@ -193,7 +214,8 @@ const MessageItem = ({
             </TouchableOpacity>
           </View>
         )}
-      </BlurView>
+        </BlurView>
+      </View>
     </TouchableOpacity>
   );
 };
@@ -203,15 +225,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
+  cardOuter: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  cardHighlight: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.9,
+  },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
     overflow: 'hidden',
     shadowColor: '#050915',
     shadowOpacity: 0.2,

@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, StatusBar } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -8,7 +8,7 @@ import Slider from '@react-native-community/slider';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { useAccent } from '../components/AccentContext';
 import { useUser } from '../../hooks/use-user';
-import { getProducts, updateProduct, type Product } from './api';
+import { getProducts, isProductPromoted, updateProduct, type Product } from './api';
 import { formatKsh } from '../../lib/money';
 
 export default function PromoteScreen() {
@@ -23,6 +23,48 @@ export default function PromoteScreen() {
   const [products, setProducts] = useState<(Product & { id: string })[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [campaignBusyId, setCampaignBusyId] = useState<string | null>(null);
+
+  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  const toMillis = useCallback((value: any): number | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === 'function') {
+      try {
+        return value.toMillis();
+      } catch {
+        return null;
+      }
+    }
+    if (typeof value?.toDate === 'function') {
+      try {
+        const d = value.toDate();
+        return d instanceof Date ? d.getTime() : null;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const ms = Date.parse(value);
+      return Number.isFinite(ms) ? ms : null;
+    }
+    return null;
+  }, []);
+
+  const formatEndsIn = useCallback((endsAtMs: number | null) => {
+    if (!endsAtMs) return '—';
+    const diff = endsAtMs - Date.now();
+    if (diff <= 0) return 'ended';
+    const mins = Math.floor(diff / (60 * 1000));
+    if (mins < 60) return `in ${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 48) return `in ${hrs}h`;
+    const days = Math.floor(hrs / 24);
+    return `in ${days}d`;
+  }, []);
 
   useEffect(() => {
     setAccentColor('#e50914');
@@ -51,7 +93,7 @@ export default function PromoteScreen() {
     return () => {
       cancelled = true;
     };
-  }, [user?.uid]);
+  }, [user?.uid, reloadKey]);
 
   const toggleProductSelection = (productId: string) => {
     setSelectedProducts(prev =>
@@ -67,6 +109,101 @@ export default function PromoteScreen() {
       days: { search: 500, story: 900, feed: 1200 },
     }),
     []
+  );
+
+  const activeCampaigns = useMemo(() => {
+    const mine = products || [];
+    const active = mine.filter((p) => isProductPromoted(p));
+    return active.sort((a, b) => {
+      const aEnd = toMillis((a as any).promotionEndsAt) ?? 0;
+      const bEnd = toMillis((b as any).promotionEndsAt) ?? 0;
+      return bEnd - aEnd;
+    });
+  }, [products, toMillis]);
+
+  const cancelCampaign = useCallback(
+    (product: Product & { id: string }) => {
+      if (!product?.id) return;
+      Alert.alert('Cancel promotion?', `This will stop boosting "${product.name}" immediately.`, [
+        { text: 'Keep running', style: 'cancel' },
+        {
+          text: 'Cancel promotion',
+          style: 'destructive',
+          onPress: () => {
+            if (campaignBusyId || submitting) return;
+            setCampaignBusyId(product.id);
+            void updateProduct(product.id, {
+              promoted: false,
+              promotionEndsAt: new Date(),
+            })
+              .then(() => reload())
+              .catch((err) => {
+                console.error('[marketplace] cancel promotion failed', err);
+                Alert.alert('Failed', 'Unable to cancel promotion right now.');
+              })
+              .finally(() => setCampaignBusyId(null));
+          },
+        },
+      ]);
+    },
+    [campaignBusyId, reload, submitting],
+  );
+
+  const extendCampaign = useCallback(
+    (product: Product & { id: string }) => {
+      if (!product?.id) return;
+
+      const unit = (product.promotionDurationUnit === 'hours' || product.promotionDurationUnit === 'days')
+        ? product.promotionDurationUnit
+        : 'days';
+      const placementKey = (product.promotionPlacement as any) || 'feed';
+      const msPerUnit = unit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+
+      const applyExtend = (addUnits: number) => {
+        if (campaignBusyId || submitting) return;
+        const currentEndsMs = toMillis((product as any).promotionEndsAt);
+        const baseMs = Math.max(Date.now(), currentEndsMs ?? 0);
+        const nextEndsAt = new Date(baseMs + addUnits * msPerUnit);
+
+        const perUnit = (rates as any)?.[unit]?.[placementKey] ?? 0;
+        const extraCost = Math.max(0, Number((perUnit * addUnits).toFixed(2)));
+
+        setCampaignBusyId(product.id);
+        void updateProduct(product.id, {
+          promoted: true,
+          promotionEndsAt: nextEndsAt,
+          promotionDurationUnit: unit,
+          promotionDurationValue: Math.max(1, Number(product.promotionDurationValue ?? 0) + addUnits),
+          promotionCost: Number(product.promotionCost ?? 0) + extraCost,
+          promotionBid: Number(product.promotionBid ?? 0) + extraCost,
+        })
+          .then(() => reload())
+          .catch((err) => {
+            console.error('[marketplace] extend promotion failed', err);
+            Alert.alert('Failed', 'Unable to extend promotion right now.');
+          })
+          .finally(() => setCampaignBusyId(null));
+      };
+
+      const options =
+        unit === 'hours'
+          ? [
+              { label: '+6 hours', add: 6 },
+              { label: '+12 hours', add: 12 },
+              { label: '+24 hours', add: 24 },
+            ]
+          : [
+              { label: '+1 day', add: 1 },
+              { label: '+3 days', add: 3 },
+              { label: '+7 days', add: 7 },
+            ];
+
+      Alert.alert('Extend promotion', `Add more time to "${product.name}".`, [
+        ...options.map((o) => ({ text: o.label, onPress: () => applyExtend(o.add) })),
+        { text: 'Not now', style: 'cancel' },
+      ]);
+    },
+    [campaignBusyId, reload, rates, submitting, toMillis],
   );
 
   const durationMax = durationUnit === 'hours' ? 72 : 30;
@@ -178,6 +315,93 @@ export default function PromoteScreen() {
           </View>
 
           <ScrollView contentContainerStyle={styles.scrollViewContent}>
+            {user?.uid ? (
+              <View style={styles.section}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionTitle}>Active campaigns</Text>
+                  <TouchableOpacity
+                    onPress={reload}
+                    disabled={loading || submitting}
+                    style={[styles.refreshIconBtn, (loading || submitting) && { opacity: 0.6 }]}
+                  >
+                    <Ionicons name="refresh" size={18} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.sectionSub}>Views and engagements update as your ads run.</Text>
+
+                {loading ? (
+                  <View style={styles.loadingRow}>
+                    <ActivityIndicator color="#fff" />
+                    <Text style={styles.loadingText}>Loading campaigns…</Text>
+                  </View>
+                ) : activeCampaigns.length === 0 ? (
+                  <View style={styles.emptyCard}>
+                    <Ionicons name="sparkles-outline" size={22} color="rgba(255,255,255,0.75)" />
+                    <Text style={styles.emptyTitle}>No active campaigns</Text>
+                    <Text style={styles.emptySub}>Select products below to start boosting.</Text>
+                  </View>
+                ) : (
+                  activeCampaigns.map((p) => {
+                    const views = Number((p as any)?.promotionMetrics?.totalImpressions ?? 0);
+                    const clicks = Number((p as any)?.promotionMetrics?.totalClicks ?? 0);
+                    const endsAtMs = toMillis((p as any)?.promotionEndsAt);
+                    const ctr = views > 0 ? (clicks / views) * 100 : 0;
+                    const busy = campaignBusyId === p.id;
+
+                    return (
+                      <View key={p.id} style={styles.campaignCard}>
+                        <View style={styles.campaignTopRow}>
+                          <Text style={styles.campaignName} numberOfLines={1}>
+                            {p.name}
+                          </Text>
+                          <View style={styles.campaignPill}>
+                            <Text style={styles.campaignPillText}>
+                              {(String((p as any)?.promotionPlacement || 'feed') as any).toUpperCase()}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.campaignMeta}>Ends {formatEndsIn(endsAtMs)}</Text>
+
+                        <View style={styles.campaignMetricsRow}>
+                          <View style={styles.metricPill}>
+                            <Text style={styles.metricLabel}>Views</Text>
+                            <Text style={styles.metricValue}>{views}</Text>
+                          </View>
+                          <View style={styles.metricPill}>
+                            <Text style={styles.metricLabel}>Engagements</Text>
+                            <Text style={styles.metricValue}>{clicks}</Text>
+                          </View>
+                          <View style={styles.metricPill}>
+                            <Text style={styles.metricLabel}>CTR</Text>
+                            <Text style={styles.metricValue}>{`${ctr.toFixed(1)}%`}</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.campaignActionsRow}>
+                          <TouchableOpacity
+                            style={[styles.campaignActionBtn, styles.campaignCancelBtn, busy && { opacity: 0.6 }]}
+                            onPress={() => cancelCampaign(p)}
+                            disabled={busy || submitting}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.campaignActionText}>Cancel</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.campaignActionBtn, busy && { opacity: 0.6 }]}
+                            onPress={() => extendCampaign(p)}
+                            disabled={busy || submitting}
+                            activeOpacity={0.85}
+                          >
+                            <Text style={styles.campaignActionText}>Extend</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            ) : null}
+
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Select Products to Promote</Text>
               <View style={styles.productsList}>
@@ -465,6 +689,108 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.7)',
     marginTop: -10,
     marginBottom: 16,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  refreshIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  campaignCard: {
+    borderRadius: 14,
+    padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    marginBottom: 12,
+  },
+  campaignTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  campaignName: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  campaignPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(229,9,20,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.28)',
+  },
+  campaignPillText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  campaignMeta: {
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 6,
+    marginBottom: 10,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  campaignMetricsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  metricPill: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  metricLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  metricValue: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  campaignActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  campaignActionBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#e50914',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  campaignCancelBtn: {
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  campaignActionText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '900',
   },
   productsList: {
     gap: 12,

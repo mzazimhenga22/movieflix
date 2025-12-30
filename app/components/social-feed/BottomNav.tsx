@@ -5,6 +5,7 @@ import { InteractionManager, StyleSheet, Text, TouchableOpacity, View } from 're
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAccent } from '../AccentContext';
 import { useUser } from '../../../hooks/use-user';
@@ -96,6 +97,43 @@ export default function BottomNav() {
     return currentRoute === route || (route === 'index' && currentRoute === 'social-feed');
   };
 
+  const routeOrder = React.useMemo(
+    () => ['/social-feed', '/social-feed/stories', '/social-feed/notifications', '/social-feed/streaks'] as const,
+    [],
+  );
+
+  const handleSwipe = React.useCallback(
+    (direction: 'left' | 'right') => {
+      const current = pathname || '';
+      const currentIndex = routeOrder.findIndex((p) => p === current);
+      if (currentIndex < 0) return;
+
+      const nextIndex =
+        direction === 'left'
+          ? Math.min(routeOrder.length - 1, currentIndex + 1)
+          : Math.max(0, currentIndex - 1);
+      if (nextIndex === currentIndex) return;
+
+      const next = routeOrder[nextIndex];
+      if (!next) return;
+      deferNav(() => router.replace(next));
+    },
+    [deferNav, pathname, routeOrder, router],
+  );
+
+  const onPanStateChange = React.useCallback(
+    (evt: any) => {
+      if (evt?.nativeEvent?.state !== State.END) return;
+      const { translationX = 0, translationY = 0, velocityX = 0 } = evt.nativeEvent ?? {};
+      if (Math.abs(translationY) > 40) return;
+      if (Math.abs(translationX) < 70 && Math.abs(velocityX) < 600) return;
+
+      if (translationX < 0) handleSwipe('left');
+      else handleSwipe('right');
+    },
+    [handleSwipe],
+  );
+
   // Hide nav on profile screens (any profile path)
   if (!isSocialRoute || (pathname && /profile/i.test(pathname))) {
     return null;
@@ -103,63 +141,67 @@ export default function BottomNav() {
 
   return (
     <View pointerEvents="box-none" style={[styles.outer, { bottom: insets.bottom }]}>
-      <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accent}55` }]}>
-        <View style={[styles.overlay, { backgroundColor: 'rgba(15,15,25,0.55)' }]} />
-        <LinearGradient
-          colors={accentGlass}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.glassSheen}
-        />
-        <View style={styles.inner}>
-          <NavItem
-            onPress={() => deferNav(() => router.push('/social-feed'))}
-            icon="home"
-            label="Feeds"
-            active={isActive('index')}
-            accentGradient={accentGradient}
-            accentColor={accent}
-            badgeBorder={accentLight}
-          />
-          <NavItem
-            onPress={() => deferNav(() => router.push('/social-feed/stories'))}
-            icon="time"
-            label="Stories"
-            active={isActive('stories')}
-            accentGradient={accentGradient}
-            accentColor={accent}
-            badgeBorder={accentLight}
-          />
-          <NavItem
-            onPress={() => deferNav(() => router.push('/social-feed/notifications'))}
-            icon="notifications"
-            label="Notifications"
-            active={isActive('notifications')}
-            badgeCount={notificationBadge}
-            accentGradient={accentGradient}
-            accentColor={accent}
-            badgeBorder={accentLight}
-          />
-          <NavItem
-            onPress={() => deferNav(() => router.push('/social-feed/streaks'))}
-            icon="flame"
-            label="Streaks"
-            active={isActive('streaks')}
-            accentGradient={accentGradient}
-            accentColor={accent}
-            badgeBorder={accentLight}
-          />
-          <NavItem
-            onPress={() => deferNav(() => router.replace('/profile?from=social-feed'))}
-            icon="person"
-            label="Profile"
-            active={isActive('profile')}
-            accentGradient={accentGradient}
-            accentColor={accent}
-            badgeBorder={accentLight}
-          />
+      <PanGestureHandler activeOffsetX={[-18, 18]} failOffsetY={[-18, 18]} onHandlerStateChange={onPanStateChange}>
+        <View>
+          <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accent}55` }]}>
+            <View style={[styles.overlay, { backgroundColor: 'rgba(15,15,25,0.55)' }]} />
+            <LinearGradient
+              colors={accentGlass}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.glassSheen}
+            />
+            <View style={styles.inner}>
+              <NavItem
+                onPress={() => deferNav(() => router.push('/social-feed'))}
+                icon="home"
+                label="Feeds"
+                active={isActive('index')}
+                accentGradient={accentGradient}
+                accentColor={accent}
+                badgeBorder={accentLight}
+              />
+              <NavItem
+                onPress={() => deferNav(() => router.push('/social-feed/stories'))}
+                icon="time"
+                label="Stories"
+                active={isActive('stories')}
+                accentGradient={accentGradient}
+                accentColor={accent}
+                badgeBorder={accentLight}
+              />
+              <NavItem
+                onPress={() => deferNav(() => router.push('/social-feed/notifications'))}
+                icon="notifications"
+                label="Notifications"
+                active={isActive('notifications')}
+                badgeCount={notificationBadge}
+                accentGradient={accentGradient}
+                accentColor={accent}
+                badgeBorder={accentLight}
+              />
+              <NavItem
+                onPress={() => deferNav(() => router.push('/social-feed/streaks'))}
+                icon="flame"
+                label="Streaks"
+                active={isActive('streaks')}
+                accentGradient={accentGradient}
+                accentColor={accent}
+                badgeBorder={accentLight}
+              />
+              <NavItem
+                onPress={() => deferNav(() => router.push('/profile?from=social-feed'))}
+                icon="person"
+                label="Profile"
+                active={isActive('profile')}
+                accentGradient={accentGradient}
+                accentColor={accent}
+                badgeBorder={accentLight}
+              />
+            </View>
+          </BlurView>
         </View>
-      </BlurView>
+      </PanGestureHandler>
     </View>
   );
 }

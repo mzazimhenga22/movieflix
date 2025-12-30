@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   FlatList,
   InteractionManager,
   StyleSheet,
@@ -23,6 +22,43 @@ type EmojiItem = {
 };
 
 let cachedEmojiItems: EmojiItem[] | null = null;
+
+const PRELOAD_BATCH = 700;
+
+const PEOPLE_HINTS = [
+  'grinning',
+  'smile',
+  'laugh',
+  'joy',
+  'wink',
+  'heart_eyes',
+  'kissing',
+  'blush',
+  'thinking',
+  'sunglasses',
+  'cry',
+  'sob',
+  'angry',
+  'rage',
+  'neutral_face',
+  'thumbsup',
+  '+1',
+  'clap',
+  'wave',
+];
+
+const peopleSortKey = (e: EmojiItem) => {
+  const names = e.short_names || [];
+  for (const hint of PEOPLE_HINTS) {
+    const idx = names.indexOf(hint);
+    if (idx !== -1) return 0;
+  }
+  // A lot of people emojis start with these prefixes in emoji-datasource.
+  if (names.some((n) => n.startsWith('person') || n.startsWith('man') || n.startsWith('woman') || n.startsWith('face'))) {
+    return 0;
+  }
+  return 1;
+};
 
 const charFromUtf16 = (utf16: string) =>
   String.fromCodePoint(...utf16.split('-').map((u) => Number(`0x${u}`)));
@@ -51,28 +87,42 @@ export default function SafeEmojiPicker({
       return;
     }
 
-    const task = InteractionManager.runAfterInteractions(() => {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const emojiData = require('emoji-datasource') as EmojiDataItem[];
-        const prepared: EmojiItem[] = emojiData
-          .filter((e) => !e.obsoleted_by)
-          .map((e) => ({
-            unified: e.unified,
-            short_names: Array.isArray(e.short_names) ? e.short_names : [],
-            glyph: charFromUtf16(e.unified),
-          }));
-        cachedEmojiItems = prepared;
-        if (!cancelled) setItems(prepared);
-      } catch (e) {
-        if (!cancelled) setItems([]);
-      }
-    });
+    try {
+      // Load synchronously to avoid showing a loader; then backfill the full list after interactions.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const emojiData = require('emoji-datasource') as EmojiDataItem[];
+      const preparedUnsorted: EmojiItem[] = emojiData
+        .filter((e) => !e.obsoleted_by)
+        .map((e) => ({
+          unified: e.unified,
+          short_names: Array.isArray(e.short_names) ? e.short_names : [],
+          glyph: charFromUtf16(e.unified),
+        }));
 
-    return () => {
-      cancelled = true;
-      (task as any)?.cancel?.();
-    };
+      // Ensure we "start with people" instead of ending with it.
+      const prepared = preparedUnsorted.slice().sort((a, b) => {
+        const ka = peopleSortKey(a);
+        const kb = peopleSortKey(b);
+        if (ka !== kb) return ka - kb;
+        return a.unified.localeCompare(b.unified);
+      });
+      cachedEmojiItems = prepared;
+      setItems(prepared.slice(0, PRELOAD_BATCH));
+
+      const task = InteractionManager.runAfterInteractions(() => {
+        if (!cancelled) setItems(prepared);
+      });
+
+      return () => {
+        cancelled = true;
+        (task as any)?.cancel?.();
+      };
+    } catch {
+      setItems([]);
+      return () => {
+        cancelled = true;
+      };
+    }
   }, []);
 
   const colSize = useMemo(() => {
@@ -109,12 +159,7 @@ export default function SafeEmojiPicker({
         </View>
       )}
 
-      {!items ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color="#fff" />
-          <Text style={styles.loadingText}>Loading emojis…</Text>
-        </View>
-      ) : null}
+      {/* No loading state: emoji data is bundled and should render immediately. */}
 
       <FlatList
         data={data}
@@ -168,17 +213,5 @@ const styles = StyleSheet.create({
   cell: {
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  loading: {
-    paddingHorizontal: 12,
-    paddingBottom: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  loadingText: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 12,
-    fontWeight: '600',
   },
 });

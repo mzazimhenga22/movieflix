@@ -4,11 +4,9 @@
     "slug": "movieflix",
     "version": "1.0.0",
     "supportsPictureInPicture": true,
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "1.0.0",
     "updates": {
-      "url": "https://u.expo.dev/150ba453-1c88-455a-89a0-14147bd74e25",
+      "url": "https://u.expo.dev/56b697d6-b709-4b80-909a-27b3a97856c1",
       "enabled": true,
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
@@ -23,6 +21,7 @@
       "bundleIdentifier": "com.movieflix.app",
       "backgroundColor": "#1C1C1E",
       "infoPlist": {
+        "NSCameraUsageDescription": "Allow MovieFlix to use your camera to scan a TV sign-in QR code.",
         "UIBackgroundModes": [
           "audio"
         ]
@@ -30,6 +29,7 @@
     },
     "android": {
       "package": "com.movieflix.app",
+      "usesCleartextTraffic": true,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -42,6 +42,7 @@
       "backgroundColor": "#1C1C1E",
       "intentFilters": [],
       "permissions": [
+        "android.permission.CAMERA",
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.READ_MEDIA_VIDEO",
@@ -64,6 +65,7 @@
     "plugins": [
       "expo-router",
       "expo-notifications",
+      "expo-camera",
       [
         "expo-splash-screen",
         {
@@ -105,14 +107,14 @@
     },
     "extra": {
       "router": {},
-      "eas": {
-        "projectId": "150ba453-1c88-455a-89a0-14147bd74e25"
-      },
       "agora": {
         "appId": "",
         "tokenEndpoint": ""
+      },
+      "eas": {
+        "projectId": "56b697d6-b709-4b80-909a-27b3a97856c1"
       }
     },
-    "owner": "mzazimhengas-organization"
+    "owner": "vivescharris"
   }
 }

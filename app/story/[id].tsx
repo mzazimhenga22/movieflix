@@ -15,14 +15,18 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
+import { Video } from 'expo-av';
 import { firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
 import { useUser } from '../../hooks/use-user';
 import { useAccent } from '../components/AccentContext';
 import { findOrCreateConversation, sendMessage, type Profile } from '../messaging/controller';
+import { followUser } from '../../lib/followGraph';
 
 interface StoryDoc {
-  photoURL: string;
+  photoURL: string | null;
+  mediaUrl?: string | null;
+  mediaType?: 'image' | 'video' | string;
   username?: string;
   caption?: string;
   overlayText?: string;
@@ -38,6 +42,9 @@ const StoryScreen = () => {
   const [stories, setStories] = useState<(StoryDoc & { id: string })[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [replyText, setReplyText] = useState('');
+  const [canView, setCanView] = useState<boolean>(true);
+  const [gateChecked, setGateChecked] = useState<boolean>(false);
+  const [followBusy, setFollowBusy] = useState(false);
   const progress = useRef(new Animated.Value(0)).current;
   const durationMs = 30000; // 30 seconds per story
   const { width } = Dimensions.get('window');
@@ -62,6 +69,26 @@ const StoryScreen = () => {
         if (snap.exists()) {
           const base = snap.data() as StoryDoc;
           const userId = base.userId;
+
+          // Privacy: only allow viewers who FOLLOW the story owner (or the owner themselves).
+          try {
+            const viewerId = (user as any)?.uid ? String((user as any).uid) : null;
+            const ownerId = userId ? String(userId) : null;
+            if (!viewerId || !ownerId) {
+              setCanView(false);
+            } else if (viewerId === ownerId) {
+              setCanView(true);
+            } else {
+              const viewerSnap = await getDoc(doc(firestore, 'users', viewerId));
+              const following = viewerSnap.exists() ? (viewerSnap.data() as any)?.following : [];
+              const followingIds = Array.isArray(following) ? following.map(String) : [];
+              setCanView(followingIds.includes(ownerId));
+            }
+          } catch {
+            setCanView(false);
+          } finally {
+            setGateChecked(true);
+          }
 
           if (userId) {
             // Fetch all stories for this user in time order
@@ -100,8 +127,24 @@ const StoryScreen = () => {
     fetchStories();
   }, [id, fallbackPhoto]);
 
+  useEffect(() => {
+    if (!gateChecked && (user as any)?.uid) {
+      setGateChecked(true);
+    }
+  }, [gateChecked, user]);
+
   const currentStory = stories[currentIndex];
-  const imageUri = currentStory?.photoURL || (fallbackPhoto as string | undefined);
+  const mediaUri =
+    (currentStory as any)?.mediaUrl || currentStory?.photoURL || (fallbackPhoto as string | undefined);
+
+  const mediaType: 'image' | 'video' = (() => {
+    const explicit = (currentStory as any)?.mediaType;
+    if (explicit === 'video') return 'video';
+    if (explicit === 'image') return 'image';
+    const uri = String(mediaUri || '').toLowerCase();
+    if (uri.includes('.mp4') || uri.includes('.m3u8')) return 'video';
+    return 'image';
+  })();
 
   const startProgress = useCallback(
     (fromValue = 0) => {
@@ -220,7 +263,74 @@ const StoryScreen = () => {
     [currentStory?.photoURL, currentStory?.userId, currentStory?.username, router]
   );
 
-  if (!imageUri) {
+  if (gateChecked && !canView) {
+    const ownerId = (stories?.[0] as any)?.userId ? String((stories[0] as any).userId) : null;
+    const viewerId = (user as any)?.uid ? String((user as any).uid) : null;
+    const canFollow = Boolean(ownerId && viewerId && ownerId !== viewerId);
+
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 18 }]}>
+        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', marginBottom: 8, textAlign: 'center' }}>
+          Followers only
+        </Text>
+        <Text style={{ color: 'rgba(255,255,255,0.75)', textAlign: 'center', marginBottom: 16 }}>
+          Follow this creator to view their story.
+        </Text>
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          {canFollow ? (
+            <TouchableOpacity
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderRadius: 14,
+                backgroundColor: 'rgba(229,9,20,0.92)',
+                opacity: followBusy ? 0.7 : 1,
+              }}
+              disabled={followBusy}
+              onPress={async () => {
+                if (!ownerId || !viewerId) return;
+                setFollowBusy(true);
+                try {
+                  await followUser({
+                    viewerId,
+                    targetId: ownerId,
+                    actorName: (user as any)?.displayName || 'A new user',
+                    actorAvatar: (user as any)?.photoURL || null,
+                    notify: true,
+                  });
+                  setCanView(true);
+                } catch (e) {
+                  console.warn('Follow from story gate failed', e);
+                  router.push({ pathname: '/profile', params: { userId: ownerId, from: 'story' } } as any);
+                } finally {
+                  setFollowBusy(false);
+                }
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '900' }}>{followBusy ? 'Following...' : 'Follow'}</Text>
+            </TouchableOpacity>
+          ) : null}
+
+          <TouchableOpacity
+            style={{
+              paddingHorizontal: 16,
+              paddingVertical: 12,
+              borderRadius: 14,
+              backgroundColor: 'rgba(37,211,102,0.9)',
+            }}
+            onPress={() => {
+              if (ownerId) router.push({ pathname: '/profile', params: { userId: ownerId, from: 'story' } } as any);
+              else router.back();
+            }}
+          >
+            <Text style={{ color: '#000', fontWeight: '900' }}>View profile</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  if (!mediaUri) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <Text style={{ color: '#fff' }}>Story not found.</Text>
@@ -293,7 +403,17 @@ const StoryScreen = () => {
         onPressOut={handlePressOut}
       >
         <View style={styles.storyMedia}>
-          <Image source={{ uri: imageUri }} style={styles.storyImage} resizeMode="cover" />
+          {mediaType === 'video' ? (
+            <Video
+              source={{ uri: String(mediaUri) }}
+              style={styles.storyImage}
+              resizeMode="cover"
+              shouldPlay
+              isLooping={false}
+            />
+          ) : (
+            <Image source={{ uri: String(mediaUri) }} style={styles.storyImage} resizeMode="cover" />
+          )}
           <LinearGradient
             colors={['rgba(0,0,0,0.85)', 'transparent']}
             style={styles.mediaGradientTop}

@@ -1,6 +1,7 @@
 // app/profile.tsx
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -26,6 +27,7 @@ import { getFavoriteGenre, type FavoriteGenre } from '../lib/favoriteGenreStorag
 import FeedCard from './components/social-feed/FeedCard';
 import type { FeedCardItem } from '../types/social-feed';
 import { supabase, supabaseConfigured } from '../constants/supabase';
+import { followUser, unfollowUser } from '../lib/followGraph';
 
 import { onAuthStateChanged } from 'firebase/auth';
 import {
@@ -52,20 +54,26 @@ type UserDoc = {
   favoriteColor?: string;
   followers?: string[];
   following?: string[];
+  blockedUsers?: string[];
 };
 
 const ProfileScreen: React.FC = () => {
   const router = useRouter();
+  const navigation = useNavigation();
   const { accentColor: globalAccent, setAccentColor } = useAccent();
   const params = useLocalSearchParams();
-  const { from, userId: profileUserId } = params as { from?: string; userId?: string };
+  const { from, userId: profileUserId, backTo } = params as { from?: string; userId?: string; backTo?: string };
   const cameFromSocial = from === 'social-feed';
+
+  const safeBackTo = typeof backTo === 'string' && backTo.startsWith('/') ? backTo : null;
 
   const [authReady, setAuthReady] = useState(false);
   const [currentUser, setCurrentUser] = useState<any | null>(null);
 
   const [userProfile, setUserProfile] = useState<UserDoc | null>(null);
   const [isFollowing, setIsFollowing] = useState(false);
+  const [followsYou, setFollowsYou] = useState(false);
+  const [mutualCount, setMutualCount] = useState(0);
   const [followersCount, setFollowersCount] = useState(0);
   const [followingCount, setFollowingCount] = useState(0);
   const [loadingProfile, setLoadingProfile] = useState(false);
@@ -120,6 +128,8 @@ const ProfileScreen: React.FC = () => {
       setFollowersCount(0);
       setFollowingCount(0);
       setIsFollowing(false);
+      setFollowsYou(false);
+      setMutualCount(0);
       setReviewsCount(0);
       return;
     }
@@ -144,6 +154,13 @@ const ProfileScreen: React.FC = () => {
           setFollowersCount(followersArr.length);
           setFollowingCount(followingArr.length);
 
+          // whether this profile follows the viewer
+          if (!isOwnProfile && currentUser?.uid) {
+            setFollowsYou(followingArr.includes(currentUser.uid));
+          } else {
+            setFollowsYou(false);
+          }
+
           // following state when viewing another profile
           if (!isOwnProfile && currentUser) {
             try {
@@ -151,22 +168,32 @@ const ProfileScreen: React.FC = () => {
               const currentUserDocSnap = await getDoc(currentUserDocRef);
               if (currentUserDocSnap.exists()) {
                 const curFollowing = currentUserDocSnap.data()?.following ?? [];
-                setIsFollowing(Array.isArray(curFollowing) && curFollowing.includes(userIdToDisplay));
+                const curFollowingArr = Array.isArray(curFollowing) ? curFollowing.map(String) : [];
+                setIsFollowing(curFollowingArr.includes(String(userIdToDisplay)));
+
+                const followersSet = new Set(followersArr.map(String));
+                const mutuals = curFollowingArr.filter((id: string) => followersSet.has(String(id)));
+                setMutualCount(mutuals.length);
               } else {
                 setIsFollowing(false);
+                setMutualCount(0);
               }
             } catch (err) {
               console.error('Error checking following status:', err);
               setIsFollowing(false);
+              setMutualCount(0);
             }
           } else {
             setIsFollowing(false);
+            setMutualCount(0);
           }
         } else {
           setUserProfile(null);
           setFollowersCount(0);
           setFollowingCount(0);
           setIsFollowing(false);
+          setFollowsYou(false);
+          setMutualCount(0);
         }
 
         // ✅ reviews count (Firestore v9 query())
@@ -186,6 +213,8 @@ const ProfileScreen: React.FC = () => {
           setFollowersCount(0);
           setFollowingCount(0);
           setIsFollowing(false);
+          setFollowsYou(false);
+          setMutualCount(0);
           setReviewsCount(0);
         }
       } finally {
@@ -213,29 +242,27 @@ const ProfileScreen: React.FC = () => {
     setFollowersCount((c) => c + 1);
 
     try {
-      const currentUserDocRef = doc(firestore, 'users', currentUser.uid);
-      const targetUserDocRef = doc(firestore, 'users', userIdToDisplay as string);
-
-      await updateDoc(currentUserDocRef, { following: arrayUnion(userIdToDisplay) });
-      await updateDoc(targetUserDocRef, { followers: arrayUnion(currentUser.uid) });
-
-      await addDoc(collection(firestore, 'notifications'), {
-        type: 'follow',
-        scope: 'social',
-        channel: 'community',
-        actorId: currentUser.uid,
+      const { didFollow } = await followUser({
+        viewerId: currentUser.uid,
+        targetId: String(userIdToDisplay),
         actorName: currentUser.displayName || 'A new user',
         actorAvatar: currentUser.photoURL || null,
-        targetUid: userIdToDisplay,
-        message: `${currentUser.displayName || 'A new user'} started following you.`,
-        read: false,
-        createdAt: serverTimestamp(),
+        notify: true,
       });
+      if (!didFollow) {
+        // already followed (or raced) — revert optimistic count bump
+        setFollowersCount((c) => Math.max(0, c - 1));
+      }
     } catch (err) {
       console.error('Follow failed:', err);
       setIsFollowing(false);
       setFollowersCount((c) => Math.max(0, c - 1));
-      Alert.alert('Error', 'Unable to follow user. Please try again.');
+      const code = String(err?.message || '');
+      if (code.includes('blocked')) {
+        Alert.alert('Not allowed', 'You cannot follow this user right now.');
+      } else {
+        Alert.alert('Error', 'Unable to follow user. Please try again.');
+      }
     } finally {
       setFollowBusy(false);
     }
@@ -254,11 +281,11 @@ const ProfileScreen: React.FC = () => {
     setFollowersCount((c) => Math.max(0, c - 1));
 
     try {
-      const currentUserDocRef = doc(firestore, 'users', currentUser.uid);
-      const targetUserDocRef = doc(firestore, 'users', userIdToDisplay as string);
-
-      await updateDoc(currentUserDocRef, { following: arrayRemove(userIdToDisplay) });
-      await updateDoc(targetUserDocRef, { followers: arrayRemove(currentUser.uid) });
+      const { didUnfollow } = await unfollowUser({ viewerId: currentUser.uid, targetId: String(userIdToDisplay) });
+      if (!didUnfollow) {
+        // already unfollowed (or raced) — revert optimistic decrement
+        setFollowersCount((c) => c + 1);
+      }
     } catch (err) {
       console.error('Unfollow failed:', err);
       setIsFollowing(true);
@@ -269,10 +296,30 @@ const ProfileScreen: React.FC = () => {
     }
   };
 
-  const handleBack = () => {
-    if (cameFromSocial) router.replace('/social-feed');
-    else router.replace('/movies');
-  };
+  const handleBack = useCallback(() => {
+    if (safeBackTo) {
+      router.replace(safeBackTo as any);
+      return;
+    }
+
+    const canGoBack = (navigation as any)?.canGoBack?.();
+    if (canGoBack) {
+      router.back();
+      return;
+    }
+
+    if (cameFromSocial) {
+      router.replace('/social-feed');
+      return;
+    }
+
+    if (from === 'messages') {
+      router.replace('/messaging');
+      return;
+    }
+
+    router.replace('/movies');
+  }, [cameFromSocial, from, navigation, router, safeBackTo]);
 
   const handleSearch = () => router.push('/profile-search');
 
@@ -545,6 +592,8 @@ const ProfileScreen: React.FC = () => {
     userProfile?.favoriteColor || (favoriteGenres[0] as string | undefined)
   );
 
+  const accent = accentColor || globalAccent || '#e50914';
+
   useEffect(() => {
     if (accentColor) setAccentColor(accentColor);
   }, [accentColor, setAccentColor]);
@@ -572,7 +621,7 @@ const ProfileScreen: React.FC = () => {
       <ScreenWrapper>
         <StatusBar style="light" translucent={false} />
         <LinearGradient
-          colors={[accentColor || globalAccent || '#e50914', '#05060f']}
+          colors={[accent, '#05060f']}
           start={[0, 0]}
           end={[1, 1]}
           style={StyleSheet.absoluteFillObject}
@@ -580,7 +629,7 @@ const ProfileScreen: React.FC = () => {
         <ScrollView contentContainerStyle={styles.container}>
           <View style={styles.headerWrap}>
             <LinearGradient
-              colors={[`${(accentColor || globalAccent || '#e50914')}33`, 'rgba(10,12,24,0.4)']}
+              colors={[`${accent}33`, 'rgba(10,12,24,0.4)']}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.headerGlow}
@@ -590,7 +639,7 @@ const ProfileScreen: React.FC = () => {
                 <Ionicons name="chevron-back" size={22} color="#fff" />
               </TouchableOpacity>
               <View style={styles.titleRow}>
-                <View style={styles.accentDot} />
+                <View style={[styles.accentDot, { backgroundColor: accent, shadowColor: accent }]} />
                 <View>
                   <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
                     Your Space
@@ -616,14 +665,14 @@ const ProfileScreen: React.FC = () => {
           <View style={styles.inner}>
             <View style={styles.profileHeader}>
               <LinearGradient
-                colors={[`${(accentColor || '#e50914')}33`, 'rgba(255,255,255,0.05)']}
+                colors={[`${accent}33`, 'rgba(255,255,255,0.05)']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.headerSheen}
               />
 
               <View style={styles.avatarWrap}>
-                <Image source={{ uri: avatarUri }} style={styles.avatar} />
+                <Image source={{ uri: avatarUri }} style={[styles.avatar, { borderColor: accent }]} />
                 <View style={styles.statusPill}>
                   <View style={[styles.statusDot, { backgroundColor: '#4ADE80' }]} />
                   <Text style={styles.statusLabel}>Verified fan</Text>
@@ -634,9 +683,24 @@ const ProfileScreen: React.FC = () => {
               </Text>
               <Text style={styles.memberSince}>Member since 2023</Text>
 
+              {!isOwnProfile && (followsYou || mutualCount > 0) ? (
+                <View style={styles.badgeRow}>
+                  {followsYou ? (
+                    <View style={[styles.badgePill, { backgroundColor: 'rgba(74,222,128,0.14)' }]}> 
+                      <Text style={styles.badgeText}>Follows you</Text>
+                    </View>
+                  ) : null}
+                  {mutualCount > 0 ? (
+                    <View style={styles.badgePill}>
+                      <Text style={styles.badgeText}>{mutualCount} mutual</Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+
               {isOwnProfile ? (
                 <View style={styles.selfActionRow}>
-                  <TouchableOpacity style={styles.editProfileButton} onPress={handleEditProfile}>
+                  <TouchableOpacity style={[styles.editProfileButton, { backgroundColor: accent }]} onPress={handleEditProfile}>
                     <Text style={styles.editProfileButtonText}>Edit Profile</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={styles.switchProfileButton} onPress={handleSwitchProfile}>
@@ -648,6 +712,7 @@ const ProfileScreen: React.FC = () => {
                   style={[
                     isFollowing ? styles.unfollowButton : styles.followButton,
                     followBusy && { opacity: 0.6 },
+                    !isFollowing && { backgroundColor: accent },
                   ]}
                   onPress={isFollowing ? handleUnfollow : handleFollow}
                   disabled={followBusy}
@@ -658,14 +723,26 @@ const ProfileScreen: React.FC = () => {
             </View>
 
             <View style={styles.statsContainer}>
-              <View style={styles.statBox}>
+              <TouchableOpacity
+                style={styles.statBox}
+                activeOpacity={0.85}
+                onPress={() =>
+                  router.push({ pathname: '/followers', params: { userId: String(userIdToDisplay || '') } } as any)
+                }
+              >
                 <Text style={styles.statValue}>{followersCount}</Text>
                 <Text style={styles.statLabel}>Followers</Text>
-              </View>
-              <View style={styles.statBox}>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.statBox}
+                activeOpacity={0.85}
+                onPress={() =>
+                  router.push({ pathname: '/following', params: { userId: String(userIdToDisplay || '') } } as any)
+                }
+              >
                 <Text style={styles.statValue}>{followingCount}</Text>
                 <Text style={styles.statLabel}>Following</Text>
-              </View>
+              </TouchableOpacity>
               <TouchableOpacity style={[styles.statBox, styles.statBoxInteractive]} activeOpacity={0.85} onPress={openReviewsSheet}>
                 <Text style={styles.statValue}>{reviewsCount}</Text>
                 <Text style={styles.statLabel}>Reviews</Text>
@@ -740,8 +817,8 @@ const ProfileScreen: React.FC = () => {
 
               {isOwnProfile && (
                 <TouchableOpacity style={styles.actionItem} onPress={handleLogout}>
-                  <Ionicons name="log-out-outline" size={24} color="#e50914" />
-                  <Text style={[styles.actionText, { color: '#e50914' }]}>Logout</Text>
+                  <Ionicons name="log-out-outline" size={24} color={accent} />
+                  <Text style={[styles.actionText, { color: accent }]}>Logout</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -932,8 +1009,8 @@ const styles = StyleSheet.create({
     width: 12,
     height: 12,
     borderRadius: 6,
-    backgroundColor: '#e50914',
-    shadowColor: '#e50914',
+    backgroundColor: 'transparent',
+    shadowColor: 'transparent',
     shadowOpacity: 0.6,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
@@ -995,7 +1072,7 @@ const styles = StyleSheet.create({
     height: 120,
     borderRadius: 60,
     borderWidth: 3,
-    borderColor: '#e50914',
+    borderColor: 'rgba(255,255,255,0.12)',
     marginBottom: 15,
   },
   avatarWrap: {
@@ -1030,7 +1107,7 @@ const styles = StyleSheet.create({
   selfActionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, justifyContent: 'center' },
 
   editProfileButton: {
-    backgroundColor: '#e50914',
+    backgroundColor: 'transparent',
     paddingVertical: 10,
     paddingHorizontal: 22,
     borderRadius: 22,
@@ -1058,7 +1135,7 @@ const styles = StyleSheet.create({
   switchProfileButtonText: { color: 'white', fontWeight: 'bold' },
 
   followButton: {
-    backgroundColor: '#e50914',
+    backgroundColor: 'transparent',
     paddingVertical: 10,
     paddingHorizontal: 30,
     borderRadius: 22,
@@ -1090,6 +1167,21 @@ const styles = StyleSheet.create({
   statBox: { alignItems: 'center' },
   statValue: { fontSize: 22, fontWeight: 'bold', color: 'white' },
   statLabel: { fontSize: 12, color: '#BBBBBB', marginTop: 5 },
+  badgeRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  badgePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  badgeText: { color: 'rgba(255,255,255,0.92)', fontWeight: '700', fontSize: 12 },
   statBoxInteractive: {
     paddingHorizontal: 12,
     paddingVertical: 4,

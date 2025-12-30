@@ -20,6 +20,8 @@ interface MovieListProps {
   carousel?: boolean; // Make carousel optional
   onItemPress?: (item: Media) => void;
   showProgress?: boolean;
+  myListIds?: number[];
+  onToggleMyList?: (item: Media) => void;
 }
 
 const MovieList: React.FC<MovieListProps> = ({
@@ -28,11 +30,16 @@ const MovieList: React.FC<MovieListProps> = ({
   carousel = true,
   onItemPress,
   showProgress = false,
+  myListIds: externalMyListIds,
+  onToggleMyList,
 }) => {
   const router = useRouter();
+
   const [myListIds, setMyListIds] = useState<number[]>([]);
+  const effectiveMyListIds = externalMyListIds ?? myListIds;
 
   useEffect(() => {
+    if (externalMyListIds) return;
     const loadMyList = async () => {
       try {
         const key = await getProfileScopedKey('myList');
@@ -45,9 +52,13 @@ const MovieList: React.FC<MovieListProps> = ({
       }
     };
     loadMyList();
-  }, []);
+  }, [externalMyListIds]);
 
   const toggleMyList = async (item: Media) => {
+    if (onToggleMyList) {
+      onToggleMyList(item);
+      return;
+    }
     try {
       const key = await getProfileScopedKey('myList');
       const stored = await AsyncStorage.getItem(key);
@@ -104,7 +115,7 @@ const MovieList: React.FC<MovieListProps> = ({
         onPress={() => toggleMyList(item)}
       >
         <Ionicons
-          name={myListIds.includes(item.id) ? 'checkmark' : 'add'}
+          name={effectiveMyListIds.includes(item.id) ? 'checkmark' : 'add'}
           size={18}
           color="#fff"
         />
@@ -186,7 +197,7 @@ const MovieList: React.FC<MovieListProps> = ({
           onPress={() => toggleMyList(item)}
         >
           <Ionicons
-            name={myListIds.includes(item.id) ? 'checkmark' : 'add'}
+            name={effectiveMyListIds.includes(item.id) ? 'checkmark' : 'add'}
             size={18}
             color="#fff"
           />
@@ -233,6 +244,12 @@ const MovieList: React.FC<MovieListProps> = ({
           keyExtractor={(item) => item.id.toString()}
           horizontal
           showsHorizontalScrollIndicator={false}
+          removeClippedSubviews
+          initialNumToRender={8}
+          windowSize={5}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
+          getItemLayout={(_, index) => ({ length: 155, offset: 155 * index, index })}
           contentContainerStyle={styles.carouselContent}
         />
       ) : (
