@@ -22,6 +22,20 @@ export const useIncomingCall = (userId?: string | null) => {
         if (call.initiatorId === userId) return false;
         if (!call.members?.includes(userId)) return false;
         if (call.status === 'ended' || call.status === 'declined') return false;
+
+        // Group calls are first-to-answer; if someone else already accepted, stop showing as incoming.
+        if (call.isGroup && call.acceptedBy && call.acceptedBy !== userId) {
+          return false;
+        }
+
+        const timeoutMillis =
+          (call as any)?.ringTimeoutAt && typeof (call as any).ringTimeoutAt?.toMillis === 'function'
+            ? (call as any).ringTimeoutAt.toMillis()
+            : null;
+        if (typeof timeoutMillis === 'number' && Date.now() > timeoutMillis && call.status !== 'active') {
+          return false;
+        }
+
         const participant = call.participants?.[userId];
         if (participant && ['declined', 'left'].includes(participant.state)) {
           return false;

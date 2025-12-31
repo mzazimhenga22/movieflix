@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, InteractionManager, StyleSheet, Text, View } from 'react-native';
 
 import { API_BASE_URL, API_KEY } from '@/constants/api';
 import { getAccentFromPosterPath } from '@/constants/theme';
@@ -9,6 +9,7 @@ import type { Genre, Media } from '@/types';
 import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvPosterCard from '../components/TvPosterCard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 import { useRouter } from 'expo-router';
 
 export default function CategoriesTv() {
@@ -21,25 +22,53 @@ export default function CategoriesTv() {
   const [itemsLoading, setItemsLoading] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  const gridRef = useRef<FlatList<Media> | null>(null);
+  const gridScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastGridScrollIndexRef = useRef<number | null>(null);
+
+  const GRID_COLUMNS = 6;
+  const CARD_WIDTH = 170;
+  const CARD_HEIGHT = Math.round(CARD_WIDTH * 1.5);
+  const GRID_ROW_GAP = 14;
+  const GRID_ROW_HEIGHT = CARD_HEIGHT + GRID_ROW_GAP;
+  const getGridItemLayout = useCallback(
+    (_: ArrayLike<Media> | null | undefined, index: number) => {
+      const row = Math.floor(index / GRID_COLUMNS);
+      return { length: GRID_ROW_HEIGHT, offset: GRID_ROW_HEIGHT * row, index };
+    },
+    [GRID_ROW_HEIGHT],
+  );
 
   useEffect(() => {
     let alive = true;
     setGenresLoading(true);
-    void fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`)
-      .then((r) => r.json())
-      .then((json) => {
-        if (!alive) return;
-        setGenres((json?.genres || []) as Genre[]);
-      })
-      .catch(() => {
-        if (!alive) return;
-        setGenres([]);
-      })
-      .finally(() => {
-        if (alive) setGenresLoading(false);
-      });
+
+    const handle = InteractionManager.runAfterInteractions(() => {
+      void fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`)
+        .then((r) => r.json())
+        .then((json) => {
+          if (!alive) return;
+          setGenres((json?.genres || []) as Genre[]);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setGenres([]);
+        })
+        .finally(() => {
+          if (alive) setGenresLoading(false);
+        });
+    });
+
     return () => {
       alive = false;
+      // @ts-ignore - cancel exists at runtime on InteractionManager handle
+      handle?.cancel?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (gridScrollTimerRef.current) clearTimeout(gridScrollTimerRef.current);
     };
   }, []);
 
@@ -131,7 +160,7 @@ export default function CategoriesTv() {
                   renderItem={({ item }) => {
                     const active = selected === item.id;
                     return (
-                      <Pressable
+                      <TvFocusable
                         onPress={() => toggle(item.id)}
                         style={({ focused }: any) => [
                           styles.genreChip,
@@ -142,7 +171,7 @@ export default function CategoriesTv() {
                         <Text style={[styles.genreText, active ? styles.genreTextActive : null]}>
                           {item.name}
                         </Text>
-                      </Pressable>
+                      </TvFocusable>
                     );
                   }}
                 />
@@ -167,15 +196,35 @@ export default function CategoriesTv() {
                 </View>
               ) : (
                 <FlatList
+                  ref={(r) => {
+                    gridRef.current = r;
+                  }}
                   data={items}
                   keyExtractor={(it, idx) => String(it.id ?? idx)}
-                  numColumns={6}
+                  numColumns={GRID_COLUMNS}
                   columnWrapperStyle={styles.gridRow}
                   contentContainerStyle={styles.grid}
-                  renderItem={({ item }) => (
+                  getItemLayout={getGridItemLayout}
+                  initialNumToRender={18}
+                  maxToRenderPerBatch={18}
+                  updateCellsBatchingPeriod={50}
+                  windowSize={5}
+                  removeClippedSubviews
+                  renderItem={({ item, index }) => (
                     <TvPosterCard
                       item={{ ...item, media_type: (item.media_type ?? 'movie') as any }}
-                      width={170}
+                      width={CARD_WIDTH}
+                      onFocus={() => {
+                        if (lastGridScrollIndexRef.current === index) return;
+                        lastGridScrollIndexRef.current = index;
+
+                        if (gridScrollTimerRef.current) clearTimeout(gridScrollTimerRef.current);
+                        gridScrollTimerRef.current = setTimeout(() => {
+                          try {
+                            gridRef.current?.scrollToIndex({ index, viewPosition: 0.35, animated: false });
+                          } catch {}
+                        }, 60);
+                      }}
                       onPress={(selectedItem) =>
                         router.push(`/details/${selectedItem.id}?mediaType=${selectedItem.media_type || 'movie'}`)
                       }

@@ -12,7 +12,7 @@
       "fallbackToCacheTimeout": 0
     },
     "orientation": "portrait",
-    "icon": "./assets/images/logo.png",
+    "icon": "./assets/images/logo-safe.png",
     "scheme": "movieflix",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -32,10 +32,9 @@
       "usesCleartextTraffic": true,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/logo.png",
-        "backgroundImage": "./assets/images/logo.png",
-        "monochromeImage": "./assets/images/logo.png"
+        "backgroundColor": "#E53935",
+        "foregroundImage": "./assets/images/logo-safe.png",
+        "monochromeImage": "./assets/images/logo-safe.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -54,9 +53,9 @@
       ]
     },
     "splash": {
-      "image": "./assets/images/movies-splash.png",
-      "resizeMode": "cover",
-      "backgroundColor": "#05060f"
+      "image": "./assets/images/logo-safe.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E53935"
     },
     "web": {
       "output": "static",
@@ -69,12 +68,12 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/movies-splash.png",
-          "resizeMode": "cover",
-          "backgroundColor": "#05060f",
+          "image": "./assets/images/logo-safe.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#E53935",
           "dark": {
-            "image": "./assets/images/movies-splash.png",
-            "backgroundColor": "#05060f"
+            "image": "./assets/images/logo-safe.png",
+            "backgroundColor": "#E53935"
           }
         }
       ],

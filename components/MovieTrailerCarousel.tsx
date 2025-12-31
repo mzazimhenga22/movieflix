@@ -5,16 +5,13 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Dimensions,
 } from 'react-native';
 import { Video, ResizeMode } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { Media } from '../types';
-import { API_BASE_URL, API_KEY } from '../constants/api';
 
-const { width } = Dimensions.get('window');
 const TRAILER_WIDTH = 280;
 const TRAILER_HEIGHT = 160;
 const SPACING = 12;
@@ -230,13 +227,18 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    columnGap: 12,
+    rowGap: 10,
     paddingHorizontal: 16,
     marginBottom: 16,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 1,
+    minWidth: 0,
   },
   headerDot: {
     width: 8,
@@ -250,12 +252,15 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#fff',
     letterSpacing: 0.5,
+    flexShrink: 1,
+    minWidth: 0,
   },
   headerAction: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 4,
     paddingHorizontal: 8,
+    marginLeft: 'auto',
   },
   headerActionText: {
     fontSize: 14,
@@ -361,11 +366,17 @@ const styles = StyleSheet.create({
   cardFooter: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    columnGap: 10,
+    rowGap: 10,
   },
   genreTags: {
     flexDirection: 'row',
     gap: 6,
+    flexWrap: 'wrap',
+    flexShrink: 1,
+    minWidth: 0,
   },
   genreTag: {
     backgroundColor: 'rgba(255,255,255,0.1)',
@@ -387,6 +398,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: 'rgba(229,9,20,0.3)',
+    marginLeft: 'auto',
   },
   watchNowText: {
     color: '#e50914',

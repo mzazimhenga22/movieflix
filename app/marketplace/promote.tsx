@@ -1,5 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, StatusBar } from 'react-native';
+import {
+  ActivityIndicator,
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  ScrollView,
+  Alert,
+  StatusBar,
+  TextInput,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -8,13 +18,30 @@ import Slider from '@react-native-community/slider';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { useAccent } from '../components/AccentContext';
 import { useUser } from '../../hooks/use-user';
-import { getProducts, isProductPromoted, updateProduct, type Product } from './api';
+import {
+  getProducts,
+  getPromoCreditsAccount,
+  isProductPromoted,
+  marketplaceCancelPromotion,
+  marketplaceExtendPromotionWithCredits,
+  marketplacePromoteWithCredits,
+  promoCreditsSubmitPaybillReceipt,
+  type Product,
+} from './api';
 import { formatKsh } from '../../lib/money';
 
 export default function PromoteScreen() {
   const router = useRouter();
   const { setAccentColor } = useAccent();
   const { user } = useUser();
+
+  const PAYBILL_NUMBER = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_NUMBER ?? process.env.EXPO_PUBLIC_PAYBILL_NUMBER ?? '247247').trim();
+  const PAYBILL_ACCOUNT = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_ACCOUNT ?? process.env.EXPO_PUBLIC_PAYBILL_ACCOUNT ?? '480755').trim();
+
+  const formatCredits = useCallback((value: number) => {
+    const v = Math.max(0, Math.round(Number(value) || 0));
+    return `${v} credit${v === 1 ? '' : 's'}`;
+  }, []);
 
   const [selectedProducts, setSelectedProducts] = useState<string[]>([]);
   const [placement, setPlacement] = useState<'search' | 'story' | 'feed'>('feed');
@@ -26,7 +53,30 @@ export default function PromoteScreen() {
   const [reloadKey, setReloadKey] = useState(0);
   const [campaignBusyId, setCampaignBusyId] = useState<string | null>(null);
 
+  const [creditsBalance, setCreditsBalance] = useState(0);
+  const [creditsLoading, setCreditsLoading] = useState(false);
+  const [topupAmountKsh, setTopupAmountKsh] = useState('500');
+  const [topupReceiptCode, setTopupReceiptCode] = useState('');
+  const [topupSubmitting, setTopupSubmitting] = useState(false);
+
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  const reloadCredits = useCallback(async () => {
+    if (!user?.uid) {
+      setCreditsBalance(0);
+      return;
+    }
+    setCreditsLoading(true);
+    try {
+      const account = await getPromoCreditsAccount(user.uid);
+      setCreditsBalance(Math.max(0, Math.round(Number((account as any)?.availableCredits ?? 0))));
+    } catch (err) {
+      console.warn('[marketplace] credits load failed', err);
+      setCreditsBalance(0);
+    } finally {
+      setCreditsLoading(false);
+    }
+  }, [user?.uid]);
 
   const toMillis = useCallback((value: any): number | null => {
     if (!value) return null;
@@ -71,6 +121,10 @@ export default function PromoteScreen() {
   }, [setAccentColor]);
 
   useEffect(() => {
+    void reloadCredits();
+  }, [reloadCredits, user?.uid, reloadKey]);
+
+  useEffect(() => {
     let cancelled = false;
 
     (async () => {
@@ -105,8 +159,8 @@ export default function PromoteScreen() {
 
   const rates = useMemo(
     () => ({
-      hours: { search: 30, story: 60, feed: 80 },
-      days: { search: 500, story: 900, feed: 1200 },
+      hours: { search: 3, story: 6, feed: 8 },
+      days: { search: 50, story: 90, feed: 120 },
     }),
     []
   );
@@ -132,11 +186,15 @@ export default function PromoteScreen() {
           onPress: () => {
             if (campaignBusyId || submitting) return;
             setCampaignBusyId(product.id);
-            void updateProduct(product.id, {
-              promoted: false,
-              promotionEndsAt: new Date(),
-            })
-              .then(() => reload())
+            void (async () => {
+              if (!user) throw new Error('Sign in required');
+              const firebaseToken = await user.getIdToken();
+              await marketplaceCancelPromotion({ firebaseToken, productId: product.id });
+            })()
+              .then(async () => {
+                await reloadCredits();
+                reload();
+              })
               .catch((err) => {
                 console.error('[marketplace] cancel promotion failed', err);
                 Alert.alert('Failed', 'Unable to cancel promotion right now.');
@@ -146,7 +204,7 @@ export default function PromoteScreen() {
         },
       ]);
     },
-    [campaignBusyId, reload, submitting],
+    [campaignBusyId, reload, reloadCredits, submitting, user],
   );
 
   const extendCampaign = useCallback(
@@ -156,28 +214,29 @@ export default function PromoteScreen() {
       const unit = (product.promotionDurationUnit === 'hours' || product.promotionDurationUnit === 'days')
         ? product.promotionDurationUnit
         : 'days';
-      const placementKey = (product.promotionPlacement as any) || 'feed';
-      const msPerUnit = unit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      const placementKey =
+        product.promotionPlacement === 'search' || product.promotionPlacement === 'story' || product.promotionPlacement === 'feed'
+          ? product.promotionPlacement
+          : 'feed';
 
       const applyExtend = (addUnits: number) => {
         if (campaignBusyId || submitting) return;
-        const currentEndsMs = toMillis((product as any).promotionEndsAt);
-        const baseMs = Math.max(Date.now(), currentEndsMs ?? 0);
-        const nextEndsAt = new Date(baseMs + addUnits * msPerUnit);
-
-        const perUnit = (rates as any)?.[unit]?.[placementKey] ?? 0;
-        const extraCost = Math.max(0, Number((perUnit * addUnits).toFixed(2)));
-
         setCampaignBusyId(product.id);
-        void updateProduct(product.id, {
-          promoted: true,
-          promotionEndsAt: nextEndsAt,
-          promotionDurationUnit: unit,
-          promotionDurationValue: Math.max(1, Number(product.promotionDurationValue ?? 0) + addUnits),
-          promotionCost: Number(product.promotionCost ?? 0) + extraCost,
-          promotionBid: Number(product.promotionBid ?? 0) + extraCost,
-        })
-          .then(() => reload())
+        void (async () => {
+          if (!user) throw new Error('Sign in required');
+          const firebaseToken = await user.getIdToken();
+          await marketplaceExtendPromotionWithCredits({
+            firebaseToken,
+            productIds: [product.id],
+            placement: placementKey,
+            durationUnit: unit,
+            durationValue: addUnits,
+          });
+        })()
+          .then(async () => {
+            await reloadCredits();
+            reload();
+          })
           .catch((err) => {
             console.error('[marketplace] extend promotion failed', err);
             Alert.alert('Failed', 'Unable to extend promotion right now.');
@@ -203,7 +262,7 @@ export default function PromoteScreen() {
         { text: 'Not now', style: 'cancel' },
       ]);
     },
-    [campaignBusyId, reload, rates, submitting, toMillis],
+    [campaignBusyId, reload, reloadCredits, submitting, user],
   );
 
   const durationMax = durationUnit === 'hours' ? 72 : 30;
@@ -216,10 +275,64 @@ export default function PromoteScreen() {
     });
   }, [durationMax, durationMin]);
 
-  const estimatedPrice = useMemo(() => {
+  const estimatedCreditsPerProduct = useMemo(() => {
     const perUnit = rates[durationUnit][placement];
-    return Math.max(0, Number((perUnit * durationValue).toFixed(2)));
+    return Math.max(0, Math.round(perUnit * durationValue));
   }, [durationUnit, durationValue, placement, rates]);
+
+  const estimatedCreditsTotal = useMemo(() => {
+    const count = selectedProducts.length;
+    return count > 0 ? estimatedCreditsPerProduct * count : 0;
+  }, [estimatedCreditsPerProduct, selectedProducts.length]);
+
+  const canAfford = useMemo(() => {
+    if (!user?.uid) return true;
+    if (selectedProducts.length === 0) return true;
+    return creditsBalance >= estimatedCreditsTotal;
+  }, [creditsBalance, estimatedCreditsTotal, selectedProducts.length, user?.uid]);
+
+  const startTopup = useCallback(async () => {
+    if (topupSubmitting) return;
+    if (!user?.uid) {
+      Alert.alert('Sign in required', 'Please sign in to top up promo credits.');
+      router.push('/profile');
+      return;
+    }
+
+    const amount = Math.round(Number(topupAmountKsh));
+    const receiptCode = topupReceiptCode.trim().toUpperCase();
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      Alert.alert('Amount required', 'Enter a valid top up amount.');
+      return;
+    }
+
+    if (!/^[A-Z0-9]{10}$/.test(receiptCode)) {
+      Alert.alert('Receipt required', 'Paste the M-Pesa receipt code you received by SMS (e.g. QRTSITS25S).');
+      return;
+    }
+
+    setTopupSubmitting(true);
+    try {
+      const firebaseToken = await user.getIdToken();
+      await promoCreditsSubmitPaybillReceipt({
+        firebaseToken,
+        amountKsh: amount,
+        receiptCode,
+      });
+
+      setTopupReceiptCode('');
+      Alert.alert(
+        'Receipt submitted',
+        `We received your receipt code. Promo credits will be added after confirmation.\n\nPaybill: ${PAYBILL_NUMBER}\nAccount/Business No: ${PAYBILL_ACCOUNT}`
+      );
+    } catch (err: any) {
+      console.error('[marketplace] credits topup start failed', err);
+      Alert.alert('Top up failed', err?.message || 'Unable to submit receipt right now.');
+    } finally {
+      setTopupSubmitting(false);
+    }
+  }, [PAYBILL_ACCOUNT, PAYBILL_NUMBER, router, topupAmountKsh, topupReceiptCode, topupSubmitting, user]);
 
   const handlePromote = async () => {
     if (!user?.uid) {
@@ -235,26 +348,24 @@ export default function PromoteScreen() {
 
     if (submitting) return;
 
-    const msPerUnit = durationUnit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    const endsAt = new Date(Date.now() + durationValue * msPerUnit);
-
     setSubmitting(true);
     try {
-      await Promise.all(
-        selectedProducts.map((productId) =>
-          updateProduct(productId, {
-            promoted: true,
-            promotionBid: estimatedPrice,
-            promotionCost: estimatedPrice,
-            promotionEndsAt: endsAt,
-            promotionPlacement: placement,
-            promotionDurationUnit: durationUnit,
-            promotionDurationValue: durationValue,
-          })
-        )
-      );
+      const firebaseToken = await user.getIdToken();
+      const res = await marketplacePromoteWithCredits({
+        firebaseToken,
+        productIds: selectedProducts,
+        placement,
+        durationUnit,
+        durationValue,
+      });
 
-      Alert.alert('Success', 'Promotion activated!');
+      await reloadCredits();
+      reload();
+
+      Alert.alert(
+        'Promotion activated',
+        `Charged ${formatCredits(res.totalCredits)}. Remaining: ${formatCredits(res.availableCredits)}.`
+      );
       router.push('/marketplace');
     } catch (err: any) {
       console.error('[marketplace] promotion update failed', err);
@@ -315,6 +426,97 @@ export default function PromoteScreen() {
           </View>
 
           <ScrollView contentContainerStyle={styles.scrollViewContent}>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Promo credits</Text>
+              <Text style={styles.sectionSub}>Top up when you want, then boost your listings on-demand.</Text>
+
+              {!user?.uid ? (
+                <View style={styles.emptyCard}>
+                  <Ionicons name="wallet-outline" size={22} color="rgba(255,255,255,0.75)" />
+                  <Text style={styles.emptyTitle}>Sign in to use credits</Text>
+                  <Text style={styles.emptySub}>Promo credits are stored in Firestore and topped up via M-Pesa.</Text>
+                  <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/profile')}>
+                    <Text style={styles.secondaryBtnText}>Go to profile</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.walletCard}>
+                  <View style={styles.walletTopRow}>
+                    <View>
+                      <Text style={styles.walletLabel}>Balance</Text>
+                      {creditsLoading ? (
+                        <View style={styles.walletLoadingRow}>
+                          <ActivityIndicator color="#fff" />
+                          <Text style={styles.walletLoadingText}>Loading…</Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.walletValue}>{formatCredits(creditsBalance)}</Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      onPress={reloadCredits}
+                      disabled={creditsLoading || topupSubmitting}
+                      style={[styles.refreshIconBtn, (creditsLoading || topupSubmitting) && { opacity: 0.6 }]}
+                    >
+                      <Ionicons name="refresh" size={18} color="#fff" />
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.walletHint}>
+                    Pay via M-Pesa Paybill {PAYBILL_NUMBER} (Account/Business No: {PAYBILL_ACCOUNT}).
+                    {'\n'}Tip: Top up amounts must be a multiple of KSh 10.
+                  </Text>
+
+                  <Text style={styles.inputLabel}>Top up amount (KSh)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="500"
+                    placeholderTextColor="rgba(255,255,255,0.5)"
+                    keyboardType="number-pad"
+                    value={topupAmountKsh}
+                    onChangeText={(t) => setTopupAmountKsh(t.replace(/[^0-9]/g, ''))}
+                    editable={!topupSubmitting}
+                  />
+
+                  <Text style={styles.inputLabel}>M-Pesa receipt code</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="QRTSITS25S"
+                    placeholderTextColor="rgba(255,255,255,0.5)"
+                    autoCapitalize="characters"
+                    value={topupReceiptCode}
+                    onChangeText={(t) => setTopupReceiptCode(t.replace(/[^0-9a-zA-Z]/g, '').toUpperCase())}
+                    editable={!topupSubmitting}
+                  />
+
+                  <View style={styles.quickAmountsRow}>
+                    {[200, 500, 1000, 2000].map((amt) => (
+                      <TouchableOpacity
+                        key={amt}
+                        style={styles.quickAmountPill}
+                        onPress={() => setTopupAmountKsh(String(amt))}
+                        disabled={topupSubmitting}
+                      >
+                        <Text style={styles.quickAmountText}>{formatKsh(amt)}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.primaryWalletBtn, topupSubmitting && { opacity: 0.7 }]}
+                    onPress={startTopup}
+                    disabled={topupSubmitting}
+                  >
+                    {topupSubmitting ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.primaryWalletBtnText}>Submit receipt</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+
             {user?.uid ? (
               <View style={styles.section}>
                 <View style={styles.sectionHeaderRow}>
@@ -488,7 +690,7 @@ export default function PromoteScreen() {
                     <View style={styles.promotionHeader}>
                       <Ionicons name={opt.icon as any} size={24} color={placement === opt.key ? '#fff' : '#e50914'} />
                       <Text style={[styles.promotionPrice, placement === opt.key && styles.promotionPriceActive]}>
-                        {formatKsh(rates[durationUnit][opt.key])}/{durationUnit === 'hours' ? 'hr' : 'day'}
+                        {formatCredits(rates[durationUnit][opt.key])}/{durationUnit === 'hours' ? 'hr' : 'day'}
                       </Text>
                     </View>
                     <Text style={[styles.promotionTitle, placement === opt.key && styles.promotionTitleActive]}>
@@ -520,7 +722,7 @@ export default function PromoteScreen() {
                   <Text style={styles.unitPillText}>Days</Text>
                 </TouchableOpacity>
                 <View style={styles.pricePill}>
-                  <Text style={styles.pricePillText}>Total: {formatKsh(estimatedPrice)}</Text>
+                  <Text style={styles.pricePillText}>Total: {formatCredits(estimatedCreditsTotal)}</Text>
                 </View>
               </View>
 
@@ -547,24 +749,30 @@ export default function PromoteScreen() {
                   <Text style={styles.sliderHint}>{durationMax}</Text>
                 </View>
                 <Text style={styles.budgetHint}>
-                  Rate: {formatKsh(rates[durationUnit][placement])}/{durationUnit === 'hours' ? 'hr' : 'day'} · Placement: {placement}
+                  Rate: {formatCredits(rates[durationUnit][placement])}/{durationUnit === 'hours' ? 'hr' : 'day'} · Placement: {placement}
                 </Text>
               </View>
             </View>
 
             <TouchableOpacity
-              style={[styles.promoteButton, (submitting || loading) && { opacity: 0.7 }]}
+              style={[styles.promoteButton, (submitting || loading || !canAfford) && { opacity: 0.7 }]}
               onPress={handlePromote}
-              disabled={submitting || loading}
+              disabled={submitting || loading || !canAfford}
             >
               {submitting ? (
                 <ActivityIndicator color="#fff" />
               ) : (
               <Text style={styles.promoteButtonText}>
-                Promote {selectedProducts.length} Product{selectedProducts.length !== 1 ? 's' : ''} · {formatKsh(estimatedPrice)}
+                Promote {selectedProducts.length} Product{selectedProducts.length !== 1 ? 's' : ''} · {formatCredits(estimatedCreditsTotal)}
               </Text>
               )}
             </TouchableOpacity>
+
+            {user?.uid && selectedProducts.length > 0 && !canAfford ? (
+              <Text style={styles.insufficientText}>
+                Not enough credits. You need {formatCredits(estimatedCreditsTotal)} but have {formatCredits(creditsBalance)}.
+              </Text>
+            ) : null}
           </ScrollView>
         </View>
       </LinearGradient>
@@ -689,6 +897,108 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.7)',
     marginTop: -10,
     marginBottom: 16,
+  },
+  walletCard: {
+    borderRadius: 14,
+    padding: 14,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  walletTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  walletLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  walletValue: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '900',
+    marginTop: 6,
+  },
+  walletHint: {
+    color: 'rgba(255,255,255,0.65)',
+    marginTop: 10,
+    fontWeight: '700',
+  },
+  walletLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  walletLoadingText: {
+    color: 'rgba(255,255,255,0.75)',
+    fontWeight: '700',
+  },
+  inputLabel: {
+    color: 'rgba(255,255,255,0.82)',
+    fontWeight: '800',
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  input: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: '#fff',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    fontWeight: '700',
+  },
+  quickAmountsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 12,
+  },
+  quickAmountPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  quickAmountText: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: 12,
+  },
+  primaryWalletBtn: {
+    marginTop: 14,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: '#e50914',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryWalletBtnText: {
+    color: '#fff',
+    fontWeight: '900',
+  },
+  secondaryWalletBtn: {
+    marginTop: 10,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  secondaryWalletBtnText: {
+    color: '#fff',
+    fontWeight: '900',
   },
   sectionHeaderRow: {
     flexDirection: 'row',
@@ -1001,6 +1311,12 @@ const styles = StyleSheet.create({
   promoteButtonText: {
     color: '#fff',
     fontSize: 16,
+    fontWeight: '700',
+  },
+  insufficientText: {
+    marginTop: 10,
+    color: 'rgba(255,255,255,0.75)',
+    textAlign: 'center',
     fontWeight: '700',
   },
 });

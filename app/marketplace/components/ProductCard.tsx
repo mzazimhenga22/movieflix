@@ -52,7 +52,16 @@ export default function ProductCard({ product, onPress, onMessage }: ProductCard
               <Text style={styles.sellerSub}>Tap to view details</Text>
             </View>
             {onMessage && (
-              <TouchableOpacity style={styles.messageBtn} onPress={onMessage}>
+              <TouchableOpacity
+                style={styles.messageBtn}
+                onPress={(e) => {
+                  e?.stopPropagation?.();
+                  onMessage();
+                }}
+                activeOpacity={0.9}
+                accessibilityRole="button"
+                accessibilityLabel="Message seller"
+              >
                 <Ionicons name="chatbubble-outline" size={16} color="#fff" />
               </TouchableOpacity>
             )}

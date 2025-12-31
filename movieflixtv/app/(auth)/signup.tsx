@@ -6,7 +6,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -14,6 +14,7 @@ import {
 
 import { authPromise, firestore } from '@/constants/firebase';
 import TvVirtualKeyboard from '../components/TvVirtualKeyboard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 
 export default function TvSignupScreen() {
   const [name, setName] = useState('');
@@ -114,12 +115,17 @@ export default function TvSignupScreen() {
         style={StyleSheet.absoluteFill}
       />
 
-      <View style={styles.card}>
-        <Text style={styles.title}>Create account</Text>
-        <Text style={styles.subtitle}>Use the same account on phone and TV.</Text>
+      <ScrollView
+        style={{ flex: 1, width: '100%' }}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.card}>
+          <Text style={styles.title}>Create account</Text>
+          <Text style={styles.subtitle}>Use the same account on phone and TV.</Text>
 
         <View style={styles.fieldsGrid}>
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('name')}
             style={({ focused }: any) => [
               styles.field,
@@ -131,9 +137,9 @@ export default function TvSignupScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {name || '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('email')}
             style={({ focused }: any) => [
               styles.field,
@@ -145,9 +151,9 @@ export default function TvSignupScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {email || '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('password')}
             style={({ focused }: any) => [
               styles.field,
@@ -159,9 +165,9 @@ export default function TvSignupScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {password ? '•'.repeat(Math.min(password.length, 18)) : '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('confirm')}
             style={({ focused }: any) => [
               styles.field,
@@ -173,17 +179,17 @@ export default function TvSignupScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {confirm ? '•'.repeat(Math.min(confirm.length, 18)) : '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
         </View>
 
         <View style={styles.keyboardHeaderRow}>
           <Text style={styles.keyboardHint}>Use the on-screen keyboard</Text>
-          <Pressable
+          <TvFocusable
             onPress={() => setLowercase((prev) => !prev)}
             style={({ focused }: any) => [styles.caseBtn, focused ? styles.caseBtnFocused : null]}
           >
             <Text style={styles.caseText}>{lowercase ? 'abc' : 'ABC'}</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
 
         <TvVirtualKeyboard
@@ -192,7 +198,7 @@ export default function TvSignupScreen() {
           onKeyPress={applyKey}
         />
 
-        <Pressable
+        <TvFocusable
           onPress={() => void submit()}
           disabled={!canSubmit}
           style={({ focused }: any) => [
@@ -203,23 +209,32 @@ export default function TvSignupScreen() {
         >
           {busy ? <ActivityIndicator color="#fff" /> : null}
           <Text style={styles.primaryText}>{busy ? 'Creating…' : 'Create account'}</Text>
-        </Pressable>
+        </TvFocusable>
 
-        <Pressable
-          onPress={() => router.replace('/(auth)/login')}
-          style={({ focused }: any) => [styles.secondaryBtn, focused ? styles.btnFocused : null]}
-        >
-          <Text style={styles.secondaryText}>Back to login</Text>
-        </Pressable>
-      </View>
+          <TvFocusable
+            onPress={() => router.replace('/(auth)/login')}
+            style={({ focused }: any) => [styles.secondaryBtn, focused ? styles.btnFocused : null]}
+          >
+            <Text style={styles.secondaryText}>Back to login</Text>
+          </TvFocusable>
+        </View>
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
+  container: { flex: 1 },
+  scrollContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+  },
   card: {
-    width: 980,
+    width: '92%',
+    maxWidth: 980,
     borderRadius: 24,
     padding: 26,
     backgroundColor: 'rgba(0,0,0,0.26)',
@@ -235,7 +250,9 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   field: {
-    width: 460,
+    flexGrow: 1,
+    flexBasis: 0,
+    minWidth: 320,
     borderRadius: 18,
     paddingHorizontal: 16,
     paddingVertical: 14,

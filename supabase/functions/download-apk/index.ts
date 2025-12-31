@@ -2,6 +2,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 import { corsHeaders } from '../_shared/cors.ts';
+import { resolveGithubReleaseAsset } from '../_shared/githubReleases.ts';
 
 function jsonResponse(payload: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(payload), {
@@ -43,6 +44,30 @@ serve(async (req: Request) => {
   const explicit = (Deno.env.get('APK_DOWNLOAD_URL') ?? '').trim();
   const fileName = (Deno.env.get('APK_FILENAME') ?? 'MovieFlix-latest.apk').trim();
   if (explicit) return redirect(explicit, fileName);
+
+  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim();
+  if (githubRepo) {
+    const token = (Deno.env.get('GITHUB_TOKEN') ?? '').trim() || null;
+    const tag = (Deno.env.get('GITHUB_RELEASE_TAG') ?? '').trim() || null;
+    const assetName = (Deno.env.get('APK_GITHUB_ASSET_NAME') ?? Deno.env.get('GITHUB_RELEASE_ASSET_NAME') ?? '').trim() || null;
+    const assetRegex = (Deno.env.get('APK_GITHUB_ASSET_REGEX') ?? Deno.env.get('GITHUB_RELEASE_ASSET_REGEX') ?? '').trim() || null;
+    const cacheTtlMs = Number(Deno.env.get('GITHUB_RELEASE_CACHE_TTL_MS') ?? '60000') || 60_000;
+
+    const { asset } = await resolveGithubReleaseAsset({
+      repo: githubRepo,
+      tag,
+      token,
+      assetName: assetName || fileName,
+      assetRegex,
+      cacheTtlMs,
+    });
+
+    if (!asset?.browser_download_url) {
+      return jsonResponse({ error: 'No APK asset found on GitHub release' }, 502);
+    }
+
+    return redirect(asset.browser_download_url, asset.name || fileName);
+  }
 
   // Otherwise, use Supabase Storage signed URL.
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';

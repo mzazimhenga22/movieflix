@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React from 'react';
 import { Alert, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -16,10 +16,18 @@ import { formatKsh } from '../../lib/money';
 
 export default function MarketplaceScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ category?: string }>();
+  const categoryParam = typeof params.category === 'string' ? params.category : '';
   const cart = useMarketplaceCart();
   const [products, setProducts] = React.useState<APIProduct[]>([]);
   const [loading, setLoading] = React.useState(true);
-  const [activeCategory, setActiveCategory] = React.useState('merch');
+  const CATEGORY_KEYS = React.useMemo(
+    () => new Set(['merch', 'digital', 'services', 'promos', 'events', 'lifestyle']),
+    []
+  );
+  const [activeCategory, setActiveCategory] = React.useState(() =>
+    CATEGORY_KEYS.has(categoryParam) ? categoryParam : 'merch'
+  );
   const [fabExpanded, setFabExpanded] = React.useState(false);
   const activeProfile = useActiveProfile();
   const activeProfileName = activeProfile?.name ?? 'creator';
@@ -62,6 +70,10 @@ export default function MarketplaceScreen() {
     };
     fetchProducts();
   }, []);
+
+  React.useEffect(() => {
+    if (CATEGORY_KEYS.has(categoryParam)) setActiveCategory(categoryParam);
+  }, [CATEGORY_KEYS, categoryParam]);
 
   const showPlaceholders = loading && products.length === 0;
 

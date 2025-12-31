@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, Image, TouchableOpacity, Animated, Easing } from 'react-native';
+import { StyleSheet, View, Text, Image, TouchableOpacity, Animated, Easing, PixelRatio } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { IMAGE_BASE_URL } from '@/constants/api';
@@ -16,6 +16,8 @@ const FeaturedMovie: React.FC<FeaturedMovieProps> = ({ movie, getGenreNames, onI
   const slideAnim = useRef(new Animated.Value(250)).current; // Start position (off-screen below)
   const parallax = useRef(new Animated.Value(0)).current;
   const router = useRouter();
+  const fontScale = PixelRatio.getFontScale();
+  const cardHeight = Math.round(250 + Math.max(0, fontScale - 1) * 90);
 
   useEffect(() => {
     slideAnim.setValue(250); // Reset to start position for the new movie
@@ -33,7 +35,7 @@ const FeaturedMovie: React.FC<FeaturedMovieProps> = ({ movie, getGenreNames, onI
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start();
-  }, [movie]);
+  }, [movie, parallax, slideAnim]);
 
   const handlePress = () => {
     if (movie) {
@@ -45,7 +47,7 @@ const FeaturedMovie: React.FC<FeaturedMovieProps> = ({ movie, getGenreNames, onI
   if (!movie) return null;
 
   return (
-    <View style={styles.cardContainer}>
+    <View style={[styles.cardContainer, { height: cardHeight }]}>
       <Animated.View
         style={{
           transform: [
@@ -64,7 +66,7 @@ const FeaturedMovie: React.FC<FeaturedMovieProps> = ({ movie, getGenreNames, onI
             colors={['rgba(255,255,255,0.08)', 'rgba(8,10,20,0.9)']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={styles.featuredMovieCard}
+            style={[styles.featuredMovieCard, { height: cardHeight }]}
           >
             <Image
               source={{ uri: `${IMAGE_BASE_URL}${movie.poster_path}` }}
@@ -136,7 +138,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     overflow: 'hidden',
     marginTop: 0,
-    height: 250,
     backgroundColor: 'rgba(5,6,15,0.9)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
@@ -146,7 +147,6 @@ const styles = StyleSheet.create({
     shadowRadius: 28,
   },
   featuredMovieCard: {
-    height: 250,
     justifyContent: 'flex-end',
     borderRadius: 20,
     overflow: 'hidden',
@@ -171,6 +171,7 @@ const styles = StyleSheet.create({
   detailsContainer: {
     flex: 1,
     marginRight: 10,
+    minWidth: 0,
   },
   eyebrow: {
     color: 'rgba(255,255,255,0.7)',
@@ -189,8 +190,9 @@ const styles = StyleSheet.create({
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
     gap: 6,
+    rowGap: 6,
   },
   matchPill: {
     paddingHorizontal: 10,
@@ -207,6 +209,7 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.8)',
     fontSize: 12,
     fontWeight: '600',
+    flexShrink: 1,
   },
   metaDot: {
     color: 'rgba(255,255,255,0.6)',
@@ -222,6 +225,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.4)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
+    flexShrink: 0,
   },
   ratingText: {
     color: 'white',
@@ -234,6 +238,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 12,
     gap: 10,
+    flexWrap: 'wrap',
+    rowGap: 10,
   },
   primaryPlayButton: {
     flexDirection: 'row',

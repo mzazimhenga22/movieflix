@@ -9,6 +9,7 @@ import 'react-native-url-polyfill/auto';
 import '@/polyfills/url';
 import '@/polyfills/node-globals';
 import '@/polyfills/reanimated-worklet-callback';
+import { TvSpatialNavigationProvider } from './components/TvSpatialNavigation';
 import { SubscriptionProvider } from '@/providers/SubscriptionProvider';
 import { initializeDownloadManager } from '@/lib/downloadManager';
 
@@ -19,21 +20,23 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#05060f' }}>
-      <SafeAreaProvider>
-        <SubscriptionProvider>
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="index" />
-            <Stack.Screen name="select-profile" />
-            <Stack.Screen name="(auth)" />
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="details/[id]" />
-            <Stack.Screen name="video-player" />
-            <Stack.Screen name="watchparty/player" />
-            <Stack.Screen name="continue-on-phone" />
-            <Stack.Screen name="premium" />
-          </Stack>
-        </SubscriptionProvider>
-      </SafeAreaProvider>
+      <TvSpatialNavigationProvider>
+        <SafeAreaProvider>
+          <SubscriptionProvider>
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="index" />
+              <Stack.Screen name="select-profile" />
+              <Stack.Screen name="(auth)" />
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="details/[id]" />
+              <Stack.Screen name="video-player" />
+              <Stack.Screen name="watchparty/player" />
+              <Stack.Screen name="continue-on-phone" />
+              <Stack.Screen name="premium" />
+            </Stack>
+          </SubscriptionProvider>
+        </SafeAreaProvider>
+      </TvSpatialNavigationProvider>
     </GestureHandlerRootView>
   );
 }

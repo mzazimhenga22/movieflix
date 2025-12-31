@@ -46,9 +46,13 @@ export type CallSession = {
   type: CallType;
   initiatorId: string;
   initiatorName?: string | null;
+  /** For group calls, the first non-initiator to join can "claim" the call (first-to-answer). */
+  acceptedBy?: string | null;
   status: CallStatus;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+  /** Optional: if set, the call should be considered expired after this time unless already active. */
+  ringTimeoutAt?: Timestamp;
   endedAt?: Timestamp;
   endedBy?: string | null;
   participants?: Record<string, CallParticipant>;

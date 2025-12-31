@@ -233,14 +233,28 @@ export default function MarketplaceProductDetailsScreen() {
                         </Text>
                       )}
                     </View>
-                    <TouchableOpacity
-                      style={[styles.messageBtn, messagingBusy && { opacity: 0.6 }]}
-                      onPress={handleMessageSeller}
-                      disabled={messagingBusy}
-                    >
-                      <Ionicons name="chatbubble-ellipses-outline" size={18} color="#fff" />
-                      <Text style={styles.messageBtnText}>{messagingBusy ? 'Starting…' : 'Message'}</Text>
-                    </TouchableOpacity>
+                    <View style={styles.sellerActions}>
+                      <TouchableOpacity
+                        style={[styles.shopBtn, { opacity: product.sellerId ? 1 : 0.6 }]}
+                        onPress={() => {
+                          if (!product.sellerId) return;
+                          router.push({ pathname: '/marketplace/seller/[id]', params: { id: product.sellerId } });
+                        }}
+                        disabled={!product.sellerId}
+                      >
+                        <Ionicons name="storefront-outline" size={18} color="#fff" />
+                        <Text style={styles.shopBtnText}>Shop</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.messageBtn, messagingBusy && { opacity: 0.6 }]}
+                        onPress={handleMessageSeller}
+                        disabled={messagingBusy}
+                      >
+                        <Ionicons name="chatbubble-ellipses-outline" size={18} color="#fff" />
+                        <Text style={styles.messageBtnText}>{messagingBusy ? 'Starting…' : 'Message'}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
 
                   <View style={styles.ctaRow}>
@@ -450,6 +464,27 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.25)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.10)',
+  },
+  sellerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  shopBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  shopBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 12,
   },
   sellerAvatarWrap: {
     width: 46,

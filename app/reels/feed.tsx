@@ -45,6 +45,7 @@ import { useActiveProfilePhoto } from '../../hooks/use-active-profile-photo'
 import { useUser } from '../../hooks/use-user'
 import { logInteraction } from '../../lib/algo'
 import { getProfileScopedKey } from '../../lib/profileStorage'
+import { getNavPayload } from '../../lib/navPayloadCache'
 import { useSubscription } from '../../providers/SubscriptionProvider'
 import { injectAdsWithPattern } from '../../lib/ads/sequence'
 import ReelAdSlide from '../../components/ads/ReelAdSlide'
@@ -60,7 +61,9 @@ type FeedReelItem = {
   docId?: string | null
   videoUrl?: string | null
   avatar?: string | null
-  user?: string | null // (you compare this to user.uid, so treat it as uid)
+  userId?: string | null
+  username?: string | null
+  user?: string | null // legacy: some callers still pass username here
   likes?: number
   comments?: any[]
   commentsCount?: number
@@ -104,6 +107,7 @@ export default function FeedReelsScreen() {
   // ✅ extract ONLY primitives so memo deps are stable (fixes max update depth)
   const id = typeof params.id === 'string' ? params.id : undefined
   const list = typeof params.list === 'string' ? params.list : undefined
+  const queueKey = typeof (params as any).queueKey === 'string' ? ((params as any).queueKey as string) : undefined
   const titleParam = typeof (params as any).title === 'string' ? (params as any).title : undefined
   const musicParam = typeof (params as any).music === 'string' ? (params as any).music : undefined
 
@@ -112,7 +116,32 @@ export default function FeedReelsScreen() {
     return () => StatusBar.setHidden(false, 'fade')
   }, [])
 
+  const cachedQueueRef = useRef<FeedReelItem[] | null>(null)
+
   const queue: FeedReelItem[] = useMemo(() => {
+    if (!cachedQueueRef.current && queueKey) {
+      const cached = getNavPayload<unknown>(queueKey)
+      if (Array.isArray(cached)) cachedQueueRef.current = cached as FeedReelItem[]
+    }
+
+    if (cachedQueueRef.current && cachedQueueRef.current.length > 0) {
+      return cachedQueueRef.current.map((it: any, index: number) => ({
+        id: String(it.id ?? it.docId ?? index),
+        mediaType: it.mediaType || 'feed',
+        title: it.title || 'Reel',
+        videoUrl: it.videoUrl || null,
+        avatar: it.avatar || null,
+        userId: it.userId ? String(it.userId) : null,
+        username: it.username ?? it.user ?? null,
+        docId: it.docId ?? null,
+        likes: it.likes ?? 0,
+        comments: it.comments ?? [],
+        commentsCount: it.commentsCount ?? (it.comments ? it.comments.length : 0),
+        likerAvatars: it.likerAvatars ?? [],
+        music: it.music ?? `Original Sound - ${it.username ?? it.user ?? 'Unknown'}`,
+      }))
+    }
+
     if (typeof list === 'string' && list.length > 0) {
       try {
         const parsed = JSON.parse(decodeURIComponent(list))
@@ -123,13 +152,15 @@ export default function FeedReelsScreen() {
             title: it.title || 'Reel',
             videoUrl: it.videoUrl || null,
             avatar: it.avatar || null,
-            user: it.user || null,
+            userId: it.userId ? String(it.userId) : null,
+            username: it.username ?? it.user ?? null,
+            user: it.user ?? null,
             docId: it.docId ?? null,
             likes: it.likes ?? 0,
             comments: it.comments ?? [],
             commentsCount: it.commentsCount ?? (it.comments ? it.comments.length : 0),
             likerAvatars: it.likerAvatars ?? [],
-            music: it.music ?? `Original Sound - ${it.user || 'Unknown'}`,
+            music: it.music ?? `Original Sound - ${it.username ?? it.user ?? 'Unknown'}`,
           }))
         }
       } catch (e) {
@@ -155,7 +186,7 @@ export default function FeedReelsScreen() {
     }
 
     return []
-  }, [list, id, titleParam, musicParam])
+  }, [queueKey, list, id, titleParam, musicParam])
 
   const adPatternStartRef = useRef(Math.floor(Math.random() * 3))
 
@@ -331,7 +362,7 @@ const FeedSlide = React.memo(function FeedSlide({
   const { user } = useUser()
   const activeProfilePhoto = useActiveProfilePhoto()
 
-  const isOwnItem = user?.uid === item.user
+  const isOwnItem = user?.uid === item.userId
   const fallbackAvatar =
     'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?auto=format&fit=crop&q=80&w=1780&ixlib=rb-4.0.3'
   const avatarUri = (isOwnItem ? activeProfilePhoto : null) || item.avatar || fallbackAvatar
@@ -434,10 +465,10 @@ const FeedSlide = React.memo(function FeedSlide({
         type: 'like',
         actorId: (user as any)?.uid ?? null,
         targetId: item.id,
-        targetUserId: item.user ?? null,
+        targetUserId: item.userId ?? null,
       })
     } catch {}
-  }, [item.docId, item.id, item.user, liked, user])
+  }, [item.docId, item.id, item.userId, liked, user])
 
   const submitComment = async () => {
     const trimmed = commentText.trim()
@@ -474,7 +505,7 @@ const FeedSlide = React.memo(function FeedSlide({
         type: 'comment',
         actorId: (user as any)?.uid ?? null,
         targetId: item.id,
-        targetUserId: item.user ?? null,
+        targetUserId: item.userId ?? null,
       })
     } catch {}
   }
@@ -636,9 +667,9 @@ const FeedSlide = React.memo(function FeedSlide({
   }
 
   const goToPosterProfile = () => {
-    // item.user is treated as uid in your codebase
-    if (!item.user) return
-    router.push(`/profile?from=social-feed&userId=${encodeURIComponent(String(item.user))}`)
+    const uid = item.userId
+    if (!uid) return
+    router.push(`/profile?from=social-feed&userId=${encodeURIComponent(String(uid))}`)
   }
 
   const hasVideo = Boolean(item.videoUrl)
@@ -724,7 +755,7 @@ const FeedSlide = React.memo(function FeedSlide({
 
         <View style={styles.bottomContainer}>
           <View style={styles.bottomLeft}>
-            <Text style={styles.usernameText}>@{item.user ?? 'unknown'}</Text>
+            <Text style={styles.usernameText}>@{item.username ?? item.user ?? item.userId ?? 'unknown'}</Text>
             {renderDescription(item.title)}
             <View style={styles.musicTicker}>
               <Ionicons name="musical-notes-outline" size={16} color="#fff" />

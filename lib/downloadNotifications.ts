@@ -10,6 +10,14 @@ type NotifState = {
 
 const stateBySession = new Map<string, NotifState>();
 
+const present = async (content: any) => {
+  const anyNotifications = Notifications as any;
+  if (typeof anyNotifications.presentNotificationAsync === 'function') {
+    return anyNotifications.presentNotificationAsync(content) as Promise<string>;
+  }
+  return Notifications.scheduleNotificationAsync({ content: content as any, trigger: null });
+};
+
 function now() {
   return Date.now();
 }
@@ -39,7 +47,7 @@ export async function notifyDownload(
     if (status === 'downloading') {
       if (!shouldUpdate(sessionId, pct)) return;
       const body = `${bodyBase}${bodyBase ? ' • ' : ''}${pct ?? 0}%`;
-      const id = await Notifications.presentNotificationAsync({
+      const id = await present({
         title: `Downloading: ${title}`,
         body,
         sound: 'default',
@@ -51,7 +59,7 @@ export async function notifyDownload(
     }
 
     if (status === 'queued') {
-      const id = await Notifications.presentNotificationAsync({
+      const id = await present({
         title: `Queued: ${title}`,
         body: bodyBase || 'Ready to download',
         sound: 'default',
@@ -63,7 +71,7 @@ export async function notifyDownload(
     }
 
     if (status === 'preparing') {
-      const id = await Notifications.presentNotificationAsync({
+      const id = await present({
         title: `Preparing: ${title}`,
         body: bodyBase || 'Starting…',
         sound: 'default',
@@ -75,7 +83,7 @@ export async function notifyDownload(
     }
 
     if (status === 'paused') {
-      const id = await Notifications.presentNotificationAsync({
+      const id = await present({
         title: `Paused: ${title}`,
         body: bodyBase || 'Paused',
         sound: 'default',
@@ -87,7 +95,7 @@ export async function notifyDownload(
     }
 
     if (status === 'completed') {
-      await Notifications.presentNotificationAsync({
+      await present({
         title: 'Download complete',
         body: bodyBase ? `${title} • ${bodyBase}` : title,
         sound: 'default',
@@ -99,7 +107,7 @@ export async function notifyDownload(
     }
 
     if (status === 'cancelled') {
-      await Notifications.presentNotificationAsync({
+      await present({
         title: `Download cancelled`,
         body: title,
         sound: 'default',
@@ -111,7 +119,7 @@ export async function notifyDownload(
     }
 
     if (status === 'error') {
-      await Notifications.presentNotificationAsync({
+      await present({
         title: `Download failed`,
         body: errorMessage ? `${title} • ${errorMessage}` : title,
         sound: 'default',

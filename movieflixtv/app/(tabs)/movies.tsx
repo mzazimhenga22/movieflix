@@ -2,15 +2,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
+import * as Device from 'expo-device';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Video, ResizeMode } from 'expo-av';
+import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
-import { getAccentFromPosterPath } from '@/constants/theme';
-import type { Media } from '@/types';
+import { getAccentFromPosterPath } from '../../constants/theme';
+import type { Media } from '../../types';
 import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvHeroBanner from '../components/TvHeroBanner';
 import TvRail from '../components/TvRail';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 import { useMoviesData } from './movies/hooks/useMoviesData';
 
 type ActiveProfile = {
@@ -60,6 +63,7 @@ export default function MoviesTv() {
     netflix,
     amazon,
     hbo,
+    movieTrailers,
     continueWatching,
     lastWatched,
     featuredMovie,
@@ -103,8 +107,21 @@ export default function MoviesTv() {
 
   const primaryTarget = heroItem ?? lastWatched ?? featuredMovie;
 
-  const sideTrailers = useMemo(() => trending.slice(0, 3), [trending]);
+  const lowEndDevice = useMemo(() => {
+    const mem = typeof Device.totalMemory === 'number' ? Device.totalMemory : null;
+    const year = typeof Device.deviceYearClass === 'number' ? Device.deviceYearClass : null;
+    if (typeof mem === 'number' && mem > 0 && mem < 3_000_000_000) return true;
+    if (typeof year === 'number' && year > 0 && year < 2017) return true;
+    return false;
+  }, []);
+
+  const sideTrailers = useMemo(
+    () => (movieTrailers?.length ? movieTrailers.slice(0, 3) : trending.slice(0, 3)),
+    [movieTrailers, trending],
+  );
   const sideContinue = useMemo(() => continueWatching.slice(0, 3), [continueWatching]);
+
+  const [activeSideTrailerKey, setActiveSideTrailerKey] = useState<string | null>(null);
 
   const handleCardFocus = useCallback(
     (item: Media) => {
@@ -160,9 +177,9 @@ export default function MoviesTv() {
         />
         <Text style={styles.errorTitle}>Couldn’t load</Text>
         <Text style={styles.errorText}>{error}</Text>
-        <Pressable onPress={() => router.replace('/(tabs)/movies')} style={styles.primaryBtn}>
+        <TvFocusable onPress={() => router.replace('/(tabs)/movies')} style={styles.primaryBtn}>
           <Text style={styles.primaryText}>Try again</Text>
-        </Pressable>
+        </TvFocusable>
       </View>
     );
   }
@@ -180,21 +197,22 @@ export default function MoviesTv() {
         <TvGlassPanel accent={accent} style={styles.panel}>
           <View style={styles.panelInner}>
             <View style={styles.topBar}>
-              <Pressable
+              <TvFocusable
                 onPress={() => router.push('/(tabs)/search')}
+                tvPreferredFocus
                 style={({ focused }: any) => [styles.searchPill, focused ? styles.pillFocused : null]}
               >
                 <Ionicons name="search" size={16} color="rgba(255,255,255,0.86)" />
                 <Text style={styles.searchText} numberOfLines={1}>
                   Search movies
                 </Text>
-              </Pressable>
+              </TvFocusable>
 
               <View style={styles.topTabs}>
                 {(['Movies', 'TV Series', 'Animation', 'Mystery', 'More'] as const).map((label) => {
                   const active = topTab === label;
                   return (
-                    <Pressable
+                    <TvFocusable
                       key={label}
                       onPress={() => setTopTab(label)}
                       style={({ focused }: any) => [
@@ -204,7 +222,7 @@ export default function MoviesTv() {
                       ]}
                     >
                       <Text style={[styles.topTabText, active ? styles.topTabTextActive : null]}>{label}</Text>
-                    </Pressable>
+                    </TvFocusable>
                   );
                 })}
               </View>
@@ -224,14 +242,35 @@ export default function MoviesTv() {
                   <Text style={styles.sideTitle}>New Trailer</Text>
                   {sideTrailers.map((m) => {
                     const title = m.title || m.name || 'Trailer';
+                    const key = `${m.media_type ?? 'movie'}:${m.id ?? title}`;
                     const uri = m.backdrop_path || m.poster_path ? `https://image.tmdb.org/t/p/w500${m.backdrop_path || m.poster_path}` : null;
+                    const shouldAutoPlay = !lowEndDevice && !!(m as any)?.trailerUrl;
+                    const active = shouldAutoPlay && activeSideTrailerKey === key;
                     return (
-                      <Pressable
-                        key={`${m.id ?? title}`}
+                      <TvFocusable
+                        key={key}
                         onPress={() => handleCardPress(m)}
+                        onFocus={() => setActiveSideTrailerKey(key)}
+                        onBlur={() => {
+                          setActiveSideTrailerKey((prev) => (prev === key ? null : prev));
+                        }}
                         style={({ focused }: any) => [styles.sideItem, focused ? styles.sideItemFocused : null]}
                       >
-                        {uri ? <Image source={{ uri }} style={styles.sideImage} resizeMode="cover" /> : <View style={styles.sideImageFallback} />}
+                        {active && (m as any)?.trailerUrl ? (
+                          <Video
+                            source={{ uri: String((m as any).trailerUrl) }}
+                            style={styles.sideImage}
+                            resizeMode={ResizeMode.COVER}
+                            shouldPlay
+                            isLooping
+                            isMuted
+                            useNativeControls={false}
+                          />
+                        ) : uri ? (
+                          <Image source={{ uri }} style={styles.sideImage} resizeMode="cover" />
+                        ) : (
+                          <View style={styles.sideImageFallback} />
+                        )}
                         <View style={styles.sideOverlay} />
                         <View style={styles.sideMeta}>
                           <Text style={styles.sideItemTitle} numberOfLines={1}>
@@ -241,7 +280,7 @@ export default function MoviesTv() {
                             <Ionicons name="play" size={14} color="#fff" />
                           </View>
                         </View>
-                      </Pressable>
+                      </TvFocusable>
                     );
                   })}
 
@@ -250,7 +289,7 @@ export default function MoviesTv() {
                   <Text style={styles.sideTitle}>Continue Watching</Text>
                   {sideContinue.length ? (
                     sideContinue.map((m) => (
-                      <Pressable
+                      <TvFocusable
                         key={`cw-${m.id ?? m.title ?? 'x'}`}
                         onPress={() => handleCardPress(m)}
                         style={({ focused }: any) => [styles.continueRow, focused ? styles.continueRowFocused : null]}
@@ -259,7 +298,7 @@ export default function MoviesTv() {
                           {m.title || m.name || 'Untitled'}
                         </Text>
                         <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.6)" />
-                      </Pressable>
+                      </TvFocusable>
                     ))
                   ) : (
                     <Text style={styles.sideHint}>Play something to see it here.</Text>

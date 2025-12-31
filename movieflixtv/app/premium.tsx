@@ -1,7 +1,8 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { TvFocusable } from './components/TvSpatialNavigation';
 
 export default function PremiumTv() {
   const router = useRouter();
@@ -21,9 +22,13 @@ export default function PremiumTv() {
         </Text>
         <Text style={styles.hint}>Open the phone app to upgrade, then come back to TV.</Text>
         <View style={styles.actions}>
-          <Pressable onPress={() => router.back()} style={styles.primaryBtn}>
+          <TvFocusable
+            onPress={() => router.back()}
+            tvPreferredFocus
+            style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}
+          >
             <Text style={styles.primaryText}>Go back</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
       </View>
     </View>
@@ -51,5 +56,6 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: '#e50914',
   },
+  btnFocused: { transform: [{ scale: 1.03 }], borderWidth: 1, borderColor: '#fff' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '800' },
 });

@@ -1,8 +1,10 @@
 // app/components/BottomNav.tsx
 import React from 'react';
 import {
+  PixelRatio,
   Platform,
   StyleSheet,
+  useWindowDimensions,
   View,
   Text,
   TouchableOpacity,
@@ -21,9 +23,24 @@ type Props = BottomTabBarProps & {
 };
 
 export default function BottomNav({ insetsBottom, isDark, state, navigation }: Props): React.ReactElement {
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompact = screenWidth < 360 || fontScale > 1.15;
+
   const bottomOffset = Platform.OS === 'ios' ? (insetsBottom || 12) : (insetsBottom ? insetsBottom + 6 : 10);
   const { accentColor } = useAccent();
   const navInFlightRef = React.useRef(false);
+
+  const iconSize = isCompact ? 20 : 22;
+  const labelFontSize = isCompact ? 10 : 11;
+  const labelMaxFontMultiplier = 1.15;
+  const navMinHeight = isCompact ? 64 : 72;
+  const navPaddingV = isCompact ? 10 : 14;
+  const navPaddingH = isCompact ? 6 : 8;
+  const itemMinWidth = isCompact ? 0 : 56;
+  const itemInnerMinWidth = isCompact ? 0 : 72;
+  const itemInnerPaddingH = isCompact ? 10 : 12;
+  const itemInnerPaddingV = isCompact ? 7 : 8;
 
   const visibleTabs = new Set(['movies', 'categories', 'search', 'downloads', 'interactive']);
 
@@ -111,7 +128,11 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
     <View pointerEvents="box-none" style={[styles.outer, { bottom: bottomOffset }]}>
       <PanGestureHandler activeOffsetX={[-18, 18]} failOffsetY={[-18, 18]} onHandlerStateChange={onPanStateChange}>
         <View>
-          <BlurView intensity={95} tint="dark" style={[styles.blurWrap, { borderColor: `${accentColor}55` }]}>
+          <BlurView
+            intensity={95}
+            tint="dark"
+            style={[styles.blurWrap, { borderColor: `${accentColor}55`, minHeight: navMinHeight }]}
+          >
             <View
               style={[
                 styles.overlay,
@@ -124,7 +145,16 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
               end={{ x: 1, y: 1 }}
               style={styles.glassSheen}
             />
-            <View style={styles.inner}>
+            <View
+              style={[
+                styles.inner,
+                {
+                  minHeight: navMinHeight,
+                  paddingVertical: navPaddingV,
+                  paddingHorizontal: navPaddingH,
+                },
+              ]}
+            >
               {state.routes.map((route, idx) => {
                 const focused = state.index === idx;
                 const routeName = route.name;
@@ -170,12 +200,22 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
                     key={route.key}
                     onPress={onPress}
                     onLongPress={onLongPress}
-                    style={styles.item}
+                    style={[styles.item, { minWidth: itemMinWidth }, isCompact && styles.itemCompact]}
                     activeOpacity={0.85}
                     accessibilityRole="button"
                     accessibilityState={{ selected: focused }}
                   >
-                    <View style={[styles.itemInner, focused && styles.itemInnerActive]}>
+                    <View
+                      style={[
+                        styles.itemInner,
+                        {
+                          minWidth: itemInnerMinWidth,
+                          paddingHorizontal: itemInnerPaddingH,
+                          paddingVertical: itemInnerPaddingV,
+                        },
+                        focused && styles.itemInnerActive,
+                      ]}
+                    >
                       {focused && (
                         <LinearGradient
                           colors={['#e50914', '#b20710']}
@@ -184,8 +224,15 @@ export default function BottomNav({ insetsBottom, isDark, state, navigation }: P
                           style={styles.activePill}
                         />
                       )}
-                      <Ionicons name={iconName as any} size={22} color={focused ? '#ffffff' : '#f5f5f5'} />
-                      <Text style={[styles.text, focused ? styles.activeText : undefined]}>{label}</Text>
+                      <Ionicons name={iconName as any} size={iconSize} color={focused ? '#ffffff' : '#f5f5f5'} />
+                      <Text
+                        style={[styles.text, { fontSize: labelFontSize }, focused ? styles.activeText : undefined]}
+                        numberOfLines={1}
+                        ellipsizeMode="tail"
+                        maxFontSizeMultiplier={labelMaxFontMultiplier}
+                      >
+                        {label}
+                      </Text>
                     </View>
                   </TouchableOpacity>
                 );
@@ -217,7 +264,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 14,
     elevation: 10,
-    minHeight: 72,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -229,17 +275,19 @@ const styles = StyleSheet.create({
   },
   inner: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-    minHeight: 72,
   },
   item: {
+    flex: 1,
     alignItems: 'center',
     paddingHorizontal: 6,
     paddingVertical: 4,
     minWidth: 56,
+  },
+  itemCompact: {
+    paddingHorizontal: 2,
+    minWidth: 0,
   },
   itemInner: {
     paddingHorizontal: 12,

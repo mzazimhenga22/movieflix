@@ -170,23 +170,29 @@ const PremiumScreen = () => {
   const [mpesaCheckoutRequestId, setMpesaCheckoutRequestId] = useState<string | null>(null);
   const [mpesaMerchantRequestId, setMpesaMerchantRequestId] = useState<string | null>(null);
   const [mpesaStatus, setMpesaStatus] = useState<string | null>(null);
+  const [paybillReceiptCode, setPaybillReceiptCode] = useState('');
+  const [paybillBusy, setPaybillBusy] = useState(false);
+  const [paybillStatus, setPaybillStatus] = useState<string | null>(null);
   const didAutoStartMpesaRef = useRef(false);
   const didAutoOpenRequestedTier = React.useRef(false);
   const { refresh, currentPlan } = useSubscription();
 
   const MPESA_PHONE_CACHE_KEY = 'mpesaPhone';
+  const PAYBILL_NUMBER = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_NUMBER ?? process.env.EXPO_PUBLIC_PAYBILL_NUMBER ?? '247247').trim();
+  const PAYBILL_ACCOUNT = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_ACCOUNT ?? process.env.EXPO_PUBLIC_PAYBILL_ACCOUNT ?? '480755').trim();
 
   const billingProvider = useMemo(() => {
     const raw = (process.env.EXPO_PUBLIC_BILLING_PROVIDER ?? '').toLowerCase().trim();
     if (raw === 'stripe') return 'stripe';
     if (raw === 'daraja') return 'daraja';
+    if (raw === 'paybill' || raw === 'equity') return 'paybill';
 
     const anyStripeUrl =
       process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL ||
       process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PLUS ||
       process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PREMIUM;
     if (Platform.OS === 'android' && anyStripeUrl) return 'stripe';
-    return 'daraja';
+    return 'paybill';
   }, []);
 
   const closePurchaseSheet = useCallback(() => {
@@ -199,6 +205,9 @@ const PremiumScreen = () => {
       setMpesaCheckoutRequestId(null);
       setMpesaMerchantRequestId(null);
       setMpesaStatus(null);
+      setPaybillReceiptCode('');
+      setPaybillBusy(false);
+      setPaybillStatus(null);
       didAutoStartMpesaRef.current = false;
     });
   }, [sheetTranslateY]);
@@ -227,6 +236,62 @@ const PremiumScreen = () => {
     if (!/^\d+$/.test(cleaned)) return false;
     return cleaned.startsWith('0') || cleaned.startsWith('254') || cleaned.startsWith('7') || cleaned.startsWith('1');
   }, []);
+
+  const submitPaybillReceipt = useCallback(async () => {
+    if (!requestedTier || requestedTier === 'free') return;
+    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+    if (!base) {
+      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Paybill verification.');
+      return;
+    }
+
+    const code = paybillReceiptCode.trim().toUpperCase();
+    if (!/^[A-Z0-9]{10}$/.test(code)) {
+      Alert.alert('Invalid receipt', 'Paste the M-Pesa receipt code (10 chars), e.g. QRTSITS25S.');
+      return;
+    }
+
+    try {
+      setPaybillBusy(true);
+      setPaybillStatus(null);
+
+      const auth = await authPromise;
+      const user = auth.currentUser;
+      if (!user) {
+        Alert.alert('Sign in required', 'Please sign in to continue.');
+        return;
+      }
+
+      const idToken = await user.getIdToken();
+      const res = await fetch(`${base}/functions/v1/paybill`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          action: 'plan_submit_receipt',
+          tier: requestedTier,
+          receiptCode: code,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.error || 'Failed to submit receipt');
+
+      setPaybillStatus('Receipt submitted. Your plan will update after confirmation.');
+      try {
+        await refresh();
+      } catch {
+        // ignore
+      }
+    } catch (err: any) {
+      console.warn('[premium] paybill submit failed', err);
+      Alert.alert('Submit failed', err?.message || 'Unable to submit receipt right now.');
+    } finally {
+      setPaybillBusy(false);
+    }
+  }, [paybillReceiptCode, refresh, requestedTier]);
 
   const startMpesaPayment = useCallback(async () => {
     if (!requestedTier || requestedTier === 'free') return;
@@ -655,7 +720,9 @@ const PremiumScreen = () => {
             ? 'Upgrading uses M-Pesa (Daraja STK Push). Your plan updates after payment is confirmed.'
             : billingProvider === 'stripe'
             ? 'Upgrading uses a secure Stripe card checkout. Your plan updates after payment is confirmed.'
-            : 'Upgrading uses M-Pesa (Daraja STK Push). Your plan updates after payment is confirmed.'}
+            : billingProvider === 'paybill'
+            ? 'Upgrading uses M-Pesa Paybill (Equity). Your plan updates after payment is confirmed.'
+            : 'Upgrading is not configured on this device.'}
         </Text>
 
         {/* Purchase bottom sheet */}
@@ -748,6 +815,89 @@ const PremiumScreen = () => {
                         onPress={startMpesaPayment}
                       >
                         <Text style={styles.saveText}>{mpesaBusy ? 'Sending…' : 'Pay with M-Pesa'}</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 10 }}>
+                      <TouchableOpacity style={[styles.saveButton, { backgroundColor: 'rgba(255,255,255,0.08)' }]} onPress={closePurchaseSheet}>
+                        <Text style={styles.saveText}>Close</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : billingProvider === 'paybill' ? (
+                  <View>
+                    <Text style={{ color: 'rgba(255,255,255,0.85)', marginBottom: 10 }}>
+                      Pay via M-Pesa Paybill, then paste your M-Pesa receipt code.
+                    </Text>
+
+                    <View
+                      style={{
+                        borderWidth: 1,
+                        borderColor: 'rgba(255,255,255,0.12)',
+                        borderRadius: 12,
+                        padding: 12,
+                        backgroundColor: 'rgba(255,255,255,0.03)',
+                      }}
+                    >
+                      <Text style={{ color: 'rgba(255,255,255,0.85)', fontWeight: '700' }}>Paybill: {PAYBILL_NUMBER}</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.85)', marginTop: 6, fontWeight: '700' }}>
+                        Account/Business No: {PAYBILL_ACCOUNT}
+                      </Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.7)', marginTop: 10 }}>
+                        Amount: {requestedTier === 'plus' ? '100' : '200'} KSH
+                      </Text>
+                    </View>
+
+                    <Text style={{ color: 'rgba(255,255,255,0.75)', marginTop: 12, marginBottom: 8 }}>
+                      M-Pesa receipt code
+                    </Text>
+                    <TextInput
+                      value={paybillReceiptCode}
+                      onChangeText={(t) => setPaybillReceiptCode(t.replace(/[^0-9a-zA-Z]/g, '').toUpperCase())}
+                      placeholder="QRTSITS25S"
+                      placeholderTextColor="rgba(255,255,255,0.35)"
+                      autoCapitalize="characters"
+                      style={{
+                        borderWidth: 1,
+                        borderColor: 'rgba(255,255,255,0.12)',
+                        borderRadius: 12,
+                        paddingHorizontal: 12,
+                        paddingVertical: 10,
+                        color: '#fff',
+                        backgroundColor: 'rgba(255,255,255,0.03)',
+                      }}
+                      editable={!paybillBusy}
+                    />
+
+                    {paybillStatus ? (
+                      <Text style={{ color: 'rgba(255,255,255,0.8)', marginTop: 8 }}>{paybillStatus}</Text>
+                    ) : null}
+
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }}>
+                      <TouchableOpacity
+                        style={[styles.cancelButton, { marginLeft: 0, flex: 1, marginRight: 8 }]}
+                        disabled={paybillBusy}
+                        onPress={async () => {
+                          try {
+                            setPaybillBusy(true);
+                            await refresh();
+                            Alert.alert('Updated', 'Refreshed your subscription status.');
+                          } catch {
+                            Alert.alert('Refresh failed', 'Please try again.');
+                          } finally {
+                            setPaybillBusy(false);
+                          }
+                        }}
+                      >
+                        <Text style={styles.cancelText}>{paybillBusy ? 'Refreshing…' : 'Refresh status'}</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.saveButton, { backgroundColor: accentColor, flex: 1 }]}
+                        disabled={paybillBusy}
+                        onPress={submitPaybillReceipt}
+                      >
+                        <Text style={styles.saveText}>{paybillBusy ? 'Submitting…' : 'Submit receipt'}</Text>
                       </TouchableOpacity>
                     </View>
 

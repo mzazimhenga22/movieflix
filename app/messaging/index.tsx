@@ -479,11 +479,14 @@ const MessagingScreen = () => {
     if (!isAuthReady || !user?.uid) return
 
     let alive = true
-    const unsubConversations = onConversationsUpdate((list) => {
+    const unsubConversations = onConversationsUpdate(
+      (list) => {
       if (!alive) return
       setConversations(list)
       setConversationsLoading(false)
-    })
+      },
+      { uid: user.uid },
+    )
     const unsubStories = onStoriesUpdateForViewer(
       (list) => {
         if (alive) setStories(list as any)

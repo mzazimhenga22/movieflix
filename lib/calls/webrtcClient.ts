@@ -1,4 +1,10 @@
-import { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, mediaDevices } from 'react-native-webrtc';
+import {
+  MediaStream,
+  RTCPeerConnection,
+  RTCIceCandidate,
+  RTCSessionDescription,
+  mediaDevices,
+} from 'react-native-webrtc';
 import type { CallType } from './types';
 
 const configuration = {
@@ -56,11 +62,35 @@ export const initializeWebRTC = async (callType: CallType) => {
     }
   };
 
-  (peerConnection as any).onaddstream = (event: any) => {
-    remoteStream = event.stream;
-    if (onRemoteStreamCallback) {
-      onRemoteStreamCallback(event.stream);
+  // react-native-webrtc >= 106 prefers `ontrack` when using `addTrack`.
+  // Keep `onaddstream` as a fallback for older behavior.
+  (peerConnection as any).ontrack = (event: any) => {
+    const stream: MediaStream | undefined = event?.streams?.[0];
+
+    if (stream) {
+      remoteStream = stream;
+      onRemoteStreamCallback?.(stream);
+      return;
     }
+
+    // Some platforms may not populate `event.streams` for audio-only;
+    // build a MediaStream from tracks.
+    const track = event?.track;
+    if (!track) return;
+    if (!remoteStream) remoteStream = new MediaStream();
+    try {
+      (remoteStream as any).addTrack(track);
+      onRemoteStreamCallback?.(remoteStream);
+    } catch {
+      // ignore
+    }
+  };
+
+  (peerConnection as any).onaddstream = (event: any) => {
+    const stream = event?.stream;
+    if (!stream) return;
+    remoteStream = stream;
+    onRemoteStreamCallback?.(stream);
   };
 
   return { peerConnection, localStream };

@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -6,6 +5,10 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { authPromise, firestore } from '../constants/firebase';
 
 const __DEV__FLAG = typeof __DEV__ !== 'undefined' && __DEV__;
+const ALLOW_PLAN_OVERRIDE =
+  __DEV__FLAG &&
+  String((typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_ALLOW_PLAN_OVERRIDE) ?? '').trim() ===
+    '1';
 
 
 type PlanTier = 'free' | 'plus' | 'premium';
@@ -58,16 +61,14 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
       const data = (snap.data() as any) ?? {};
       const tier = normalizePlanTier(data?.planTier ?? data?.subscription?.tier);
 
-      if (__DEV__FLAG) {
-        try {
-          const stored = await AsyncStorage.getItem('planTierOverride');
-          if (stored === 'premium' || stored === 'plus' || stored === 'free') {
-            setCurrentPlan(stored);
-            setIsSubscribed(stored !== 'free');
-            return;
-          }
-        } catch {
-          // ignore
+      if (ALLOW_PLAN_OVERRIDE) {
+        const override = String((typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PLAN_TIER_OVERRIDE) ?? '')
+          .toLowerCase()
+          .trim();
+        if (override === 'premium' || override === 'plus' || override === 'free') {
+          setCurrentPlan(override as PlanTier);
+          setIsSubscribed(override !== 'free');
+          return;
         }
       }
 
@@ -105,16 +106,14 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
               const data = (snap.data() as any) ?? {};
               const nextTier = normalizePlanTier(data?.planTier ?? data?.subscription?.tier);
 
-              if (__DEV__FLAG) {
-                try {
-                  const stored = await AsyncStorage.getItem('planTierOverride');
-                  if (stored === 'premium' || stored === 'plus' || stored === 'free') {
-                    setCurrentPlan(stored);
-                    setIsSubscribed(stored !== 'free');
-                    return;
-                  }
-                } catch {
-                  // ignore
+              if (ALLOW_PLAN_OVERRIDE) {
+                const override = String((typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PLAN_TIER_OVERRIDE) ?? '')
+                  .toLowerCase()
+                  .trim();
+                if (override === 'premium' || override === 'plus' || override === 'free') {
+                  setCurrentPlan(override as PlanTier);
+                  setIsSubscribed(override !== 'free');
+                  return;
                 }
               }
 

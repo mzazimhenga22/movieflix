@@ -3,6 +3,7 @@ import {
   arrayUnion,
   collection,
   doc,
+  deleteField,
   getDoc,
   limit,
   onSnapshot,
@@ -10,6 +11,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
   where,
   type DocumentData,
@@ -23,6 +25,34 @@ import type { CallSession, CallStatus, CreateCallOptions } from './types';
 
 const callsCollection = collection(firestore, 'calls');
 const ACTIVE_STATUSES: CallStatus[] = ['initiated', 'ringing', 'active'];
+
+const PRESENCE_FRESHNESS_MS = 45_000;
+const OFFLINE_RING_TIMEOUT_MS = 60_000;
+
+const getUserOnlineState = async (userId: string): Promise<'online' | 'offline'> => {
+  try {
+    const userRef = doc(firestore, 'users', userId);
+    const snap = await getDoc(userRef);
+    if (!snap.exists()) return 'offline';
+    const data = snap.data() as any;
+    const presence = data?.presence ?? {};
+    const rawState = (presence.state ?? data.status ?? 'offline') as string;
+    const ts = presence.lastActiveAt ?? presence.lastSeen ?? data.lastSeen ?? null;
+    const lastMillis =
+      ts && typeof ts?.toMillis === 'function'
+        ? ts.toMillis()
+        : ts && typeof ts?.toDate === 'function'
+          ? ts.toDate().getTime()
+          : typeof ts === 'number'
+            ? ts
+            : null;
+
+    const fresh = typeof lastMillis === 'number' ? Date.now() - lastMillis <= PRESENCE_FRESHNESS_MS : false;
+    return rawState === 'online' && fresh ? 'online' : 'offline';
+  } catch {
+    return 'offline';
+  }
+};
 
 export type CreateCallResult = {
   callId: string;
@@ -89,6 +119,26 @@ export const createCallSession = async (
   const channelName = `${options.conversationId}-${Date.now()}`;
   const members = Array.from(new Set(options.members));
 
+  const otherMembers = members.filter((id) => id !== options.initiatorId);
+  const presenceStates = await Promise.all(otherMembers.map((id) => getUserOnlineState(id)));
+  const anyOnline = presenceStates.some((s) => s === 'online');
+  const initialStatus: CallStatus = anyOnline ? 'ringing' : 'initiated';
+  const ringTimeoutAt =
+    !anyOnline && !options.isGroup
+      ? Timestamp.fromMillis(Date.now() + OFFLINE_RING_TIMEOUT_MS)
+      : undefined;
+
+  const participants: Record<string, any> = {
+    [options.initiatorId]: {
+      id: options.initiatorId,
+      displayName: options.initiatorName ?? null,
+      state: 'joined',
+      mutedAudio: false,
+      mutedVideo: options.type === 'voice',
+      joinedAt: serverTimestamp(),
+    },
+  };
+
   const docRef = await addDoc(callsCollection, {
     conversationId: options.conversationId,
     conversationName: options.conversationName ?? null,
@@ -98,19 +148,12 @@ export const createCallSession = async (
     type: options.type,
     initiatorId: options.initiatorId,
     initiatorName: options.initiatorName ?? null,
-    status: 'initiated' as CallStatus,
+    status: initialStatus,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
+    ...(ringTimeoutAt ? { ringTimeoutAt } : {}),
     signaling: {}, // WebRTC signaling data
-    participants: {
-      [options.initiatorId]: {
-        id: options.initiatorId,
-        displayName: options.initiatorName ?? null,
-        state: 'invited',
-        mutedAudio: false,
-        mutedVideo: options.type === 'voice',
-      },
-    },
+    participants,
   });
 
   // Fire-and-forget push (handled server-side with auth + Firestore validation).
@@ -135,10 +178,31 @@ export const joinCallAsParticipant = async (
 
   const data = snapshot.data() as CallSession;
 
+  if (data.status === 'ended' || data.status === 'declined' || data.status === 'missed') {
+    throw new Error('Call has ended');
+  }
+
+  if (
+    data.isGroup &&
+    data.acceptedBy &&
+    userId !== data.initiatorId &&
+    userId !== data.acceptedBy
+  ) {
+    throw new Error('Call already answered');
+  }
+
+  const shouldActivate = userId !== data.initiatorId;
+
   await setDoc(
     callRef,
     {
-      status: 'active',
+      ...(shouldActivate
+        ? {
+            status: 'active',
+            ringTimeoutAt: deleteField(),
+            ...(data.isGroup && !data.acceptedBy ? { acceptedBy: userId } : {}),
+          }
+        : {}),
       updatedAt: serverTimestamp(),
       participants: {
         [userId]: {
@@ -155,6 +219,26 @@ export const joinCallAsParticipant = async (
   );
 
   return { channelName: data.channelName };
+};
+
+export const setCallStatus = async (
+  callId: string,
+  status: CallStatus,
+): Promise<void> => {
+  const callRef = doc(firestore, 'calls', callId);
+  await updateDoc(callRef, {
+    status,
+    updatedAt: serverTimestamp(),
+  });
+};
+
+export const markCallRinging = async (callId: string): Promise<void> => {
+  const callRef = doc(firestore, 'calls', callId);
+  await updateDoc(callRef, {
+    status: 'ringing',
+    ringTimeoutAt: deleteField(),
+    updatedAt: serverTimestamp(),
+  });
 };
 
 export const updateParticipantMuteState = async (
@@ -198,7 +282,7 @@ export const markParticipantLeft = async (
       (participant) => participant.state === 'left' || participant.state === 'declined'
     );
 
-    if (allLeftOrDeclined && callData.status !== 'ended') {
+    if (allLeftOrDeclined && !['ended', 'missed', 'declined'].includes(callData.status)) {
       await updateDoc(callRef, {
         status: 'ended',
         endedAt: serverTimestamp(),
@@ -243,7 +327,7 @@ export const declineCall = async (
       (participant) => participant.state === 'left' || participant.state === 'declined'
     );
 
-    if (allLeftOrDeclined && callData.status !== 'ended') {
+    if (allLeftOrDeclined && !['ended', 'missed', 'declined'].includes(callData.status)) {
       await updateDoc(callRef, {
         status: 'ended',
         endedAt: serverTimestamp(),

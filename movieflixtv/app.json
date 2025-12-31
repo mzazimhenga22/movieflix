@@ -11,7 +11,7 @@
       "fallbackToCacheTimeout": 0
     },
     "orientation": "landscape",
-    "icon": "./assets/images/logo.png",
+    "icon": "./assets/images/logo-safe.png",
     "scheme": "movieflixtv",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -23,16 +23,16 @@
     "android": {
       "package": "com.movieflix.tv",
       "adaptiveIcon": {
-        "backgroundColor": "#05060f",
-        "foregroundImage": "./assets/images/logo.png"
+        "backgroundColor": "#E53935",
+        "foregroundImage": "./assets/images/logo-safe.png"
       },
       "backgroundColor": "#05060f",
       "edgeToEdgeEnabled": true
     },
     "splash": {
-      "image": "./assets/images/movies-splash.png",
-      "resizeMode": "cover",
-      "backgroundColor": "#05060f"
+      "image": "./assets/images/logo-safe.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E53935"
     },
     "web": {
       "output": "static",
@@ -43,12 +43,12 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/movies-splash.png",
-          "resizeMode": "cover",
-          "backgroundColor": "#05060f",
+          "image": "./assets/images/logo-safe.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#E53935",
           "dark": {
-            "image": "./assets/images/movies-splash.png",
-            "backgroundColor": "#05060f"
+            "image": "./assets/images/logo-safe.png",
+            "backgroundColor": "#E53935"
           }
         }
       ],

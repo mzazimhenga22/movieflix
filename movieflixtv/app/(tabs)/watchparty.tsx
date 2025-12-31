@@ -6,7 +6,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   FlatList,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -23,6 +22,7 @@ import { authPromise } from '@/constants/firebase';
 import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvPosterCard from '../components/TvPosterCard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 
 export default function WatchPartyTv() {
   const router = useRouter();
@@ -160,6 +160,16 @@ export default function WatchPartyTv() {
   const handleJoin = useCallback(async () => {
     const code = joinCode.trim();
     setNotice({ kind: 'info', title: 'Checking code…' });
+    const uid =
+      user?.uid ??
+      (await authPromise
+        .then((auth) => auth.currentUser?.uid ?? null)
+        .catch(() => null));
+    if (!uid) {
+      setNotice({ kind: 'error', title: 'Sign in required', message: 'Please sign in to join a watch party.' });
+      router.push('/(auth)/login');
+      return;
+    }
     if (code.length !== 6) {
       setNotice({ kind: 'error', title: 'Invalid code', message: 'Enter the 6-digit party code.' });
       return;
@@ -213,7 +223,7 @@ export default function WatchPartyTv() {
     } finally {
       if (mountedRef.current) setBusy(false);
     }
-  }, [joinCode, router]);
+  }, [joinCode, router, user?.uid]);
 
   const handleJoinKey = useCallback((value: string) => {
     if (value === 'DEL') {
@@ -289,14 +299,14 @@ export default function WatchPartyTv() {
             <Text style={styles.cardHint}>Add to “My List” on phone, then come back.</Text>
 
             {myList.length === 0 ? (
-              <Pressable
+              <TvFocusable
                 onPress={() => router.push('/continue-on-phone?feature=profiles')}
                 focusable
                 style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}
               >
                 <Ionicons name="phone-portrait-outline" size={18} color="#fff" />
                 <Text style={styles.btnText}>Continue on phone</Text>
-              </Pressable>
+              </TvFocusable>
             ) : (
               <FlatList
                 data={myList}
@@ -324,7 +334,7 @@ export default function WatchPartyTv() {
               </View>
             ) : null}
 
-            <Pressable
+            <TvFocusable
               onPress={() => void handleCreate()}
               disabled={disabled}
               focusable
@@ -340,7 +350,7 @@ export default function WatchPartyTv() {
                 <Ionicons name="play" size={18} color="#fff" />
               )}
               <Text style={styles.btnText}>{disabled ? 'Working…' : 'Create Party'}</Text>
-            </Pressable>
+            </TvFocusable>
                 </View>
               </View>
 
@@ -350,18 +360,18 @@ export default function WatchPartyTv() {
             <Text style={styles.cardHint}>Enter the 6-digit code from your friend.</Text>
             <View style={styles.codeRow}>
               <Text style={styles.codeValue}>{(joinCode + '______').slice(0, 6)}</Text>
-              <Pressable
+              <TvFocusable
                 onPress={() => setJoinCode('')}
                 focusable
                 style={({ focused }: any) => [styles.clearSmall, focused ? styles.btnFocused : null]}
               >
                 <Text style={styles.btnText}>Clear</Text>
-              </Pressable>
+              </TvFocusable>
             </View>
 
             <View style={styles.pad}>
               {['1', '2', '3', '4', '5', '6', '7', '8', '9', 'DEL', '0', 'CLEAR'].map((k) => (
-                <Pressable
+                <TvFocusable
                   key={k}
                   onPress={() => handleJoinKey(k)}
                   focusable
@@ -372,10 +382,10 @@ export default function WatchPartyTv() {
                   ]}
                 >
                   <Text style={styles.padText}>{k}</Text>
-                </Pressable>
+                </TvFocusable>
               ))}
             </View>
-            <Pressable
+            <TvFocusable
               onPress={() => void handleJoin()}
               disabled={disabled}
               focusable
@@ -387,19 +397,19 @@ export default function WatchPartyTv() {
             >
               <Ionicons name="log-in-outline" size={18} color="#fff" />
               <Text style={styles.btnText}>Join Party</Text>
-            </Pressable>
+            </TvFocusable>
 
             {!isSubscribed ? (
               <View style={styles.upsell}>
                 <Text style={styles.upsellTitle}>Subscriptions on phone</Text>
                 <Text style={styles.upsellText}>Upgrade in the phone app to host larger rooms.</Text>
-                <Pressable
+                <TvFocusable
                   onPress={() => router.push('/premium')}
                   focusable
                   style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}
                 >
                   <Text style={styles.btnText}>Open subscription info</Text>
-                </Pressable>
+                </TvFocusable>
               </View>
             ) : null}
                 </View>

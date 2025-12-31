@@ -6,23 +6,89 @@ import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 
-function requiredEnv(name: string): string {
+import googleServices from '../google-services.json';
+
+function getEnv(name: string): string | undefined {
   const value = (process.env[name] ?? '').trim();
-  if (!value) throw new Error(`Missing env: ${name}`);
-  return value;
+  return value ? value : undefined;
+}
+
+type GoogleServicesJson = {
+  project_info?: {
+    project_number?: string;
+    project_id?: string;
+    storage_bucket?: string;
+  };
+  client?: Array<{
+    client_info?: {
+      mobilesdk_app_id?: string;
+      android_client_info?: {
+        package_name?: string;
+      };
+    };
+    api_key?: Array<{
+      current_key?: string;
+    }>;
+  }>;
+};
+
+function deriveFromGoogleServices(): Partial<FirebaseOptions> {
+  const gs = googleServices as unknown as GoogleServicesJson;
+  const projectId = gs.project_info?.project_id;
+  const storageBucket = gs.project_info?.storage_bucket;
+  const messagingSenderId = gs.project_info?.project_number;
+
+  const expectedPackage = 'com.movieflix.tv';
+  const client =
+    gs.client?.find((c) => c?.client_info?.android_client_info?.package_name === expectedPackage) ||
+    gs.client?.[0];
+
+  const apiKey = client?.api_key?.[0]?.current_key;
+  const appId = client?.client_info?.mobilesdk_app_id;
+
+  const authDomain = projectId ? `${projectId}.firebaseapp.com` : undefined;
+
+  return {
+    apiKey,
+    authDomain,
+    projectId,
+    storageBucket,
+    messagingSenderId,
+    appId,
+  };
 }
 
 // Firebase web configuration (set via EXPO_PUBLIC_* env vars)
 const measurementId = (process.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID ?? '').trim();
+
+const derived = deriveFromGoogleServices();
+
 const firebaseConfig: FirebaseOptions = {
-  apiKey: requiredEnv('EXPO_PUBLIC_FIREBASE_API_KEY'),
-  authDomain: requiredEnv('EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN'),
-  projectId: requiredEnv('EXPO_PUBLIC_FIREBASE_PROJECT_ID'),
-  storageBucket: requiredEnv('EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET'),
-  messagingSenderId: requiredEnv('EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID'),
-  appId: requiredEnv('EXPO_PUBLIC_FIREBASE_APP_ID'),
+  apiKey: getEnv('EXPO_PUBLIC_FIREBASE_API_KEY') ?? (derived.apiKey as string | undefined) ?? '',
+  authDomain: getEnv('EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN') ?? (derived.authDomain as string | undefined) ?? '',
+  projectId: getEnv('EXPO_PUBLIC_FIREBASE_PROJECT_ID') ?? (derived.projectId as string | undefined) ?? '',
+  storageBucket: getEnv('EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET') ?? (derived.storageBucket as string | undefined) ?? '',
+  messagingSenderId:
+    getEnv('EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID') ??
+    (derived.messagingSenderId as string | undefined) ??
+    '',
+  appId: getEnv('EXPO_PUBLIC_FIREBASE_APP_ID') ?? (derived.appId as string | undefined) ?? '',
   ...(measurementId ? { measurementId } : {}),
 };
+
+const missing: string[] = [];
+if (!firebaseConfig.apiKey) missing.push('EXPO_PUBLIC_FIREBASE_API_KEY');
+if (!firebaseConfig.authDomain) missing.push('EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN');
+if (!firebaseConfig.projectId) missing.push('EXPO_PUBLIC_FIREBASE_PROJECT_ID');
+if (!firebaseConfig.storageBucket) missing.push('EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET');
+if (!firebaseConfig.messagingSenderId) missing.push('EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID');
+if (!firebaseConfig.appId) missing.push('EXPO_PUBLIC_FIREBASE_APP_ID');
+
+if (missing.length) {
+  throw new Error(
+    `MovieFlix TV Firebase config missing: ${missing.join(', ')}. Provide EXPO_PUBLIC_FIREBASE_* env vars (recommended) or ensure google-services.json is present and valid.`,
+  );
+}
 
 // Initialize Firebase app (safe for HMR)
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];

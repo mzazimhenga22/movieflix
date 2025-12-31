@@ -204,7 +204,9 @@ const MovieList: React.FC<MovieListProps> = ({
         </TouchableOpacity>
       </View>
       <View style={styles.verticalMovieInfo}>
-        <Text style={styles.verticalMovieTitle}>{item.title || item.name}</Text>
+        <Text style={styles.verticalMovieTitle} numberOfLines={2} ellipsizeMode="tail">
+          {item.title || item.name}
+        </Text>
         {showEpisodeMeta ? (
           <Text style={styles.episodeBadgeText} numberOfLines={1}>
             {[seasonLabel, episodeLabel].filter(Boolean).join(' • ')}
@@ -225,6 +227,7 @@ const MovieList: React.FC<MovieListProps> = ({
         <Text style={styles.sectionTitle}>{title}</Text>
         {carousel && (
           <TouchableOpacity
+            style={styles.seeAllButton}
             onPress={() => {
               const payload = movies.slice(0, 40);
               const listParam = encodeURIComponent(JSON.stringify(payload));
@@ -267,8 +270,11 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    columnGap: 12,
+    rowGap: 8,
     paddingHorizontal: 16,
     marginBottom: 10,
   },
@@ -277,6 +283,13 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '800',
     letterSpacing: 0.25,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  seeAllButton: {
+    marginLeft: 'auto',
+    paddingVertical: 4,
+    paddingHorizontal: 6,
   },
   seeAllText: {
     color: '#7dd8ff',

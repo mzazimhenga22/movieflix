@@ -70,6 +70,8 @@ export default function FeedCard({
   const { user } = useUser();
   const activeProfilePhoto = useActiveProfilePhoto();
 
+  const [chatBusy, setChatBusy] = useState(false);
+
   const [commentsVisible, setCommentsVisible] = useState(false);
   const [newComment, setNewComment] = useState('');
   const [spoilerRevealed, setSpoilerRevealed] = useState<Record<string, boolean>>({});
@@ -260,6 +262,8 @@ export default function FeedCard({
           docId: (item as any).docId ?? null,
           videoUrl: item.videoUrl,
           avatar: item.avatar ?? null,
+          userId: item.userId ?? null,
+          username: item.user ?? null,
           user: item.user ?? null,
           likes: item.likes ?? 0,
           commentsCount: item.commentsCount ?? 0,
@@ -507,15 +511,32 @@ export default function FeedCard({
           {/* Chat button for direct messaging */}
           <TouchableOpacity
             style={styles.actionPill}
+            disabled={chatBusy || !item.userId || isOwnItem}
             onPress={async () => {
-              if (!item.userId) return;
-              const { findOrCreateConversation } = await import('../../messaging/controller');
-              const conversationId = await findOrCreateConversation({
-                id: item.userId,
-                displayName: item.user ?? 'User',
-                photoURL: item.avatar ?? '',
-              });
-              router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } } as any);
+              if (chatBusy) return;
+              if (!user?.uid) {
+                Alert.alert('Sign in required', 'Please sign in to message people from the feed.');
+                return;
+              }
+              if (!item.userId || item.userId === user.uid) return;
+
+              setChatBusy(true);
+              try {
+                const { findOrCreateConversation, getProfileById } = await import('../../messaging/controller');
+                const profile = await getProfileById(String(item.userId));
+
+                const conversationId = await findOrCreateConversation({
+                  id: String(item.userId),
+                  displayName: profile?.displayName || item.user || 'User',
+                  photoURL: profile?.photoURL || item.avatar || fallbackAvatar,
+                });
+
+                router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } } as any);
+              } catch (e) {
+                Alert.alert('Unable to start chat', 'Please try again in a moment.');
+              } finally {
+                setChatBusy(false);
+              }
             }}
             accessibilityLabel="Message user"
             accessibilityRole="button"

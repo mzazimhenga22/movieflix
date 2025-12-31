@@ -1,7 +1,8 @@
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { TvFocusable } from './TvSpatialNavigation';
 
 type KeyDef = {
   id: string;
@@ -79,7 +80,7 @@ export default function TvVirtualKeyboard({ onKeyPress, mode = 'default', disabl
       {rows.map((row, rowIndex) => (
         <View key={`row-${rowIndex}`} style={styles.row}>
           {row.map((key) => (
-            <Pressable
+            <TvFocusable
               key={key.id}
               disabled={disabled}
               onPress={() => onKeyPress(key.value)}
@@ -93,7 +94,7 @@ export default function TvVirtualKeyboard({ onKeyPress, mode = 'default', disabl
               {({ focused }: any) => (
                 <GradientText colors={focused ? textGradientFocused : textGradientDefault}>{key.label}</GradientText>
               )}
-            </Pressable>
+            </TvFocusable>
           ))}
         </View>
       ))}

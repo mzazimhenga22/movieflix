@@ -5,7 +5,6 @@ import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -13,6 +12,7 @@ import {
 
 import { authPromise } from '@/constants/firebase';
 import TvVirtualKeyboard from '../components/TvVirtualKeyboard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 import QRCode from 'react-native-qrcode-svg';
 
 export default function TvLoginScreen() {
@@ -27,6 +27,31 @@ export default function TvLoginScreen() {
 
   const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim().replace(/\/$/, '');
 
+  const postTvLogin = useCallback(
+    async (payload: Record<string, unknown>, timeoutMs: number) => {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${supabaseUrl}/functions/v1/tv-login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        const json = await res.json().catch(() => ({}));
+        return { res, json };
+      } catch (e: any) {
+        if (e?.name === 'AbortError') {
+          throw new Error('TV login request timed out. Check the TV has internet access and Supabase is reachable.');
+        }
+        throw e;
+      } finally {
+        clearTimeout(t);
+      }
+    },
+    [supabaseUrl],
+  );
+
   const createQrSession = useCallback(async () => {
     if (!supabaseUrl) {
       setQrError('Supabase not configured');
@@ -36,12 +61,7 @@ export default function TvLoginScreen() {
     try {
       setQrBusy(true);
       setQrError(null);
-      const res = await fetch(`${supabaseUrl}/functions/v1/tv-login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'create' }),
-      });
-      const json = await res.json().catch(() => ({}));
+      const { res, json } = await postTvLogin({ action: 'create' }, 12_000);
       if (!res.ok) throw new Error(json?.error || 'Unable to create QR session');
       if (!json?.code || !json?.nonce) throw new Error('Invalid session response');
       setQrSession({ code: String(json.code), nonce: String(json.nonce), expiresAt: Number(json.expiresAt) });
@@ -51,7 +71,7 @@ export default function TvLoginScreen() {
     } finally {
       setQrBusy(false);
     }
-  }, [supabaseUrl]);
+  }, [postTvLogin, supabaseUrl]);
 
   const claimQrSession = useCallback(async () => {
     if (!supabaseUrl || !qrSession || qrBusy) return;
@@ -60,12 +80,10 @@ export default function TvLoginScreen() {
       return;
     }
     try {
-      const res = await fetch(`${supabaseUrl}/functions/v1/tv-login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'claim', code: qrSession.code, nonce: qrSession.nonce }),
-      });
-      const json = await res.json().catch(() => ({}));
+      const { res, json } = await postTvLogin(
+        { action: 'claim', code: qrSession.code, nonce: qrSession.nonce },
+        7_000,
+      );
       if (!res.ok) return;
       if (!json?.customToken) return;
 
@@ -78,7 +96,7 @@ export default function TvLoginScreen() {
     } finally {
       setBusy(false);
     }
-  }, [createQrSession, qrBusy, qrSession, supabaseUrl]);
+  }, [createQrSession, postTvLogin, qrBusy, qrSession, supabaseUrl]);
 
   React.useEffect(() => {
     void createQrSession();
@@ -158,7 +176,7 @@ export default function TvLoginScreen() {
           <Text style={styles.subtitle}>Use your MovieFlix account.</Text>
 
         <View style={styles.fieldsRow}>
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('email')}
             style={({ focused }: any) => [
               styles.field,
@@ -170,9 +188,9 @@ export default function TvLoginScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {email || '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={() => setActiveField('password')}
             style={({ focused }: any) => [
               styles.field,
@@ -184,17 +202,17 @@ export default function TvLoginScreen() {
             <Text style={styles.fieldValue} numberOfLines={1}>
               {password ? '•'.repeat(Math.min(password.length, 18)) : '—'}
             </Text>
-          </Pressable>
+          </TvFocusable>
         </View>
 
         <View style={styles.keyboardHeaderRow}>
           <Text style={styles.keyboardHint}>Use the on-screen keyboard</Text>
-          <Pressable
+          <TvFocusable
             onPress={() => setLowercase((prev) => !prev)}
             style={({ focused }: any) => [styles.caseBtn, focused ? styles.caseBtnFocused : null]}
           >
             <Text style={styles.caseText}>{lowercase ? 'abc' : 'ABC'}</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
 
         <TvVirtualKeyboard
@@ -203,7 +221,7 @@ export default function TvLoginScreen() {
           onKeyPress={applyKey}
         />
 
-        <Pressable
+        <TvFocusable
           onPress={() => void submit()}
           disabled={!canSubmit}
           style={({ focused }: any) => [
@@ -214,14 +232,14 @@ export default function TvLoginScreen() {
         >
           {busy ? <ActivityIndicator color="#fff" /> : null}
           <Text style={styles.primaryText}>{busy ? 'Signing in…' : 'Sign in'}</Text>
-        </Pressable>
+        </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={() => router.push('/(auth)/signup')}
             style={({ focused }: any) => [styles.secondaryBtn, focused ? styles.btnFocused : null]}
           >
             <Text style={styles.secondaryText}>Create account</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
 
         <View style={styles.qrPane}>
@@ -246,12 +264,12 @@ export default function TvLoginScreen() {
 
           {qrSession ? <Text style={styles.qrCodeText}>{qrSession.code}</Text> : null}
 
-          <Pressable
+          <TvFocusable
             onPress={() => void createQrSession()}
             style={({ focused }: any) => [styles.qrRefreshBtn, focused ? styles.btnFocused : null]}
           >
             <Text style={styles.secondaryText}>Refresh QR</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
       </View>
     </View>

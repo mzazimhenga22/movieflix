@@ -176,7 +176,7 @@ export function useSocialReactions() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.uid]);
 
   useEffect(() => {
     refreshReviews();

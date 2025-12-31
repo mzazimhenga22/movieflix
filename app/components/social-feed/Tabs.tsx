@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import {
   Animated,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -36,57 +37,70 @@ export default function FeedTabs({ active, onChangeTab }: Props) {
   return (
     <View style={styles.wrapper}>
       <View style={styles.container} accessibilityRole="tablist">
-        {tabs.map((tab) => {
-          const isActive = tab === active;
-          const accessibleRole: AccessibilityRole = 'tab';
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.scrollInner}
+        >
+          {tabs.map((tab) => {
+            const isActive = tab === active;
+            const accessibleRole: AccessibilityRole = 'tab';
 
-          return (
-            <Pressable
-              key={tab}
-              onPress={() => onChangeTab(tab)}
-              style={({ pressed }) => [
-                styles.tabBtn,
-                isActive && styles.tabBtnActive,
-                pressed && styles.tabPressed,
-              ]}
-              accessibilityRole={accessibleRole}
-              accessibilityState={{ selected: isActive }}
-              accessibilityLabel={`${tab} tab`}
-            >
-              <Text style={[styles.tabText, isActive && styles.tabTextActive]}>{tab}</Text>
-
-              {/* Animated glassy indicator */}
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.activeIndicator,
-                  isActive
-                    ? {
-                        opacity: anim,
-                        transform: [
-                          {
-                            scaleX: anim.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [0.85, 1],
-                            }),
-                          },
-                          {
-                            translateY: anim.interpolate({
-                              inputRange: [0, 1],
-                              outputRange: [6, 0],
-                            }),
-                          },
-                        ],
-                      }
-                    : { opacity: 0.0, transform: [{ scale: 0.85 }, { translateY: 6 }] },
+            return (
+              <Pressable
+                key={tab}
+                onPress={() => onChangeTab(tab)}
+                style={({ pressed }) => [
+                  styles.tabBtn,
+                  isActive && styles.tabBtnActive,
+                  pressed && styles.tabPressed,
                 ]}
+                accessibilityRole={accessibleRole}
+                accessibilityState={{ selected: isActive }}
+                accessibilityLabel={`${tab} tab`}
               >
-                {/* inner highlight to sell the glass look */}
-                <View style={styles.indicatorInner} />
-              </Animated.View>
-            </Pressable>
-          );
-        })}
+                <Text
+                  style={[styles.tabText, isActive && styles.tabTextActive]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                  maxFontSizeMultiplier={1.2}
+                >
+                  {tab}
+                </Text>
+
+                {/* Animated glassy indicator */}
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.activeIndicator,
+                    isActive
+                      ? {
+                          opacity: anim,
+                          transform: [
+                            {
+                              scaleX: anim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: [0.85, 1],
+                              }),
+                            },
+                            {
+                              translateY: anim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: [6, 0],
+                              }),
+                            },
+                          ],
+                        }
+                      : { opacity: 0.0, transform: [{ scale: 0.85 }, { translateY: 6 }] },
+                  ]}
+                >
+                  {/* inner highlight to sell the glass look */}
+                  <View style={styles.indicatorInner} />
+                </Animated.View>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
       </View>
     </View>
   );
@@ -95,6 +109,7 @@ export default function FeedTabs({ active, onChangeTab }: Props) {
 type Style = {
   wrapper: ViewStyle;
   container: ViewStyle;
+  scrollInner: ViewStyle;
   tabBtn: ViewStyle;
   tabBtnActive: ViewStyle;
   tabPressed: ViewStyle;
@@ -112,9 +127,6 @@ const styles = StyleSheet.create<Style>({
     backgroundColor: 'transparent',
   },
   container: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     // subtle frosted panel using translucent fills + thin border
     backgroundColor: 'rgba(255,255,255,0.04)',
     borderRadius: 16,
@@ -135,6 +147,12 @@ const styles = StyleSheet.create<Style>({
       default: {},
     }),
   },
+  scrollInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    columnGap: 8,
+    paddingHorizontal: 2,
+  },
   tabBtn: {
     paddingHorizontal: 14,
     paddingVertical: 10,
@@ -142,8 +160,6 @@ const styles = StyleSheet.create<Style>({
     alignItems: 'center',
     justifyContent: 'center',
     minWidth: 92,
-    marginHorizontal: 6,
-    // create subtle inner "frost" using layered backgrounds (lighter center)
     backgroundColor: 'transparent',
   },
   tabBtnActive: {

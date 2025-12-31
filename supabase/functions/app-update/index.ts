@@ -1,6 +1,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 
 import { corsHeaders } from '../_shared/cors.ts';
+import { resolveGithubReleaseAsset } from '../_shared/githubReleases.ts';
 
 function jsonResponse(payload: unknown, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(payload), {
@@ -22,7 +23,7 @@ function parseBool(raw: string | undefined, fallback: boolean) {
   return fallback;
 }
 
-serve((req: Request) => {
+serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -31,7 +32,34 @@ serve((req: Request) => {
     return jsonResponse({ error: 'Method not allowed' }, 405, { Allow: 'GET,OPTIONS' });
   }
 
-  const latestVersion = (Deno.env.get('APP_LATEST_VERSION') ?? '1.0.0').trim();
+  const explicitLatestVersion = (Deno.env.get('APP_LATEST_VERSION') ?? '').trim();
+  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim();
+
+  let latestVersion = explicitLatestVersion || '1.0.0';
+  if (githubRepo) {
+    try {
+      const token = (Deno.env.get('GITHUB_TOKEN') ?? '').trim() || null;
+      const tag = (Deno.env.get('GITHUB_RELEASE_TAG') ?? '').trim() || null;
+      const assetName = (Deno.env.get('APK_GITHUB_ASSET_NAME') ?? Deno.env.get('GITHUB_RELEASE_ASSET_NAME') ?? '').trim() || null;
+      const assetRegex = (Deno.env.get('APK_GITHUB_ASSET_REGEX') ?? Deno.env.get('GITHUB_RELEASE_ASSET_REGEX') ?? '').trim() || null;
+      const cacheTtlMs = Number(Deno.env.get('GITHUB_RELEASE_CACHE_TTL_MS') ?? '60000') || 60_000;
+
+      const { release } = await resolveGithubReleaseAsset({
+        repo: githubRepo,
+        tag,
+        token,
+        assetName,
+        assetRegex,
+        cacheTtlMs,
+      });
+
+      if (release?.tag_name) {
+        latestVersion = String(release.tag_name).trim() || latestVersion;
+      }
+    } catch {
+      // Keep env fallback if GitHub is unavailable.
+    }
+  }
   const mandatory = parseBool(Deno.env.get('APP_UPDATE_MANDATORY') ?? undefined, false);
   const message =
     (Deno.env.get('APP_UPDATE_MESSAGE') ?? '').trim() ||
@@ -45,6 +73,7 @@ serve((req: Request) => {
     latestVersion,
     mandatory,
     url: downloadUrl,
+    androidUrl: downloadUrl,
     message,
   });
 });

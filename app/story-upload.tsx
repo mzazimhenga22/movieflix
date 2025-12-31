@@ -2,10 +2,11 @@ import { updateStreakForContext } from '@/lib/streaks/streakManager';
 import { notifyPush } from '@/lib/pushApi';
 
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
-import { Video } from 'expo-av';
+import { ResizeMode, Video } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { addDoc, collection, serverTimestamp, Timestamp, doc, getDoc } from 'firebase/firestore';
@@ -20,6 +21,7 @@ import { useUser } from '../hooks/use-user';
 
 export default function StoryUpload() {
   const insets = useSafeAreaInsets();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [pickedUri, setPickedUri] = useState<string | null>(null);
   const [pickedType, setPickedType] = useState<'image' | 'video' | null>(null);
   const [pickedMimeType, setPickedMimeType] = useState<string | null>(null);
@@ -56,6 +58,12 @@ export default function StoryUpload() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    if (cameraPermission?.granted) return;
+    void requestCameraPermission();
+  }, [cameraPermission?.granted, requestCameraPermission]);
 
   const pickImage = async () => {
     try {
@@ -224,11 +232,23 @@ export default function StoryUpload() {
 
   return (
     <ScreenWrapper style={styles.wrapper}>
+      {Platform.OS !== 'web' && cameraPermission?.granted ? (
+        <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
+      ) : (
+        <LinearGradient
+          colors={['#e50914', '#150a13', '#05060f']}
+          start={[0, 0]}
+          end={[1, 1]}
+          style={styles.gradient}
+        />
+      )}
+
+      {/* Keep UI readable on top of the camera */}
       <LinearGradient
-        colors={['#e50914', '#150a13', '#05060f']}
-        start={[0, 0]}
-        end={[1, 1]}
-        style={styles.gradient}
+        colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
+        start={{ x: 0.2, y: 0 }}
+        end={{ x: 0.8, y: 1 }}
+        style={styles.cameraTint}
       />
       <LinearGradient
         colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
@@ -284,7 +304,7 @@ export default function StoryUpload() {
                 <Video
                   source={{ uri: pickedUri }}
                   style={styles.image}
-                  resizeMode="cover"
+                  resizeMode={ResizeMode.COVER}
                   shouldPlay
                   isLooping
                   isMuted
@@ -423,6 +443,9 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
   gradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  cameraTint: {
     ...StyleSheet.absoluteFillObject,
   },
   bgOrbPrimary: {

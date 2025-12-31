@@ -300,6 +300,10 @@ const VideoPlayerScreen = () => {
     : undefined;
 
   const [tmdbEnrichment, setTmdbEnrichment] = useState<TmdbEnrichment | null>(null);
+  const tmdbEnrichmentRef = useRef<TmdbEnrichment | null>(null);
+  useEffect(() => {
+    tmdbEnrichmentRef.current = tmdbEnrichment;
+  }, [tmdbEnrichment]);
   useEffect(() => {
     if (!transitionReady) return;
     if (!tmdbId || (rawMediaType !== 'movie' && rawMediaType !== 'tv')) {
@@ -538,7 +542,7 @@ const VideoPlayerScreen = () => {
   }, [positionMillis]);
   const { user } = useUser();
   const [chatMessages, setChatMessages] = useState<
-    Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }>
+    { id: string; user: string; text: string; createdAt?: any; avatar?: string | null }[]
   >([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
@@ -724,6 +728,10 @@ const VideoPlayerScreen = () => {
   const [videoReloadKey, setVideoReloadKey] = useState(0);
   const prefetchKey = typeof params.__prefetchKey === 'string' ? params.__prefetchKey : undefined;
   const [prefetchChecked, setPrefetchChecked] = useState(() => !prefetchKey);
+  const initialScrapeStartedRef = useRef(false);
+  useEffect(() => {
+    initialScrapeStartedRef.current = false;
+  }, [prefetchKey, tmdbId, rawMediaType, seasonNumberParam, episodeNumberParam]);
   const watchHistoryEntry = useMemo<Media | null>(() => {
     if (!parsedTmdbNumericId) return null;
     const releaseDateForEntry = rawReleaseDateParam ?? (releaseYear ? `${releaseYear}` : undefined);
@@ -1065,51 +1073,70 @@ const VideoPlayerScreen = () => {
   useEffect(() => {
     if (!prefetchChecked) return;
     if (playbackSource || !tmdbId || !rawMediaType) return;
+    if (initialScrapeStartedRef.current) return;
+    initialScrapeStartedRef.current = true;
+
     let isCancelled = false;
-    const fetchPlaybackFromMetadata = async () => {
-      const enrichedYear = tmdbEnrichment?.releaseYear;
+    const handle = InteractionManager.runAfterInteractions(() => {
+      if (isCancelled) return;
+      if (playbackSourceRef.current) return;
+
+      const enrichment = tmdbEnrichmentRef.current;
+      const enrichedYear = enrichment?.releaseYear;
       const fallbackYear = enrichedYear ?? releaseYear ?? new Date().getFullYear();
       const mediaTitle = displayTitle || 'Now Playing';
       const normalizedTmdbId = tmdbId || '';
-      const normalizedImdbId = imdbId || tmdbEnrichment?.imdbId || undefined;
-      try {
-        setScrapeError(null);
-        if (rawMediaType === 'tv') {
-          const seasonNumber = Number.isFinite(seasonNumberParam) ? (seasonNumberParam as number) : 1;
-          const episodeNumber = Number.isFinite(episodeNumberParam) ? (episodeNumberParam as number) : 1;
-          const seasonTitle = seasonTitleParam || `Season ${seasonNumber}`;
-          const baseEpisodeCount =
-            typeof seasonEpisodeCountParam === 'number' && seasonEpisodeCountParam > 0
-              ? seasonEpisodeCountParam
-              : undefined;
-          const payload = {
-            type: 'show',
-            title: mediaTitle,
-            tmdbId: normalizedTmdbId,
-            imdbId: normalizedImdbId,
-            releaseYear: fallbackYear,
-            season: {
-              number: seasonNumber,
-              tmdbId: seasonTmdbId ?? '',
-              title: seasonTitle,
-              ...(baseEpisodeCount ? { episodeCount: baseEpisodeCount } : {}),
-            },
-            episode: {
-              number: episodeNumber,
-              tmdbId: episodeTmdbId ?? '',
-            },
-          } as const;
-          console.log('[VideoPlayer] Initial TV scrape payload', payload);
-          const debugTag = buildScrapeDebugTag('initial-tv', mediaTitle);
-          const playback = await scrapeInitial(payload, { sourceOrder, debugTag });
-          if (isCancelled) return;
-          console.log('[VideoPlayer] Scrape success', { uri: playback.uri, streamType: playback.stream?.type, headers: playback.headers });
-          const formattedTitle =
-            episodeNumber
-              ? `${mediaTitle} • S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`
-              : mediaTitle;
-          applyPlaybackResult(playback, { title: formattedTitle });
-        } else {
+      const normalizedImdbId = imdbId || enrichment?.imdbId || undefined;
+
+      void (async () => {
+        try {
+          setScrapeError(null);
+
+          if (rawMediaType === 'tv') {
+            const seasonNumber = Number.isFinite(seasonNumberParam) ? (seasonNumberParam as number) : 1;
+            const episodeNumber = Number.isFinite(episodeNumberParam) ? (episodeNumberParam as number) : 1;
+            const seasonTitle = seasonTitleParam || `Season ${seasonNumber}`;
+            const baseEpisodeCount =
+              typeof seasonEpisodeCountParam === 'number' && seasonEpisodeCountParam > 0
+                ? seasonEpisodeCountParam
+                : undefined;
+
+            const payload = {
+              type: 'show',
+              title: mediaTitle,
+              tmdbId: normalizedTmdbId,
+              imdbId: normalizedImdbId,
+              releaseYear: fallbackYear,
+              season: {
+                number: seasonNumber,
+                tmdbId: seasonTmdbId ?? '',
+                title: seasonTitle,
+                ...(baseEpisodeCount ? { episodeCount: baseEpisodeCount } : {}),
+              },
+              episode: {
+                number: episodeNumber,
+                tmdbId: episodeTmdbId ?? '',
+              },
+            } as const;
+
+            if (__DEV__) console.log('[VideoPlayer] Initial TV scrape payload', payload);
+            const debugTag = buildScrapeDebugTag('initial-tv', mediaTitle);
+            const playback = await scrapeInitial(payload, { sourceOrder, debugTag });
+            if (isCancelled) return;
+            if (__DEV__) {
+              console.log('[VideoPlayer] Scrape success', {
+                uriPreview: playback.uri.slice(0, 96),
+                streamType: playback.stream?.type,
+              });
+            }
+
+            const formattedTitle = `${mediaTitle} • S${String(seasonNumber).padStart(2, '0')}E${String(
+              episodeNumber,
+            ).padStart(2, '0')}`;
+            applyPlaybackResult(playback, { title: formattedTitle });
+            return;
+          }
+
           const payload = {
             type: 'movie',
             title: mediaTitle,
@@ -1117,33 +1144,25 @@ const VideoPlayerScreen = () => {
             imdbId: normalizedImdbId,
             releaseYear: fallbackYear,
           } as const;
-          console.log('[VideoPlayer] Initial movie scrape payload', payload);
+
+          if (__DEV__) console.log('[VideoPlayer] Initial movie scrape payload', payload);
           const debugTag = buildScrapeDebugTag('initial-movie', mediaTitle);
           const playback = await scrapeInitial(payload, { sourceOrder, debugTag });
           if (isCancelled) return;
           applyPlaybackResult(playback, { title: mediaTitle });
+        } catch (err: any) {
+          console.error('[VideoPlayer] Initial scrape failed', err);
+          if (isCancelled) return;
+          const message = err?.message || 'Unable to load this title.';
+          setScrapeError(message);
         }
-      } catch (err: any) {
-        console.error('[VideoPlayer] Initial scrape failed', err);
-        if (isCancelled) return;
-        const message = err?.message || 'Unable to load this title.';
-        setScrapeError(message);
-        Alert.alert('Playback unavailable', message, [
-          {
-            text: 'Go back',
-            onPress: () => router.back(),
-            style: 'destructive',
-          },
-          {
-            text: 'Stay',
-            style: 'cancel',
-          },
-        ]);
-      }
-    };
-    fetchPlaybackFromMetadata();
+      })();
+    });
+
     return () => {
       isCancelled = true;
+      // @ts-ignore - cancel exists at runtime on InteractionManager handle
+      handle?.cancel?.();
     };
   }, [
     prefetchChecked,
@@ -1153,7 +1172,6 @@ const VideoPlayerScreen = () => {
     releaseYear,
     displayTitle,
     imdbId,
-    tmdbEnrichment,
     seasonNumberParam,
     episodeNumberParam,
     seasonTmdbId,
@@ -1161,7 +1179,6 @@ const VideoPlayerScreen = () => {
     seasonTitleParam,
     seasonEpisodeCountParam,
     scrapeInitial,
-    router,
     sourceOrder,
     applyPlaybackResult,
   ]);
@@ -1395,15 +1412,6 @@ const VideoPlayerScreen = () => {
     };
   }, [isHlsSource, playbackSource?.uri, playbackSource?.headers]);
 
-// Base64 encode headers like providers-temp does
-function encodeHeaders(headers: Record<string, string>): string {
-  try {
-    return Buffer.from(JSON.stringify(headers)).toString('base64');
-  } catch {
-    // Fallback if Buffer not available
-    return btoa(JSON.stringify(headers));
-  }
-}
   function normalizeLang(lang?: string) {
   if (!lang) return undefined;
   return lang.toLowerCase().split('-')[0];
@@ -1439,7 +1447,7 @@ useEffect(() => {
       selectedAudioTrack: { type: 'system' },
     }).catch(() => {});
   }
-}, [audioTrackOptions]);
+}, [audioTrackOptions, selectedAudioKey]);
   // lock orientation
   useEffect(() => {
     const setup = async () => {
@@ -1630,7 +1638,7 @@ useEffect(() => {
         console.warn('Failed to update watch history', err);
       }
     },
-    [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
+    [watchHistoryKey, user, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
   );
 
   // Prefer native ABR for HLS (ExoPlayer/AVPlayer).
@@ -1718,8 +1726,6 @@ useEffect(() => {
       }
     }
 
-    const video = videoRef.current;
-
     const pendingRemote = pendingRemotePlaybackRef.current;
     if (pendingRemote) {
       void applyRemotePlayback(pendingRemote);
@@ -1762,8 +1768,6 @@ useEffect(() => {
     // Show buffering overlay only when buffering persists and playback is effectively stalled
     if (bufferingNow && !isSeeking) {
       if (!bufferingOverlayTimeoutRef.current) {
-        const startPos = currentPos;
-        const startTs = Date.now();
         bufferingOverlayTimeoutRef.current = setTimeout(() => {
           // If position hasn't advanced since timeout started (or lastAdvance was before timeout), show overlay
           const now = Date.now();
@@ -1986,6 +1990,8 @@ useEffect(() => {
 
   useEffect(() => {
     if (!isTvDevice) return;
+    // TVEventHandler is not available/typed on all platforms; require avoids hard import issues in non-TV runtimes.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const TVEventHandlerImpl = (require('react-native') as any)?.TVEventHandler;
     if (!TVEventHandlerImpl) return;
 
@@ -2029,7 +2035,7 @@ useEffect(() => {
     const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
     const q = query(messagesRef, orderBy('createdAt', 'asc'));
     const unsub = onSnapshot(q, (snapshot) => {
-      const items: Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }> = [];
+      const items: { id: string; user: string; text: string; createdAt?: any; avatar?: string | null }[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as any;
         items.push({
@@ -2062,7 +2068,17 @@ useEffect(() => {
     lastSurfaceTapRef.current = now;
     setShowControls(true);
     bumpControlsLife();
-  }, [episodeDrawerOpen, showControls, bumpControlsLife]);
+  }, [episodeDrawerOpen, isLocked, isMini, showControls, bumpControlsLife]);
+
+  const handleRetryStream = useCallback(() => {
+    initialScrapeStartedRef.current = false;
+    setScrapeError(null);
+    setPlaybackSource(null);
+    setSelectedQualityId('auto');
+    setQualityOverrideUri(null);
+    setQualityLoadingId(null);
+    setPrefetchChecked(true);
+  }, []);
   const handleSendChat = async () => {
     if (!roomCode || !chatInput.trim() || chatSending) return;
     const text = chatInput.trim();
@@ -2396,7 +2412,10 @@ useEffect(() => {
             {shouldShowMovieFlixLoader ? null : (
               <>
                 <Text style={styles.videoFallbackText}>{scrapeError ?? 'No video stream available.'}</Text>
-                <TouchableOpacity style={styles.videoFallbackButton} onPress={() => router.back()}>
+                <TouchableOpacity style={styles.videoFallbackButton} onPress={handleRetryStream}>
+                  <Text style={styles.videoFallbackButtonText}>Retry</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.videoFallbackButton, { marginTop: 12 }]} onPress={() => router.back()}>
                   <Text style={styles.videoFallbackButtonText}>Go Back</Text>
                 </TouchableOpacity>
               </>
@@ -3426,9 +3445,9 @@ function pickBestVariantUriFromMaster(masterText: string, manifestUrl: string): 
 function parseHlsMediaSegments(
   manifestText: string,
   manifestUrl: string,
-): Array<{ uri: string; duration: number | null }> {
+): { uri: string; duration: number | null }[] {
   const lines = manifestText.split('\n').map((l) => l.trim());
-  const segments: Array<{ uri: string; duration: number | null }> = [];
+  const segments: { uri: string; duration: number | null }[] = [];
   let pendingDuration: number | null = null;
 
   for (const line of lines) {

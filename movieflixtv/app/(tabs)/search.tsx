@@ -1,11 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -17,6 +16,7 @@ import type { Media } from '@/types';
 import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvPosterCard from '../components/TvPosterCard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 import TvVirtualKeyboard from '../components/TvVirtualKeyboard';
 
 export default function SearchTv() {
@@ -30,6 +30,23 @@ export default function SearchTv() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+
+  const listRef = useRef<FlatList<Media> | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastScrollIndexRef = useRef<number | null>(null);
+
+  const GRID_COLUMNS = 4;
+  const CARD_WIDTH = 170;
+  const CARD_HEIGHT = Math.round(CARD_WIDTH * 1.5);
+  const GRID_ROW_GAP = 14;
+  const GRID_ROW_HEIGHT = CARD_HEIGHT + GRID_ROW_GAP;
+  const getGridItemLayout = useCallback(
+    (_: ArrayLike<Media> | null | undefined, index: number) => {
+      const row = Math.floor(index / GRID_COLUMNS);
+      return { length: GRID_ROW_HEIGHT, offset: GRID_ROW_HEIGHT * row, index };
+    },
+    [GRID_ROW_HEIGHT],
+  );
 
   useEffect(() => {
     if (debounceRef.current) {
@@ -107,6 +124,12 @@ export default function SearchTv() {
     };
   }, [query]);
 
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
   const accent = useMemo(
     () => getAccentFromPosterPath(movies[0]?.poster_path || shows[0]?.poster_path) ?? '#e50914',
     [movies, shows],
@@ -169,12 +192,12 @@ export default function SearchTv() {
                 </Text>
               </View>
 
-              <Pressable
+              <TvFocusable
                 onPress={() => setQuery('')}
                 style={({ focused }: any) => [styles.clearBtn, focused ? styles.clearBtnFocused : null]}
               >
                 <Text style={styles.clearText}>Clear</Text>
-              </Pressable>
+              </TvFocusable>
             </View>
 
             <View style={styles.columns}>
@@ -201,15 +224,35 @@ export default function SearchTv() {
                   </View>
                 ) : (
                   <FlatList
+                    ref={(r) => {
+                      listRef.current = r;
+                    }}
                     data={combined}
                     keyExtractor={(it, idx) => `${it.media_type ?? 'm'}:${it.id ?? idx}`}
-                    numColumns={4}
+                    numColumns={GRID_COLUMNS}
                     columnWrapperStyle={styles.gridRow}
                     contentContainerStyle={styles.grid}
-                    renderItem={({ item }) => (
+                    getItemLayout={getGridItemLayout}
+                    initialNumToRender={12}
+                    maxToRenderPerBatch={12}
+                    updateCellsBatchingPeriod={50}
+                    windowSize={5}
+                    removeClippedSubviews
+                    renderItem={({ item, index }) => (
                       <TvPosterCard
                         item={item}
-                        width={170}
+                        width={CARD_WIDTH}
+                        onFocus={() => {
+                          if (lastScrollIndexRef.current === index) return;
+                          lastScrollIndexRef.current = index;
+
+                          if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+                          scrollTimerRef.current = setTimeout(() => {
+                            try {
+                              listRef.current?.scrollToIndex({ index, viewPosition: 0.35, animated: false });
+                            } catch {}
+                          }, 60);
+                        }}
                         onPress={(selected) =>
                           router.push(`/details/${selected.id}?mediaType=${selected.media_type || 'movie'}`)
                         }

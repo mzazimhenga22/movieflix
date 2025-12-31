@@ -67,20 +67,23 @@ const ControlButton = ({
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 16,
+    paddingVertical: 12,
     paddingHorizontal: 12,
   },
   controlButton: {
+    flexGrow: 1,
+    flexBasis: 110,
+    maxWidth: 160,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 16,
     paddingVertical: 12,
     paddingHorizontal: 16,
-    minWidth: 90,
-    marginHorizontal: 6,
+    margin: 6,
   },
   controlLabel: {
     marginTop: 6,

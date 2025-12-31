@@ -4,6 +4,9 @@ import {
   collection,
   addDoc,
   getDocs,
+  query,
+  where,
+  limit,
   doc,
   getDoc,
   setDoc,
@@ -123,6 +126,13 @@ export interface Product {
   category: string;
   categoryKey?: string;
   productType: ProductType;
+
+  // Events & experiences
+  eventKind?: 'theater_room' | 'party_room' | 'in_person';
+  eventStartsAt?: string | null;
+  eventVenue?: string | null;
+  eventRoomCode?: string | null;
+
   promoted?: boolean;
   promotionBid?: number;
   promotionEndsAt?: any;
@@ -232,6 +242,10 @@ export type CreateMarketplaceListingInput = {
   categoryKey: string;
   categoryLabel?: string;
   productType?: ProductType;
+  eventKind?: Product['eventKind'];
+  eventStartsAt?: Product['eventStartsAt'];
+  eventVenue?: Product['eventVenue'];
+  eventRoomCode?: Product['eventRoomCode'];
   mediaUri?: string | null;
   fallbackImageUrl?: string | null;
   seller: MarketplaceSeller;
@@ -262,7 +276,7 @@ export type MarketplaceCartQuote = {
   total: number;
 };
 
-export type MarketplaceOrderStatus = 'pending_payment' | 'paid' | 'cancelled';
+export type MarketplaceOrderStatus = 'pending_payment' | 'pending_verification' | 'paid' | 'cancelled';
 
 export type MarketplaceOrderPayment =
   | {
@@ -276,6 +290,19 @@ export type MarketplaceOrderPayment =
        resultCode?: string | number | null;
        resultDesc?: string | null;
       raw?: any;
+    }
+  | {
+      method: 'mpesa_paybill';
+      provider: string;
+      paybill: string;
+      account: string;
+      receiptCode: string;
+      amount: number;
+      currency?: MarketplaceCurrency;
+      status: 'pending_verification' | 'confirmed' | 'failed';
+      submittedAt?: any;
+      confirmedAt?: any;
+      updatedAt?: any;
     }
   | {
       method: 'manual';
@@ -312,6 +339,7 @@ export type MarketplaceOrder = {
   buyerProfileId?: string | null;
   currency: MarketplaceCurrency;
   items: MarketplaceOrderItem[];
+  sellerIds?: string[];
   subtotal: number;
   platformFee: number;
   total: number;
@@ -320,6 +348,54 @@ export type MarketplaceOrder = {
   wallet?: MarketplaceOrderWalletSummary | null;
   createdAt: any;
   updatedAt: any;
+};
+
+export type MarketplaceTicketStatus = 'active' | 'redeemed' | 'refunded';
+
+export type MarketplaceTicket = {
+  id?: string;
+  ticketId: string;
+  orderDocId: string;
+  orderId: string;
+  buyerId: string;
+  buyerProfileId?: string | null;
+  sellerId: string;
+  productId: string;
+  productName: string;
+  eventKind?: Product['eventKind'];
+  eventStartsAt?: Product['eventStartsAt'];
+  eventVenue?: Product['eventVenue'];
+  eventRoomCode?: Product['eventRoomCode'];
+  status: MarketplaceTicketStatus;
+  createdAt: any;
+  redeemedAt?: any;
+  redeemedBy?: string | null;
+};
+
+/* --------------------------- PROMO CREDITS --------------------------- */
+
+export type PromoCreditsAccount = {
+  userId: string;
+  availableCredits: number;
+  lifetimeIn: number;
+  lifetimeOut: number;
+  createdAt?: any;
+  updatedAt?: any;
+};
+
+const PROMO_CREDITS_ACCOUNTS_COLLECTION = 'promo_credits_accounts';
+
+export const getPromoCreditsAccount = async (userId: string): Promise<PromoCreditsAccount> => {
+  const uid = String(userId ?? '').trim();
+  if (!uid) throw new Error('userId is required');
+  const snap = await getDoc(doc(db, PROMO_CREDITS_ACCOUNTS_COLLECTION, uid));
+  const base: PromoCreditsAccount = {
+    userId: uid,
+    availableCredits: 0,
+    lifetimeIn: 0,
+    lifetimeOut: 0,
+  };
+  return snap.exists() ? ({ ...base, ...(snap.data() as any) } as PromoCreditsAccount) : base;
 };
 
 /* ---------------------------- HELPERS ---------------------------- */
@@ -413,6 +489,12 @@ export const createMarketplaceListing = async (
     category: validated.categoryLabel || validated.categoryKey,
     categoryKey: validated.categoryKey,
     productType: validated.productType ?? ProductType.PHYSICAL,
+
+    eventKind: validated.eventKind,
+    eventStartsAt: validated.eventStartsAt ?? null,
+    eventVenue: validated.eventVenue ?? null,
+    eventRoomCode: validated.eventRoomCode ?? null,
+
     promoted: false,
     createdAt: serverTimestamp(),
   };
@@ -425,6 +507,15 @@ export const createMarketplaceListing = async (
 
 export const getProducts = async (): Promise<Product[]> => {
   const snapshot = await getDocs(collection(db, 'marketplace_products'));
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Product));
+};
+
+export const getProductsBySellerId = async (sellerId: string): Promise<Product[]> => {
+  const normalized = String(sellerId ?? '').trim();
+  if (!normalized) return [];
+
+  const q = query(collection(db, 'marketplace_products'), where('sellerId', '==', normalized));
+  const snapshot = await getDocs(q);
   return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Product));
 };
 
@@ -529,12 +620,17 @@ export const createMarketplaceOrder = async (args: {
     lineTotal: l.lineTotal,
   }));
 
+  const sellerIds = Array.from(
+    new Set(items.map((i) => String(i.sellerId || '').trim()).filter(Boolean))
+  );
+
   const payload: Omit<MarketplaceOrder, 'id'> = {
     orderId,
     buyerId,
     buyerProfileId: args.buyerProfileId ?? null,
     currency: 'KES',
     items,
+    sellerIds,
     subtotal: args.quote.subtotal,
     platformFee: args.quote.platformFee,
     total: args.quote.total,
@@ -556,7 +652,146 @@ export const updateMarketplaceOrder = async (docId: string, updates: Partial<Mar
   } as any);
 };
 
+export const getOrdersForBuyer = async (buyerId: string): Promise<MarketplaceOrder[]> => {
+  const normalized = String(buyerId ?? '').trim();
+  if (!normalized) return [];
+  const q = query(collection(db, ORDERS_COLLECTION), where('buyerId', '==', normalized));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as MarketplaceOrder));
+};
+
+export const getOrdersForSeller = async (sellerId: string): Promise<MarketplaceOrder[]> => {
+  const normalized = String(sellerId ?? '').trim();
+  if (!normalized) return [];
+  const q = query(collection(db, ORDERS_COLLECTION), where('sellerIds', 'array-contains', normalized));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as MarketplaceOrder));
+};
+
+export const getMarketplaceOrderByDocId = async (docId: string): Promise<MarketplaceOrder | null> => {
+  const normalized = String(docId ?? '').trim();
+  if (!normalized) return null;
+  const snap = await getDoc(doc(db, ORDERS_COLLECTION, normalized));
+  return snap.exists() ? ({ id: snap.id, ...snap.data() } as MarketplaceOrder) : null;
+};
+
+const TICKETS_COLLECTION = 'marketplace_tickets';
+
+export const createTicketsForPaidOrder = async (args: {
+  orderDocId: string;
+  orderId: string;
+  buyerId: string;
+  buyerProfileId?: string | null;
+  quote: MarketplaceCartQuote;
+}): Promise<{ ticketIds: string[] }> => {
+  const orderDocId = String(args.orderDocId ?? '').trim();
+  const orderId = String(args.orderId ?? '').trim();
+  const buyerId = String(args.buyerId ?? '').trim();
+  if (!orderDocId || !orderId || !buyerId) throw new Error('Missing ticket payload fields');
+
+  const ticketIds: string[] = [];
+
+  const eventLines = args.quote.lines.filter((l) => l.product.productType === ProductType.EVENT);
+  for (const line of eventLines) {
+    const qty = Math.max(1, Math.min(10, Math.floor(line.quantity)));
+
+    for (let i = 0; i < qty; i += 1) {
+      const ticketId = `MFTK-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`.slice(
+        0,
+        48
+      );
+
+      const payload: Omit<MarketplaceTicket, 'id'> = {
+        ticketId,
+        orderDocId,
+        orderId,
+        buyerId,
+        buyerProfileId: args.buyerProfileId ?? null,
+        sellerId: line.product.sellerId,
+        productId: line.product.id,
+        productName: line.product.name,
+        eventKind: line.product.eventKind,
+        eventStartsAt: line.product.eventStartsAt ?? null,
+        eventVenue: line.product.eventVenue ?? null,
+        eventRoomCode: line.product.eventRoomCode ?? null,
+        status: 'active',
+        createdAt: serverTimestamp(),
+      };
+
+      await addDoc(collection(db, TICKETS_COLLECTION), payload as any);
+      ticketIds.push(ticketId);
+    }
+  }
+
+  return { ticketIds };
+};
+
+export const getTicketsForBuyer = async (buyerId: string): Promise<MarketplaceTicket[]> => {
+  const normalized = String(buyerId ?? '').trim();
+  if (!normalized) return [];
+  const q = query(collection(db, TICKETS_COLLECTION), where('buyerId', '==', normalized));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as MarketplaceTicket));
+};
+
+export const getTicketByTicketId = async (ticketId: string): Promise<MarketplaceTicket | null> => {
+  const normalized = String(ticketId ?? '').trim();
+  if (!normalized) return null;
+
+  const q = query(
+    collection(db, TICKETS_COLLECTION),
+    where('ticketId', '==', normalized),
+    limit(1)
+  );
+  const snapshot = await getDocs(q);
+  const docSnap = snapshot.docs[0];
+  if (!docSnap) return null;
+  return { id: docSnap.id, ...(docSnap.data() as any) } as MarketplaceTicket;
+};
+
+export const redeemTicketByTicketId = async (args: {
+  ticketId: string;
+  redeemerId: string;
+}): Promise<MarketplaceTicket> => {
+  const ticketId = String(args.ticketId ?? '').trim();
+  const redeemerId = String(args.redeemerId ?? '').trim();
+  if (!ticketId) throw new Error('Ticket code is required');
+  if (!redeemerId) throw new Error('Sign in required');
+
+  const ticket = await getTicketByTicketId(ticketId);
+  if (!ticket?.id) throw new Error('Ticket not found');
+  if (ticket.status !== 'active') throw new Error(`Ticket is ${ticket.status}`);
+  if (ticket.sellerId && ticket.sellerId !== redeemerId) throw new Error('This ticket belongs to a different seller');
+
+  await updateDoc(doc(db, TICKETS_COLLECTION, ticket.id), {
+    status: 'redeemed',
+    redeemedAt: serverTimestamp(),
+    redeemedBy: redeemerId,
+  } as any);
+
+  return {
+    ...ticket,
+    status: 'redeemed',
+    redeemedBy: redeemerId,
+  };
+};
+
 /* ------------------------------ PAYMENTS ------------------------------ */
+
+type PaybillMarketplaceSubmitResponse = {
+  ok: true;
+  alreadyPaid: boolean;
+  orderId: string;
+  status?: 'paid' | 'pending_verification' | string;
+  autoConfirmed?: boolean;
+};
+
+type PaybillPromoCreditsSubmitResponse = {
+  ok: true;
+  receiptCode: string;
+  amountKsh: number;
+  credits: number;
+};
 
 type DarajaMarketplaceStkPushResponse = {
   ok: true;
@@ -585,6 +820,57 @@ type DarajaMarketplaceQueryResponse = {
 const darajaFunctionUrl = () => {
   if (!supabaseUrl) throw new Error('Supabase env vars missing');
   return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/daraja`;
+};
+
+const paybillFunctionUrl = () => {
+  if (!supabaseUrl) throw new Error('Supabase env vars missing');
+  return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/paybill`;
+};
+
+export const marketplaceSubmitPaybillReceipt = async (args: {
+  firebaseToken: string;
+  orderDocId: string;
+  receiptCode: string;
+}): Promise<PaybillMarketplaceSubmitResponse> => {
+  const res = await fetch(paybillFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_submit_receipt',
+      orderDocId: args.orderDocId,
+      receiptCode: args.receiptCode,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Payment receipt submission failed');
+  return data as PaybillMarketplaceSubmitResponse;
+};
+
+export const promoCreditsSubmitPaybillReceipt = async (args: {
+  firebaseToken: string;
+  amountKsh: number;
+  receiptCode: string;
+}): Promise<PaybillPromoCreditsSubmitResponse> => {
+  const res = await fetch(paybillFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'promo_credits_submit_receipt',
+      amountKsh: args.amountKsh,
+      receiptCode: args.receiptCode,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Promo credits receipt submission failed');
+  return data as PaybillPromoCreditsSubmitResponse;
 };
 
 export const mpesaMarketplaceStkPush = async (args: {
@@ -635,6 +921,162 @@ export const mpesaMarketplaceQuery = async (args: {
   const data = (await res.json().catch(() => ({}))) as any;
   if (!res.ok) throw new Error(data?.error || 'Payment verification failed');
   return data as DarajaMarketplaceQueryResponse;
+};
+
+type DarajaPromoCreditsStkPushResponse = {
+  ok: true;
+  uid: string;
+  topupDocId: string;
+  phone: string;
+  amount: number;
+  credits: number;
+  merchantRequestId: string | null;
+  checkoutRequestId: string | null;
+  customerMessage: string | null;
+};
+
+type DarajaPromoCreditsQueryResponse = {
+  ok: true;
+  uid: string;
+  topupDocId: string;
+  checkoutRequestId: string;
+  status: 'confirmed' | 'failed';
+  resultCode: string | number | null;
+  resultDesc: string | null;
+  availableCredits?: number | null;
+  raw: any;
+};
+
+export const mpesaPromoCreditsStkPush = async (args: {
+  firebaseToken: string;
+  phone: string;
+  amount: number;
+  accountReference: string;
+  transactionDesc: string;
+}): Promise<DarajaPromoCreditsStkPushResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'promo_credits_stkpush',
+      phone: args.phone,
+      amount: args.amount,
+      accountReference: args.accountReference,
+      transactionDesc: args.transactionDesc,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Credit top up failed');
+  return data as DarajaPromoCreditsStkPushResponse;
+};
+
+export const mpesaPromoCreditsQuery = async (args: {
+  firebaseToken: string;
+  topupDocId: string;
+}): Promise<DarajaPromoCreditsQueryResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'promo_credits_query',
+      topupDocId: args.topupDocId,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Credit top up verification failed');
+  return data as DarajaPromoCreditsQueryResponse;
+};
+
+type MarketplacePromoteCreditsResponse = {
+  ok: true;
+  uid: string;
+  availableCredits: number;
+  totalCredits: number;
+  endsAt: string;
+  transactionId: string;
+};
+
+export const marketplacePromoteWithCredits = async (args: {
+  firebaseToken: string;
+  productIds: string[];
+  placement: PromotionPlacement;
+  durationUnit: 'hours' | 'days';
+  durationValue: number;
+}): Promise<MarketplacePromoteCreditsResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_promote_credits',
+      productIds: args.productIds,
+      placement: args.placement,
+      durationUnit: args.durationUnit,
+      durationValue: args.durationValue,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Unable to start promotion');
+  return data as MarketplacePromoteCreditsResponse;
+};
+
+export const marketplaceExtendPromotionWithCredits = async (args: {
+  firebaseToken: string;
+  productIds: string[];
+  placement: PromotionPlacement;
+  durationUnit: 'hours' | 'days';
+  durationValue: number;
+}): Promise<MarketplacePromoteCreditsResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_extend_promo_credits',
+      productIds: args.productIds,
+      placement: args.placement,
+      durationUnit: args.durationUnit,
+      durationValue: args.durationValue,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Unable to extend promotion');
+  return data as MarketplacePromoteCreditsResponse;
+};
+
+export const marketplaceCancelPromotion = async (args: {
+  firebaseToken: string;
+  productId: string;
+}): Promise<{ ok: true; uid: string; productId: string }> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.firebaseToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'marketplace_cancel_promo',
+      productId: args.productId,
+    }),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(data?.error || 'Unable to cancel promotion');
+  return data as { ok: true; uid: string; productId: string };
 };
 
 /* ------------------------------- REPORTS ------------------------------ */

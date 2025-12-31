@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -58,19 +57,6 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
       const data = (snap.data() as any) ?? {};
       const tier = normalizePlanTier(data?.planTier ?? data?.subscription?.tier);
 
-      if (__DEV__FLAG) {
-        try {
-          const stored = await AsyncStorage.getItem('planTierOverride');
-          if (stored === 'premium' || stored === 'plus' || stored === 'free') {
-            setCurrentPlan(stored);
-            setIsSubscribed(stored !== 'free');
-            return;
-          }
-        } catch {
-          // ignore
-        }
-      }
-
       setCurrentPlan(tier);
       setIsSubscribed(tier !== 'free');
     } catch (err) {
@@ -104,19 +90,6 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
             async (snap) => {
               const data = (snap.data() as any) ?? {};
               const nextTier = normalizePlanTier(data?.planTier ?? data?.subscription?.tier);
-
-              if (__DEV__FLAG) {
-                try {
-                  const stored = await AsyncStorage.getItem('planTierOverride');
-                  if (stored === 'premium' || stored === 'plus' || stored === 'free') {
-                    setCurrentPlan(stored);
-                    setIsSubscribed(stored !== 'free');
-                    return;
-                  }
-                } catch {
-                  // ignore
-                }
-              }
 
               setCurrentPlan(nextTier);
               setIsSubscribed(nextTier !== 'free');

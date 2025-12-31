@@ -31,6 +31,10 @@ export default function SellScreen() {
     description: '',
     price: '',
     category: 'merch',
+    eventKind: 'theater_room' as const,
+    eventStartsAt: '',
+    eventVenue: '',
+    eventRoomCode: '',
   });
   const [mediaAsset, setMediaAsset] = useState<{ uri: string; name?: string | null } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -229,6 +233,16 @@ export default function SellScreen() {
 
     setSubmitting(true);
     try {
+      const categoryKey = formData.category;
+      const productType =
+        categoryKey === 'events'
+          ? ProductType.EVENT
+          : categoryKey === 'digital'
+            ? ProductType.DIGITAL
+            : categoryKey === 'services'
+              ? ProductType.SERVICE
+              : ProductType.PHYSICAL;
+
       await createMarketplaceListing({
         name: formData.title.trim(),
         description: formData.description.trim(),
@@ -236,7 +250,14 @@ export default function SellScreen() {
         categoryKey: formData.category,
         categoryLabel: categoryLabels[formData.category] || formData.category,
         mediaUri: mediaAsset.uri,
-        productType: ProductType.PHYSICAL,
+        productType,
+        eventKind: productType === ProductType.EVENT ? formData.eventKind : undefined,
+        eventStartsAt:
+          productType === ProductType.EVENT ? (formData.eventStartsAt.trim() ? formData.eventStartsAt.trim() : null) : undefined,
+        eventVenue:
+          productType === ProductType.EVENT ? (formData.eventVenue.trim() ? formData.eventVenue.trim() : null) : undefined,
+        eventRoomCode:
+          productType === ProductType.EVENT ? (formData.eventRoomCode.trim() ? formData.eventRoomCode.trim() : null) : undefined,
         seller: {
           id: user.uid,
           name: activeProfile?.name || user.displayName || 'Creator',
@@ -247,7 +268,16 @@ export default function SellScreen() {
       });
 
       Alert.alert('Success', 'Product listed successfully!');
-      setFormData({ title: '', description: '', price: '', category: 'merch' });
+      setFormData({
+        title: '',
+        description: '',
+        price: '',
+        category: 'merch',
+        eventKind: 'theater_room',
+        eventStartsAt: '',
+        eventVenue: '',
+        eventRoomCode: '',
+      });
       setMediaAsset(null);
       router.replace('/marketplace');
     } catch (err: any) {
@@ -381,6 +411,66 @@ export default function SellScreen() {
                   </TouchableOpacity>
                 ))}
               </View>
+
+              {formData.category === 'events' && (
+                <>
+                  <Text style={styles.label}>Experience type</Text>
+                  <View style={styles.pickerContainer}>
+                    {([
+                      { key: 'theater_room', label: 'Theater Room' },
+                      { key: 'party_room', label: 'Party Room' },
+                      { key: 'in_person', label: 'In-person' },
+                    ] as const).map((opt) => (
+                      <TouchableOpacity
+                        key={opt.key}
+                        style={[
+                          styles.categoryOption,
+                          formData.eventKind === opt.key && styles.categoryOptionActive,
+                        ]}
+                        onPress={() => setFormData((prev) => ({ ...prev, eventKind: opt.key }))}
+                      >
+                        <Text
+                          style={[
+                            styles.categoryText,
+                            formData.eventKind === opt.key && styles.categoryTextActive,
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <Text style={styles.label}>Starts at (optional)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g., 2026-01-10 19:30"
+                    placeholderTextColor="rgba(255,255,255,0.5)"
+                    value={formData.eventStartsAt}
+                    onChangeText={(text) => setFormData((prev) => ({ ...prev, eventStartsAt: text }))}
+                  />
+
+                  <Text style={styles.label}>Venue / Room name (optional)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g., MovieFlix Theater Room A"
+                    placeholderTextColor="rgba(255,255,255,0.5)"
+                    value={formData.eventVenue}
+                    onChangeText={(text) => setFormData((prev) => ({ ...prev, eventVenue: text }))}
+                  />
+
+                  <Text style={styles.label}>Room code (optional)</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g., THEATER-123"
+                    placeholderTextColor="rgba(255,255,255,0.5)"
+                    value={formData.eventRoomCode}
+                    onChangeText={(text) => setFormData((prev) => ({ ...prev, eventRoomCode: text }))}
+                    autoCapitalize="characters"
+                  />
+                </>
+              )}
+
               <Text style={styles.label}>Product Media *</Text>
               <View style={styles.mediaCard}>
                 {mediaAsset ? (

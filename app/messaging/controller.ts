@@ -48,10 +48,13 @@ import {
 
 import { authPromise, firestore } from '../../constants/firebase'
 
-const rawBroadcastAdmins = (process.env.EXPO_PUBLIC_BROADCAST_ADMINS || '').split(',').map((id) => id.trim()).filter(Boolean)
+const rawBroadcastAdmins = String(process.env.EXPO_PUBLIC_BROADCAST_ADMINS || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean)
 
-const bakedBroadcastAdminEmails = ['vivescharris8@gmail.com']
-const rawBroadcastAdminEmails = (process.env.EXPO_PUBLIC_BROADCAST_ADMIN_EMAILS || '')
+const bakedBroadcastAdminEmails: string[] = []
+const rawBroadcastAdminEmails = String(process.env.EXPO_PUBLIC_BROADCAST_ADMIN_EMAILS || '')
   .split(',')
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean)
@@ -230,7 +233,7 @@ export const signUpWithEmail = async (
   try {
     const auth = await getAuth()
     const userCredential = await createUserWithEmailAndPassword(auth, email, password)
-    console.log('[messagesController] signUpWithEmail success', userCredential.user.uid)
+    if (__DEV__) console.log('[messagesController] signUpWithEmail success', userCredential.user.uid)
     return userCredential.user as User
   } catch (error: any) {
     console.error('[messagesController] signUpWithEmail error:', error?.message ?? error)
@@ -245,7 +248,7 @@ export const signInWithEmail = async (
   try {
     const auth = await getAuth()
     const userCredential = await signInWithEmailAndPassword(auth, email, password)
-    console.log('[messagesController] signInWithEmail success', userCredential.user.uid)
+    if (__DEV__) console.log('[messagesController] signInWithEmail success', userCredential.user.uid)
     return userCredential.user as User
   } catch (error: any) {
     console.error('[messagesController] signInWithEmail error:', error?.message ?? error)
@@ -422,12 +425,15 @@ export const onConversationUpdate = (
   return () => unsubscribe()
 }
 
-export const onConversationsUpdate = (callback: (conversations: Conversation[]) => void): UnsubscribeFn => {
+export const onConversationsUpdate = (
+  callback: (conversations: Conversation[]) => void,
+  options?: { uid?: string | null },
+): UnsubscribeFn => {
   let unsub: UnsubscribeFn = () => {}
 
   void authPromise
     .then((auth) => {
-      const uid = auth.currentUser?.uid
+      const uid = (options?.uid ? String(options.uid) : null) ?? auth.currentUser?.uid
       if (!uid) {
         callback([])
         return
@@ -747,11 +753,11 @@ const recomputeConversationLastMessage = async (
     rounds += 1
 
     // ✅ Explicit type fixes TS7022
-const qLatest: Query<DocumentData> = cursor
-  ? query(messagesColRef, orderBy('createdAt', 'desc'), startAfter(cursor), limit(50))
-  : query(messagesColRef, orderBy('createdAt', 'desc'), limit(50))
+    const qLatest: Query<DocumentData> = cursor
+      ? query(messagesColRef, orderBy('createdAt', 'desc'), startAfter(cursor), limit(50))
+      : query(messagesColRef, orderBy('createdAt', 'desc'), limit(50))
 
-const snapshot: QuerySnapshot<DocumentData> = await getDocs(qLatest)
+    const snapshot: QuerySnapshot<DocumentData> = await getDocs(qLatest)
 
     if (snapshot.empty) break
 

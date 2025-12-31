@@ -8,8 +8,10 @@ import {
   Text,
   FlatList,
   Image,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,6 +30,7 @@ interface MediaPickerProps {
 
 export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps) {
   const insets = useSafeAreaInsets();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [recentMedia, setRecentMedia] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -35,6 +38,13 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   useEffect(() => {
     requestPermissions();
   }, []);
+
+  useEffect(() => {
+    // Best-effort camera background for the picker; fall back gracefully.
+    if (Platform.OS === 'web') return;
+    if (cameraPermission?.granted) return;
+    void requestCameraPermission();
+  }, [cameraPermission?.granted, requestCameraPermission]);
 
   const requestPermissions = async () => {
     try {
@@ -121,10 +131,20 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   if (hasPermission === null) {
     return (
       <View style={styles.container}>
+        {cameraPermission?.granted ? (
+          <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
+        ) : (
+          <LinearGradient
+            colors={['#e50914', '#150a13', '#05060f']}
+            start={[0, 0]}
+            end={[1, 1]}
+            style={StyleSheet.absoluteFillObject}
+          />
+        )}
         <LinearGradient
-          colors={['#e50914', '#150a13', '#05060f']}
-          start={[0, 0]}
-          end={[1, 1]}
+          colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.8, y: 1 }}
           style={StyleSheet.absoluteFillObject}
         />
         <ActivityIndicator size="large" color="#fff" />
@@ -136,10 +156,20 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   if (hasPermission === false) {
     return (
       <View style={styles.container}>
+        {cameraPermission?.granted ? (
+          <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
+        ) : (
+          <LinearGradient
+            colors={['#e50914', '#150a13', '#05060f']}
+            start={[0, 0]}
+            end={[1, 1]}
+            style={StyleSheet.absoluteFillObject}
+          />
+        )}
         <LinearGradient
-          colors={['#e50914', '#150a13', '#05060f']}
-          start={[0, 0]}
-          end={[1, 1]}
+          colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.8, y: 1 }}
           style={StyleSheet.absoluteFillObject}
         />
         <Ionicons name="images" size={64} color="#666" />
@@ -171,10 +201,20 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
 
   return (
     <View style={styles.container}>
+      {cameraPermission?.granted ? (
+        <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
+      ) : (
+        <LinearGradient
+          colors={['#e50914', '#150a13', '#05060f']}
+          start={[0, 0]}
+          end={[1, 1]}
+          style={StyleSheet.absoluteFillObject}
+        />
+      )}
       <LinearGradient
-        colors={['#e50914', '#150a13', '#05060f']}
-        start={[0, 0]}
-        end={[1, 1]}
+        colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
+        start={{ x: 0.2, y: 0 }}
+        end={{ x: 0.8, y: 1 }}
         style={StyleSheet.absoluteFillObject}
       />
       <LinearGradient

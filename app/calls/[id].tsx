@@ -3,12 +3,13 @@
   joinCallAsParticipant,
   listenToCall,
   markParticipantLeft,
+  markCallRinging,
   sendAnswer,
   sendIceCandidate,
   sendOffer,
   updateParticipantMuteState,
 } from '@/lib/calls/callService';
-import type { CallSession } from '@/lib/calls/types';
+import type { CallSession, CallStatus } from '@/lib/calls/types';
 import {
   addIceCandidate,
   closeConnection,
@@ -29,14 +30,14 @@ import type { User } from 'firebase/auth';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  SafeAreaView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { RTCIceCandidate, RTCSessionDescription, RTCView } from 'react-native-webrtc';
-import { onAuthChange } from '../messaging/controller';
+import { getLastSeen, onAuthChange, onUserPresence } from '../messaging/controller';
 import CallControls from './components/CallControls';
 
 const CallScreen = () => {
@@ -54,9 +55,14 @@ const CallScreen = () => {
   const [isDialing, setIsDialing] = useState(true);
   const [localStream, setLocalStream] = useState<any>(null);
   const [remoteStream, setRemoteStream] = useState<any>(null);
+  const [webrtcReady, setWebrtcReady] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [otherPresence, setOtherPresence] = useState<{ state: 'online' | 'offline'; last_changed: number | null } | null>(null);
+  const [otherLastSeen, setOtherLastSeen] = useState<Date | null>(null);
 
   const peerConnectionRef = useRef<any>(null);
   const hasJoinedRef = useRef(false);
+  const offlineTimeoutAtRef = useRef<number | null>(null);
   const processedOffersRef = useRef<Set<string>>(new Set());
   const processedAnswersRef = useRef<Set<string>>(new Set());
   const processedIceRef = useRef<Set<string>>(new Set());
@@ -72,72 +78,120 @@ const CallScreen = () => {
     if (!id) return;
     const unsubscribe = listenToCall(String(id), async (session) => {
       setCall(session);
-
-      // Handle signaling updates.
-      // Signaling is stored under the sender's userId (signaling.<senderId>.*),
-      // so each client must read from other participants' buckets.
-      if (session?.signaling && peerConnectionRef.current && user?.uid) {
-        const myUid = user.uid;
-        const isInitiator = session.initiatorId === myUid;
-        const signalingEntries = Object.entries(session.signaling as Record<string, any>);
-
-        for (const [senderId, senderSignaling] of signalingEntries) {
-          if (!senderId || senderId === myUid || !senderSignaling) continue;
-
-          // Non-initiators only accept the initiator's offer.
-          if (!isInitiator && senderId === session.initiatorId && senderSignaling.offer) {
-            const offerKey = `${session.id}:${senderId}:offer`;
-            if (!processedOffersRef.current.has(offerKey)) {
-              processedOffersRef.current.add(offerKey);
-              try {
-                const offer = new RTCSessionDescription(senderSignaling.offer);
-                await setRemoteDescription(offer);
-                const answer = await createAnswer();
-                await sendAnswer(session.id, myUid, answer);
-              } catch (err) {
-                console.warn('Failed to handle offer', err);
-              }
-            }
-          }
-
-          // Initiator accepts answers from any other participant.
-          if (isInitiator && senderSignaling.answer) {
-            const answerKey = `${session.id}:${senderId}:answer`;
-            if (!processedAnswersRef.current.has(answerKey)) {
-              processedAnswersRef.current.add(answerKey);
-              try {
-                const answer = new RTCSessionDescription(senderSignaling.answer);
-                await setRemoteDescription(answer);
-              } catch (err) {
-                console.warn('Failed to handle answer', err);
-              }
-            }
-          }
-
-          // ICE candidates from other participants (dedupe because snapshots replay the full array).
-          const candidates = Array.isArray(senderSignaling.iceCandidates)
-            ? senderSignaling.iceCandidates
-            : [];
-          for (const candidate of candidates) {
-            const key = `${session.id}:${senderId}:${candidate?.candidate ?? ''}:${candidate?.sdpMid ?? ''}:${candidate?.sdpMLineIndex ?? ''}`;
-            if (processedIceRef.current.has(key)) continue;
-            processedIceRef.current.add(key);
-            try {
-              const iceCandidate = new RTCIceCandidate({
-                candidate: candidate.candidate || '',
-                sdpMid: candidate.sdpMid || null,
-                sdpMLineIndex: candidate.sdpMLineIndex || null,
-              });
-              await addIceCandidate(iceCandidate);
-            } catch (err) {
-              console.warn('Failed to add ICE candidate', err);
-            }
-          }
-        }
-      }
     });
     return () => unsubscribe();
   }, [id, user?.uid]);
+
+  const otherUserId = (() => {
+    if (!call?.members?.length || !user?.uid) return null;
+    if (call.isGroup) return null;
+    const others = call.members.filter((m) => m !== user.uid);
+    return others.length === 1 ? others[0] : null;
+  })();
+
+  useEffect(() => {
+    if (!otherUserId) {
+      setOtherPresence(null);
+      setOtherLastSeen(null);
+      return;
+    }
+
+    const unsub = onUserPresence(otherUserId, (status) => {
+      setOtherPresence(status);
+      if (status.state === 'online') {
+        setOtherLastSeen(null);
+        offlineTimeoutAtRef.current = null;
+      } else if (status.last_changed) {
+        setOtherLastSeen(new Date(status.last_changed));
+      } else {
+        void getLastSeen(otherUserId).then(setOtherLastSeen).catch(() => setOtherLastSeen(null));
+      }
+    });
+
+    return () => {
+      try {
+        unsub();
+      } catch {}
+    };
+  }, [otherUserId]);
+
+  useEffect(() => {
+    // If the callee is online and we haven't started ringing yet, flip the call state to ringing.
+    if (!call?.id || !user?.uid) return;
+    if (call.isGroup) return;
+    if (call.initiatorId !== user.uid) return;
+    if (call.status !== 'initiated') return;
+    if (otherPresence?.state !== 'online') return;
+
+    void markCallRinging(call.id).catch(() => {});
+  }, [call?.id, call?.initiatorId, call?.isGroup, call?.status, otherPresence?.state, user?.uid]);
+
+  useEffect(() => {
+    // Handle signaling updates.
+    // Signaling is stored under the sender's userId (signaling.<senderId>.*),
+    // so each client must read from other participants' buckets.
+    if (!call?.signaling || !webrtcReady || !peerConnectionRef.current || !user?.uid) return;
+
+    const myUid = user.uid;
+    const isInitiator = call.initiatorId === myUid;
+    const signalingEntries = Object.entries(call.signaling as Record<string, any>);
+
+    (async () => {
+      for (const [senderId, senderSignaling] of signalingEntries) {
+        if (!senderId || senderId === myUid || !senderSignaling) continue;
+
+        // Non-initiators only accept the initiator's offer.
+        if (!isInitiator && senderId === call.initiatorId && senderSignaling.offer) {
+          const offerKey = `${call.id}:${senderId}:offer`;
+          if (!processedOffersRef.current.has(offerKey)) {
+            processedOffersRef.current.add(offerKey);
+            try {
+              const offer = new RTCSessionDescription(senderSignaling.offer);
+              await setRemoteDescription(offer);
+              const answer = await createAnswer();
+              await sendAnswer(call.id, myUid, answer);
+            } catch (err) {
+              console.warn('Failed to handle offer', err);
+            }
+          }
+        }
+
+        // Initiator accepts answers from any other participant.
+        if (isInitiator && senderSignaling.answer) {
+          const answerKey = `${call.id}:${senderId}:answer`;
+          if (!processedAnswersRef.current.has(answerKey)) {
+            processedAnswersRef.current.add(answerKey);
+            try {
+              const answer = new RTCSessionDescription(senderSignaling.answer);
+              await setRemoteDescription(answer);
+            } catch (err) {
+              console.warn('Failed to handle answer', err);
+            }
+          }
+        }
+
+        // ICE candidates from other participants (dedupe because snapshots replay the full array).
+        const candidates = Array.isArray(senderSignaling.iceCandidates)
+          ? senderSignaling.iceCandidates
+          : [];
+        for (const candidate of candidates) {
+          const key = `${call.id}:${senderId}:${candidate?.candidate ?? ''}:${candidate?.sdpMid ?? ''}:${candidate?.sdpMLineIndex ?? ''}`;
+          if (processedIceRef.current.has(key)) continue;
+          processedIceRef.current.add(key);
+          try {
+            const iceCandidate = new RTCIceCandidate({
+              candidate: candidate?.candidate ?? '',
+              sdpMid: candidate?.sdpMid ?? null,
+              sdpMLineIndex: candidate?.sdpMLineIndex ?? null,
+            });
+            await addIceCandidate(iceCandidate);
+          } catch (err) {
+            console.warn('Failed to add ICE candidate', err);
+          }
+        }
+      }
+    })();
+  }, [call?.id, call?.initiatorId, call?.signaling, user?.uid, webrtcReady]);
 
   useEffect(() => {
     if (!call) return;
@@ -145,17 +199,20 @@ const CallScreen = () => {
   }, [call?.type]);
 
   const cleanupConnection = useCallback(
-    async (endForAll = false) => {
+    async (endForAll = false, reason?: CallStatus) => {
       closeConnection();
       setLocalStream(null);
       setRemoteStream(null);
+      setWebrtcReady(false);
+      setIsConnected(false);
       peerConnectionRef.current = null;
       if (call?.id && user?.uid) {
         try {
           await markParticipantLeft(call.id, user.uid);
-          const shouldEnd = endForAll || !call?.isGroup;
+          // For group calls we use first-to-answer semantics (acceptedBy). Once claimed, treat it like a 1:1 call.
+          const shouldEnd = endForAll || !call?.isGroup || Boolean(call?.acceptedBy);
           if (shouldEnd) {
-            await endCall(call.id, user.uid);
+            await endCall(call.id, user.uid, reason ?? 'ended');
           }
         } catch (err) {
           console.warn('Failed to update call state', err);
@@ -198,12 +255,29 @@ const CallScreen = () => {
 
         setRemoteStreamCallback((stream: any) => {
           setRemoteStream(stream);
+          setIsConnected(true);
         });
 
         // Initialize WebRTC
         const { peerConnection, localStream: stream } = await initializeWebRTC(call.type);
         peerConnectionRef.current = peerConnection;
         setLocalStream(stream);
+        setWebrtcReady(true);
+
+        // In some cases the media stream callback can lag behind the actual connection.
+        // Track peer connection state so the UI can leave the "Waiting" screen once connected.
+        try {
+          (peerConnection as any).onconnectionstatechange = () => {
+            const state = (peerConnection as any).connectionState;
+            if (state === 'connected') setIsConnected(true);
+          };
+          (peerConnection as any).oniceconnectionstatechange = () => {
+            const iceState = (peerConnection as any).iceConnectionState;
+            if (iceState === 'connected' || iceState === 'completed') setIsConnected(true);
+          };
+        } catch {
+          // ignore
+        }
 
         // Handle signaling based on role
         const isInitiator = call.initiatorId === user.uid;
@@ -222,7 +296,11 @@ const CallScreen = () => {
       } catch (err) {
         if (!cancelled) {
           console.warn('Failed to join WebRTC call', err);
-          setError('Unable to join the call');
+          const message = err instanceof Error ? err.message : 'Unable to join the call';
+          setError(message);
+          if (message === 'Call already answered' || message === 'Call has ended') {
+            router.back();
+          }
         }
       } finally {
         if (!cancelled) setJoining(false);
@@ -239,16 +317,51 @@ const CallScreen = () => {
   useEffect(() => {
     return () => {
       hasJoinedRef.current = false;
+      setWebrtcReady(false);
       cleanupConnection(false);
     };
   }, [cleanupConnection]);
 
   useEffect(() => {
-    if (call?.status === 'ended' && !isHangingUp) {
+    if ((call?.status === 'ended' || call?.status === 'declined' || call?.status === 'missed') && !isHangingUp) {
       cleanupConnection(false);
       router.back();
     }
   }, [call?.status, isHangingUp, router, cleanupConnection]);
+
+  useEffect(() => {
+    // Offline calls should auto-end after ~1 minute (WhatsApp-like).
+    if (!call?.id || !user?.uid) return;
+    if (call.isGroup) return;
+    if (call.initiatorId !== user.uid) return;
+    if (isConnected || call.status === 'active') return;
+
+    // Only enforce the timeout when the callee is offline.
+    if (otherPresence?.state !== 'offline') return;
+
+    const fromCall =
+      (call as any)?.ringTimeoutAt && typeof (call as any).ringTimeoutAt?.toMillis === 'function'
+        ? (call as any).ringTimeoutAt.toMillis()
+        : null;
+
+    if (offlineTimeoutAtRef.current == null) {
+      offlineTimeoutAtRef.current = Date.now() + 60_000;
+    }
+
+    const timeoutMillis = typeof fromCall === 'number' ? fromCall : offlineTimeoutAtRef.current;
+
+    const remaining = timeoutMillis - Date.now();
+    if (remaining <= 0) {
+      void cleanupConnection(true, 'missed').then(() => router.back());
+      return;
+    }
+
+    const t = setTimeout(() => {
+      void cleanupConnection(true, 'missed').then(() => router.back());
+    }, remaining);
+
+    return () => clearTimeout(t);
+  }, [call?.id, call?.initiatorId, call?.isGroup, call?.ringTimeoutAt, call?.status, cleanupConnection, isConnected, otherPresence?.state, router, user?.uid]);
 
   const toggleAudio = useCallback(async () => {
     const next = !mutedAudio;
@@ -288,6 +401,14 @@ const CallScreen = () => {
     );
   }
 
+  const subtitle = (() => {
+    if (isConnected || call.status === 'active') return 'Connected';
+    if (call.isGroup) return call.status === 'ringing' ? 'Ringing…' : 'Calling group…';
+    if (otherPresence?.state === 'online') return 'Ringing…';
+    if (otherLastSeen) return `Calling… (last seen ${otherLastSeen.toLocaleString()})`;
+    return 'Calling…';
+  })();
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -296,16 +417,18 @@ const CallScreen = () => {
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
       />
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.topBar}>
           <TouchableOpacity onPress={handleHangUp} style={styles.backButton}>
             <Ionicons name="chevron-back" size={22} color="#fff" />
             <Text style={styles.backLabel}>Leave</Text>
           </TouchableOpacity>
           <View style={styles.callInfo}>
-            <Text style={styles.callTitle}>{call.conversationName ?? 'Call'}</Text>
-            <Text style={styles.callSubtitle}>
-              {remoteStream ? 'Connected' : 'Calling…'}
+            <Text style={styles.callTitle} numberOfLines={1} ellipsizeMode="tail">
+              {call.conversationName ?? 'Call'}
+            </Text>
+            <Text style={styles.callSubtitle} numberOfLines={1} ellipsizeMode="tail">
+              {subtitle}
             </Text>
           </View>
         </View>
@@ -317,7 +440,9 @@ const CallScreen = () => {
                 <View style={styles.waitingCard}>
                   <BlurView intensity={60} tint="dark" style={styles.waitingBlur}>
                     <Ionicons name="videocam-outline" size={32} color="#fff" />
-                    <Text style={styles.waitingText}>Waiting for others to join…</Text>
+                    <Text style={styles.waitingText}>
+                      {subtitle}
+                    </Text>
                   </BlurView>
                 </View>
               ) : (
@@ -343,22 +468,24 @@ const CallScreen = () => {
               <Ionicons name="call" size={36} color="#fff" />
               <Text style={styles.voiceTitle}>{call.conversationName ?? 'Voice call'}</Text>
               <Text style={styles.voiceSubtitle}>
-                {remoteStream ? 'Connected' : isJoining || isDialing ? 'Dialing… (you can hang up)' : 'Waiting…'}
+                {subtitle}
               </Text>
             </View>
           )}
         </View>
 
-        <CallControls
-          isAudioMuted={mutedAudio}
-          isVideoMuted={mutedVideo}
-          speakerOn={speakerOn}
-          callType={call.type}
-          onToggleAudio={toggleAudio}
-          onToggleVideo={toggleVideo}
-          onToggleSpeaker={toggleSpeaker}
-          onEnd={handleHangUp}
-        />
+        <View style={styles.controlsWrap}>
+          <CallControls
+            isAudioMuted={mutedAudio}
+            isVideoMuted={mutedVideo}
+            speakerOn={speakerOn}
+            callType={call.type}
+            onToggleAudio={toggleAudio}
+            onToggleVideo={toggleVideo}
+            onToggleSpeaker={toggleSpeaker}
+            onEnd={handleHangUp}
+          />
+        </View>
 
         {error && (
           <View style={styles.errorBanner}>
@@ -396,16 +523,24 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   callInfo: {
+    flex: 1,
+    minWidth: 0,
     alignItems: 'flex-end',
   },
   callTitle: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
+    flexShrink: 1,
   },
   callSubtitle: {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 12,
+    flexShrink: 1,
+  },
+  controlsWrap: {
+    paddingHorizontal: 8,
+    paddingBottom: 12,
   },
   body: {
     flex: 1,

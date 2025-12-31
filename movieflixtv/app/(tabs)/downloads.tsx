@@ -4,7 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { getAccentFromPosterPath } from '@/constants/theme';
 import {
@@ -19,6 +19,7 @@ import type { DownloadItem } from '@/types';
 import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvPosterCard from '../components/TvPosterCard';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 
 const formatBytes = (bytes?: number) => {
   if (!bytes) return '0 B';
@@ -105,7 +106,21 @@ export default function DownloadsTv() {
             {
               text: 'Remove',
               style: 'destructive',
-              onPress: () => setDownloads((prev) => prev.filter((d) => d.id !== item.id)),
+              onPress: () => {
+                void (async () => {
+                  try {
+                    await cancelDownload(item.id);
+                  } catch {}
+                  try {
+                    await FileSystem.deleteAsync(item.containerPath ?? item.localUri, { idempotent: true });
+                  } catch {}
+                  try {
+                    await removeDownloadRecord(item.id);
+                  } catch {}
+                  setDownloads((prev) => prev.filter((d) => d.id !== item.id));
+                  void loadDownloads();
+                })();
+              },
             },
           ],
         );
@@ -116,7 +131,7 @@ export default function DownloadsTv() {
       Alert.alert('Download unavailable', 'Unable to verify this download.');
       return false;
     }
-  }, []);
+  }, [loadDownloads]);
 
   const play = useCallback(
     async (item: DownloadItem) => {
@@ -225,7 +240,7 @@ export default function DownloadsTv() {
                           {item.title}
                         </Text>
                         <View style={styles.activeControls}>
-                          <Pressable
+                          <TvFocusable
                             onPress={() => {
                               if (paused) {
                                 setActiveDownloads((prev) =>
@@ -242,8 +257,8 @@ export default function DownloadsTv() {
                             style={({ focused }: any) => [styles.ctrlBtn, focused ? styles.ctrlBtnFocused : null]}
                           >
                             <Ionicons name={paused ? 'play' : 'pause'} size={16} color="#fff" />
-                          </Pressable>
-                          <Pressable
+                          </TvFocusable>
+                          <TvFocusable
                             onPress={() => {
                               setActiveDownloads((prev) => prev.filter((e) => e.sessionId !== item.sessionId));
                               void cancelDownload(item.sessionId);
@@ -255,7 +270,7 @@ export default function DownloadsTv() {
                             ]}
                           >
                             <Ionicons name="close" size={16} color="#fff" />
-                          </Pressable>
+                          </TvFocusable>
                         </View>
                       </View>
 
@@ -313,14 +328,14 @@ export default function DownloadsTv() {
                       </Text>
                       <Text style={styles.itemMeta}>{formatBytes(item.bytesWritten)}</Text>
                       <View style={styles.itemActions}>
-                        <Pressable
+                        <TvFocusable
                           onPress={() => void play(item)}
                           style={({ focused }: any) => [styles.actionBtn, focused ? styles.actionBtnFocused : null]}
                         >
                           <Ionicons name="play" size={16} color="#fff" />
                           <Text style={styles.actionText}>Play</Text>
-                        </Pressable>
-                        <Pressable
+                        </TvFocusable>
+                        <TvFocusable
                           onPress={() => confirmDelete(item)}
                           style={({ focused }: any) => [
                             styles.actionBtn,
@@ -330,7 +345,7 @@ export default function DownloadsTv() {
                         >
                           <Ionicons name="trash" size={16} color="#fff" />
                           <Text style={styles.actionText}>Remove</Text>
-                        </Pressable>
+                        </TvFocusable>
                       </View>
                     </View>
                   </View>

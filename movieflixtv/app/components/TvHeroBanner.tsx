@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Video, ResizeMode } from 'expo-av';
+import * as Device from 'expo-device';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, ImageBackground, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, ImageBackground, StyleSheet, Text, View } from 'react-native';
 
 import type { Media } from '@/types';
+import { TvFocusable } from './TvSpatialNavigation';
 
 type Props = {
   profileName?: string | null;
@@ -55,11 +57,21 @@ export default function TvHeroBanner({
   const score = typeof item?.vote_average === 'number' ? Math.round(item.vote_average * 10) : null;
   const typeLabel = (item?.media_type ?? 'movie') === 'tv' ? 'TV' : 'Movie';
 
+  const lowEndDevice = useMemo(() => {
+    const mem = typeof Device.totalMemory === 'number' ? Device.totalMemory : null;
+    const year = typeof Device.deviceYearClass === 'number' ? Device.deviceYearClass : null;
+    if (typeof mem === 'number' && mem > 0 && mem < 3_000_000_000) return true;
+    if (typeof year === 'number' && year > 0 && year < 2017) return true;
+    return false;
+  }, []);
+
+  const effectiveTrailerUrl = lowEndDevice ? null : trailerUrl;
+
   const imageUri = useMemo(() => {
     if (!image) return null;
-    // Use TMDB original size for the hero backdrop (highest quality).
-    return `https://image.tmdb.org/t/p/original${image}`;
-  }, [image]);
+    const size = height >= 520 ? 'w1280' : 'w780';
+    return `https://image.tmdb.org/t/p/${size}${image}`;
+  }, [height, image]);
 
   useEffect(() => {
     slideAnim.setValue(220);
@@ -85,7 +97,7 @@ export default function TvHeroBanner({
   }, [item?.id, parallax, slideAnim, videoOpacity]);
 
   useEffect(() => {
-    if (!trailerUrl || videoFailed) return;
+    if (!effectiveTrailerUrl || videoFailed) return;
     if (!videoReady) return;
     if (!playEnabled) return;
     Animated.timing(videoOpacity, {
@@ -94,21 +106,21 @@ export default function TvHeroBanner({
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start();
-  }, [playEnabled, trailerUrl, videoFailed, videoOpacity, videoReady]);
+  }, [playEnabled, effectiveTrailerUrl, videoFailed, videoOpacity, videoReady]);
 
   useEffect(() => {
-    if (!trailerUrl) return;
+    if (!effectiveTrailerUrl) return;
     if (isActive) return;
     void videoRef.current?.pauseAsync().catch(() => {});
-  }, [isActive, trailerUrl]);
+  }, [isActive, effectiveTrailerUrl]);
 
   useEffect(() => {
-    if (!trailerUrl || videoFailed) return;
+    if (!effectiveTrailerUrl || videoFailed) return;
     if (!isActive) return;
     if (playEnabled) return;
     const t = setTimeout(() => setPlayEnabled(true), autoPlayDelayMs);
     return () => clearTimeout(t);
-  }, [autoPlayDelayMs, isActive, playEnabled, trailerUrl, videoFailed]);
+  }, [autoPlayDelayMs, isActive, playEnabled, effectiveTrailerUrl, videoFailed]);
 
   const content = (
     <View style={styles.inner}>
@@ -148,7 +160,7 @@ export default function TvHeroBanner({
               <Text style={styles.metaText}>{score}%</Text>
             </View>
           ) : null}
-          {trailerUrl ? (
+          {effectiveTrailerUrl ? (
             <View style={[styles.metaPill, styles.metaPillSecondary]}>
               <Ionicons name="film-outline" size={14} color="#fff" />
               <Text style={styles.metaText}>Trailer</Text>
@@ -171,29 +183,29 @@ export default function TvHeroBanner({
         )}
 
         <View style={[styles.actions, isPanel ? styles.actionsPanel : null]}>
-          <Pressable
+          <TvFocusable
             onPress={onPressPrimary}
             style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}
           >
             <Ionicons name="play" size={18} color="#000" />
             <Text style={styles.primaryText}>{primaryLabel}</Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={onPressSecondary}
             style={({ focused }: any) => [styles.secondaryBtn, focused ? styles.btnFocused : null]}
           >
             <Ionicons name="information-circle-outline" size={18} color="#fff" />
             <Text style={styles.secondaryText}>{secondaryLabel}</Text>
-          </Pressable>
+          </TvFocusable>
 
-          <Pressable
+          <TvFocusable
             onPress={onPressTertiary}
             style={({ focused }: any) => [styles.tertiaryBtn, focused ? styles.btnFocused : null]}
           >
             <Ionicons name="search" size={18} color="#fff" />
             <Text style={styles.secondaryText}>{tertiaryLabel}</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
       </View>
     </View>
@@ -230,15 +242,15 @@ export default function TvHeroBanner({
           />
         )}
 
-        {trailerUrl && !videoFailed ? (
+        {effectiveTrailerUrl && !videoFailed ? (
           <Animated.View style={[StyleSheet.absoluteFill, { opacity: videoOpacity }]}>
             <Video
               // Remount per hero item so previous playback doesn't leak
-              key={`${item?.id ?? 'none'}:${trailerUrl}`}
+              key={`${item?.id ?? 'none'}:${effectiveTrailerUrl}`}
               ref={(v) => {
                 videoRef.current = v;
               }}
-              source={{ uri: trailerUrl }}
+              source={{ uri: effectiveTrailerUrl }}
               style={StyleSheet.absoluteFill}
               resizeMode={ResizeMode.COVER}
               shouldPlay={Boolean(isActive && playEnabled)}

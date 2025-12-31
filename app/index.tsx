@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { buildProfileScopedKey, getLastAuthUid, getStoredActiveProfile } from '../lib/profileStorage';
 import { onAuthChange } from './messaging/controller';
+import { useUnreadMessagesBadgeCount } from '../hooks/use-unread-messages';
 
 type RouteContext = 'authed' | 'guest' | 'offline-downloads' | 'offline-profiles';
 
@@ -46,6 +47,7 @@ export default function SplashScreen() {
   const [statusMessage, setStatusMessage] = useState('Calibrating your cinema...');
   const [routePlan, setRoutePlan] = useState<RoutePlan | null>(null);
   const [offlineSummary, setOfflineSummary] = useState<string | null>(null);
+  const unreadBadgeCount = useUnreadMessagesBadgeCount();
 
   const featureCards = useMemo(
     () => [
@@ -327,18 +329,27 @@ export default function SplashScreen() {
             <View style={styles.headerIcons}>
               {iconDeck.map((item) => (
                 <View key={item.key} style={styles.iconBtn}>
-                  <LinearGradient
-                    colors={['#e50914', '#b20710']}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.iconBg}
-                  >
-                    {item.key === 'profile' ? (
-                      <FontAwesome name="user-circle" size={item.size} color="#ffffff" />
-                    ) : (
-                      <Ionicons name={item.icon as any} size={item.size} color="#ffffff" />
-                    )}
-                  </LinearGradient>
+                  <View style={styles.iconBadgeWrap}>
+                    <LinearGradient
+                      colors={['#e50914', '#b20710']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      {item.key === 'profile' ? (
+                        <FontAwesome name="user-circle" size={item.size} color="#ffffff" />
+                      ) : (
+                        <Ionicons name={item.icon as any} size={item.size} color="#ffffff" />
+                      )}
+                    </LinearGradient>
+                    {item.key === 'chat' && unreadBadgeCount > 0 ? (
+                      <View style={styles.unreadBadge}>
+                        <Text style={styles.unreadBadgeText}>
+                          {unreadBadgeCount > 99 ? '99+' : String(unreadBadgeCount)}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
                 </View>
               ))}
             </View>
@@ -577,6 +588,30 @@ const styles = StyleSheet.create({
   iconBg: {
     padding: 10,
     borderRadius: 14,
+  },
+  iconBadgeWrap: {
+    position: 'relative',
+  },
+  unreadBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 5,
+    borderRadius: 999,
+    backgroundColor: '#e50914',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '900',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
   headerMetaRow: {
     flexDirection: 'row',

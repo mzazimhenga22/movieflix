@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -18,29 +17,34 @@ export default function TvSplash() {
     let timeout: ReturnType<typeof setTimeout> | null = null;
 
     const go = async () => {
-      const auth = await authPromise;
-      unsub = onAuthStateChanged(auth, async (user) => {
-        if (didNavigate.current) return;
+      try {
+        const auth = await authPromise;
+        unsub = onAuthStateChanged(auth, async (user) => {
+          if (didNavigate.current) return;
 
-        if (!user) {
-          setStatus('Sign in required');
+          if (!user) {
+            setStatus('Sign in required');
+            timeout = setTimeout(() => {
+              if (didNavigate.current) return;
+              didNavigate.current = true;
+              router.replace('/(auth)/login');
+            }, 900);
+            return;
+          }
+
+          setStatus('Preparing profiles…');
+          // Always go through profile selection on TV so older devices don't resume into a heavy home screen.
+          const target = '/select-profile';
           timeout = setTimeout(() => {
             if (didNavigate.current) return;
             didNavigate.current = true;
-            router.replace('/(auth)/login');
-          }, 900);
-          return;
-        }
-
-        setStatus('Preparing profiles…');
-        const stored = await AsyncStorage.getItem('activeProfile').catch(() => null);
-        const target = stored ? '/(tabs)/movies' : '/select-profile';
-        timeout = setTimeout(() => {
-          if (didNavigate.current) return;
-          didNavigate.current = true;
-          router.replace(target);
-        }, 650);
-      });
+            router.replace(target);
+          }, 650);
+        });
+      } catch (err) {
+        console.warn('[TvSplash] auth init failed', err);
+        setStatus('Startup failed (missing Firebase config)');
+      }
     };
 
     void go();

@@ -810,6 +810,37 @@ const ProfileScreen: React.FC = () => {
                 <Text style={styles.actionText}>Settings</Text>
               </TouchableOpacity>
 
+              <TouchableOpacity
+                style={[styles.actionItem, !userIdToDisplay && { opacity: 0.6 }]}
+                onPress={() => {
+                  if (!userIdToDisplay) return;
+                  router.push({ pathname: '/marketplace/seller/[id]', params: { id: String(userIdToDisplay) } } as any);
+                }}
+                disabled={!userIdToDisplay}
+              >
+                <Ionicons name="storefront-outline" size={24} color="white" />
+                <Text style={styles.actionText}>{isOwnProfile ? 'My catalog' : 'View catalog'}</Text>
+              </TouchableOpacity>
+
+              {isOwnProfile && (
+                <>
+                  <TouchableOpacity style={styles.actionItem} onPress={() => router.push('/marketplace/orders')}>
+                    <Ionicons name="receipt-outline" size={24} color="white" />
+                    <Text style={styles.actionText}>My orders</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.actionItem} onPress={() => router.push('/marketplace/tickets')}>
+                    <Ionicons name="ticket-outline" size={24} color="white" />
+                    <Text style={styles.actionText}>My tickets</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity style={styles.actionItem} onPress={() => router.push('/marketplace/scan-ticket')}>
+                    <Ionicons name="qr-code-outline" size={24} color="white" />
+                    <Text style={styles.actionText}>Scan ticket (seller)</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
               <TouchableOpacity style={styles.actionItem}>
                 <Ionicons name="help-circle-outline" size={24} color="white" />
                 <Text style={styles.actionText}>Help & Support</Text>

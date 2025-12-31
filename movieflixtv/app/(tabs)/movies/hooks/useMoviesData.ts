@@ -160,6 +160,10 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
   const fetchWithKids = useCallback(
     async (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
       const response = await fetch(buildKidsUrl(input, type));
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`TMDB request failed (${response.status}): ${text || response.statusText}`);
+      }
       return response.json();
     },
     [buildKidsUrl],
@@ -409,6 +413,10 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       if (!silent) setLoading(true);
       setError(null);
       try {
+        if (!API_KEY) {
+          throw new Error('Missing TMDB API key. Set EXPO_PUBLIC_TMDB_API_KEY in movieflixtv/.env.local');
+        }
+
         const [
           netflixMovies,
           amazonMovies,
@@ -470,7 +478,7 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
         }
       } catch (error) {
         console.error('Error fetching data:', error);
-        setError('Failed to load content. Please try again later.');
+        setError(error instanceof Error ? error.message : 'Failed to load content. Please try again later.');
         if (!silent) setLoading(false);
       }
     },
@@ -487,18 +495,25 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
   useEffect(() => {
     if (!profileReady) return;
     let cancelled = false;
+    let interactionTask: { cancel?: () => void } | null = null;
 
     const init = async () => {
       const result = await loadFromCache();
       if (cancelled) return;
 
       if (!result.applied) {
-        await fetchData();
+        interactionTask = InteractionManager.runAfterInteractions(() => {
+          if (cancelled) return;
+          void fetchData();
+        });
         return;
       }
 
       if (!result.fresh) {
-        fetchData({ silent: true });
+        interactionTask = InteractionManager.runAfterInteractions(() => {
+          if (cancelled) return;
+          void fetchData({ silent: true });
+        });
       }
     };
 
@@ -506,6 +521,11 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
 
     return () => {
       cancelled = true;
+      try {
+        interactionTask?.cancel?.();
+      } catch {
+        // ignore
+      }
     };
   }, [fetchData, loadFromCache, profileReady]);
 

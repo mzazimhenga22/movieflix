@@ -1,7 +1,8 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useMemo } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { TvFocusable } from './components/TvSpatialNavigation';
 
 const FEATURE_LABELS: Record<string, string> = {
   marketplace: 'Marketplace',
@@ -35,9 +36,13 @@ export default function ContinueOnPhoneScreen() {
         </Text>
         <Text style={styles.hint}>Open the phone app to finish, then come back to TV.</Text>
         <View style={styles.actions}>
-          <Pressable onPress={() => router.back()} style={styles.primaryBtn}>
+          <TvFocusable
+            onPress={() => router.back()}
+            tvPreferredFocus
+            style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}
+          >
             <Text style={styles.primaryText}>Go back</Text>
-          </Pressable>
+          </TvFocusable>
         </View>
       </View>
     </View>
@@ -65,5 +70,6 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: '#e50914',
   },
+  btnFocused: { transform: [{ scale: 1.03 }], borderWidth: 1, borderColor: '#fff' },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '800' },
 });

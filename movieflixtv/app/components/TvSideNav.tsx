@@ -4,9 +4,11 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Animated, Pressable, StyleSheet, View } from 'react-native';
+import { Animated, StyleSheet, View } from 'react-native';
 
 import { useTvAccent } from './TvAccentContext';
+import { TvFocusable } from './TvSpatialNavigation';
+import { useUnreadMessagesBadgeCount } from '../../hooks/use-unread-messages';
 
 export const TV_SIDE_NAV_WIDTH = 120;
 
@@ -99,6 +101,7 @@ function withAlpha(color: string, alpha: number) {
 export default function TvSideNav({ pathname, children }: Props) {
   const router = useRouter();
   const { accentColor } = useTvAccent();
+  const unreadBadgeCount = useUnreadMessagesBadgeCount();
   const accent = accentColor || '#e50914';
   const iconGradientActive: [string, string] = ['rgba(255,255,255,0.95)', accent];
   const iconGradientDefault: [string, string] = ['rgba(255,255,255,0.95)', 'rgba(255,255,255,0.55)'];
@@ -173,7 +176,7 @@ export default function TvSideNav({ pathname, children }: Props) {
                   const isSelected = pathname.startsWith(tab.href);
                   const icon = iconForKey(tab.key, isSelected);
                   return (
-                    <Pressable
+                    <TvFocusable
                       key={tab.key}
                       onPress={() => router.push(tab.href as any)}
                       onFocus={() => {
@@ -215,7 +218,7 @@ export default function TvSideNav({ pathname, children }: Props) {
                           />
                         </View>
                       )}
-                    </Pressable>
+                    </TvFocusable>
                   );
                 })}
               </View>
@@ -224,7 +227,7 @@ export default function TvSideNav({ pathname, children }: Props) {
 
               <View style={styles.section}>
                 {extras.map((it) => (
-                  <Pressable
+                  <TvFocusable
                     key={it.key}
                     onPress={() => router.push(`/continue-on-phone?feature=${it.key}`)}
                     onFocus={() => {
@@ -255,9 +258,16 @@ export default function TvSideNav({ pathname, children }: Props) {
                           />
                         ) : null}
                         <GradientIonicon name={it.icon} size={22} colors={iconGradientDefault} />
+                        {it.key === 'messaging' && unreadBadgeCount > 0 ? (
+                          <View style={styles.unreadBadge}>
+                            <Animated.Text style={styles.unreadBadgeText}>
+                              {unreadBadgeCount > 99 ? '99+' : String(unreadBadgeCount)}
+                            </Animated.Text>
+                          </View>
+                        ) : null}
                       </View>
                     )}
-                  </Pressable>
+                  </TvFocusable>
                 ))}
               </View>
             </BlurView>
@@ -341,6 +351,27 @@ const styles = StyleSheet.create({
   },
   iconItemInnerActive: {
     borderColor: 'rgba(255,255,255,0.22)',
+  },
+  unreadBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    minWidth: 20,
+    height: 20,
+    paddingHorizontal: 6,
+    borderRadius: 999,
+    backgroundColor: '#e50914',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '900',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
   iconMask: {
     width: '100%',

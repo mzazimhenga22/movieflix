@@ -1,30 +1,34 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import { Video, ResizeMode } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Device from 'expo-device';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   Alert,
   Image,
-  Pressable,
+  InteractionManager,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 
-import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '@/constants/api';
-import { getAccentFromPosterPath } from '@/constants/theme';
-import { enqueueDownload } from '@/lib/downloadManager';
-import { getProfileScopedKey } from '@/lib/profileStorage';
-import { buildScrapeDebugTag, buildSourceOrder } from '@/lib/videoPlaybackShared';
-import { usePStream } from '@/src/pstream/usePStream';
-import type { ScrapeMedia } from '@/providers-temp/lib/index.js';
-import type { DownloadItem, Media } from '@/types';
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../constants/api';
+import { getAccentFromPosterPath } from '../../constants/theme';
+import { enqueueDownload } from '../../lib/downloadManager';
+import { getProfileScopedKey } from '../../lib/profileStorage';
+import { buildScrapeDebugTag, buildSourceOrder } from '../../lib/videoPlaybackShared';
+import { scrapeImdbTrailer } from '../../src/providers/scrapeImdbTrailer';
+import { usePStream } from '../../src/pstream/usePStream';
+import type { ScrapeMedia } from '../../providers-temp/lib/index.js';
+import type { DownloadItem, Media } from '../../types';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvRail from '../components/TvRail';
+import { TvFocusable } from '../components/TvSpatialNavigation';
 
 type DetailsState = {
   media: Media;
@@ -81,6 +85,18 @@ export default function TvDetailsScreen() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const [downloadsKey, setDownloadsKey] = useState<string>('downloads');
   const [downloading, setDownloading] = useState(false);
+
+  const lowEndDevice = useMemo(() => {
+    const mem = typeof Device.totalMemory === 'number' ? Device.totalMemory : null;
+    const year = typeof Device.deviceYearClass === 'number' ? Device.deviceYearClass : null;
+    if (typeof mem === 'number' && mem > 0 && mem < 3_000_000_000) return true;
+    if (typeof year === 'number' && year > 0 && year < 2017) return true;
+    return false;
+  }, []);
+
+  const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
+  const [trailerLoading, setTrailerLoading] = useState(false);
+  const [trailerFocused, setTrailerFocused] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -246,6 +262,68 @@ export default function TvDetailsScreen() {
       cancelled = true;
     };
   }, [id, mediaType]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let interactionHandle: { cancel?: () => void } | null = null;
+    const imdb = state?.imdbId ?? state?.media?.imdb_id ?? null;
+    if (!imdb) {
+      setTrailerUrl(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setTrailerLoading(true);
+
+    const cacheKey = `tv:trailerUrl:${imdb}`;
+    void (async () => {
+      try {
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (!cancelled && cached) {
+          setTrailerUrl(cached);
+          setTrailerLoading(false);
+          return;
+        }
+
+        interactionHandle = InteractionManager.runAfterInteractions(() => {
+          void (async () => {
+            try {
+              const res = await scrapeImdbTrailer({ imdb_id: imdb });
+              const url = res?.url ? String(res.url) : null;
+              if (cancelled) return;
+              setTrailerUrl(url);
+              if (url) {
+                try {
+                  await AsyncStorage.setItem(cacheKey, url);
+                } catch {
+                  // ignore
+                }
+              }
+            } catch {
+              if (!cancelled) setTrailerUrl(null);
+            } finally {
+              if (!cancelled) setTrailerLoading(false);
+            }
+          })();
+        });
+      } catch {
+        if (!cancelled) {
+          setTrailerUrl(null);
+          setTrailerLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      try {
+        interactionHandle?.cancel?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [state?.imdbId, state?.media?.imdb_id]);
 
   useEffect(() => {
     let alive = true;
@@ -531,10 +609,9 @@ export default function TvDetailsScreen() {
         />
         <Text style={styles.errorTitle}>Couldn’t load</Text>
         <Text style={styles.errorText}>{error ?? 'Unknown error'}</Text>
-        <Pressable onPress={() => router.back()} style={styles.secondaryBtn}
-        >
+        <TvFocusable onPress={() => router.back()} style={styles.secondaryBtn}>
           <Text style={styles.secondaryText}>Go back</Text>
-        </Pressable>
+        </TvFocusable>
       </View>
     );
   }
@@ -558,6 +635,22 @@ export default function TvDetailsScreen() {
   const selectedEpisodes =
     selectedSeasonNumber != null ? episodesBySeason[selectedSeasonNumber] ?? [] : [];
 
+  const playTrailer = () => {
+    if (!trailerUrl) return;
+    router.push({
+      pathname: '/video-player',
+      params: {
+        title: `${title} • Trailer`,
+        videoUrl: trailerUrl,
+        streamType: 'file',
+        mediaType,
+        tmdbId: state?.media?.id ? String(state.media.id) : undefined,
+        ...(state?.media?.poster_path ? { posterPath: state.media.poster_path } : {}),
+        ...(state?.media?.backdrop_path ? { backdropPath: state.media.backdrop_path } : {}),
+      },
+    });
+  };
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -571,12 +664,12 @@ export default function TvDetailsScreen() {
         <TvGlassPanel accent={accent} style={styles.panel}>
           <View style={styles.panelInner}>
             <View style={styles.topBar}>
-              <Pressable
+              <TvFocusable
                 onPress={() => router.back()}
                 style={({ focused }: any) => [styles.iconBtn, focused ? styles.btnFocused : null]}
               >
                 <Ionicons name="arrow-back" size={18} color="#fff" />
-              </Pressable>
+              </TvFocusable>
 
               <View style={styles.titleStack}>
                 <Text style={styles.screenTitle} numberOfLines={1}>
@@ -588,13 +681,13 @@ export default function TvDetailsScreen() {
               </View>
 
               <View style={styles.topActions}>
-                <Pressable
+                <TvFocusable
                   onPress={() => void toggleMyList()}
                   style={({ focused }: any) => [styles.iconBtn, focused ? styles.btnFocused : null]}
                 >
                   <Ionicons name={inMyList ? 'checkmark' : 'add'} size={18} color="#fff" />
-                </Pressable>
-                <Pressable
+                </TvFocusable>
+                <TvFocusable
                   onPress={() => (existingDownload ? playOffline() : void startDownload())}
                   disabled={downloading || scraping}
                   style={({ focused }: any) => [
@@ -608,7 +701,7 @@ export default function TvDetailsScreen() {
                   ) : (
                     <Ionicons name={existingDownload ? 'download' : 'cloud-download'} size={18} color="#fff" />
                   )}
-                </Pressable>
+                </TvFocusable>
               </View>
             </View>
 
@@ -645,11 +738,11 @@ export default function TvDetailsScreen() {
                   </View>
 
                   <View style={styles.ctaRow}>
-                    <Pressable onPress={play} style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}>
+                    <TvFocusable onPress={play} style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}>
                       <Ionicons name="play" size={18} color="#000" />
                       <Text style={styles.primaryText}>Play</Text>
-                    </Pressable>
-                    <Pressable
+                    </TvFocusable>
+                    <TvFocusable
                       onPress={() => (existingDownload ? playOffline() : void startDownload())}
                       disabled={downloading || scraping}
                       style={({ focused }: any) => [
@@ -660,11 +753,11 @@ export default function TvDetailsScreen() {
                     >
                       <Ionicons name={existingDownload ? 'download' : 'cloud-download'} size={18} color="#fff" />
                       <Text style={styles.secondaryText}>{existingDownload ? 'Offline' : 'Download'}</Text>
-                    </Pressable>
-                    <Pressable onPress={() => void toggleMyList()} style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}>
+                    </TvFocusable>
+                    <TvFocusable onPress={() => void toggleMyList()} style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}>
                       <Ionicons name={inMyList ? 'checkmark' : 'add'} size={18} color="#fff" />
                       <Text style={styles.secondaryText}>{inMyList ? 'My List' : 'Add'}</Text>
-                    </Pressable>
+                    </TvFocusable>
                   </View>
                 </View>
 
@@ -689,6 +782,54 @@ export default function TvDetailsScreen() {
                       ))}
                     </View>
                   ) : null}
+
+                  <View style={styles.trailerSection}>
+                    <Text style={styles.sectionTitle}>Trailer</Text>
+                    {trailerLoading ? (
+                      <View style={styles.trailerLoadingRow}>
+                        <ActivityIndicator color="#fff" />
+                        <Text style={styles.trailerHint}>Loading trailer…</Text>
+                      </View>
+                    ) : trailerUrl ? (
+                      <TvFocusable
+                        onPress={playTrailer}
+                        onFocus={() => setTrailerFocused(true)}
+                        onBlur={() => setTrailerFocused(false)}
+                        style={({ focused }: any) => [styles.trailerCard, focused ? styles.trailerCardFocused : null]}
+                      >
+                        {trailerFocused && !lowEndDevice ? (
+                          <Video
+                            source={{ uri: trailerUrl }}
+                            style={styles.trailerMedia}
+                            resizeMode={ResizeMode.COVER}
+                            shouldPlay
+                            isLooping
+                            isMuted
+                            useNativeControls={false}
+                          />
+                        ) : heroUri ? (
+                          <Image source={{ uri: heroUri }} style={styles.trailerMedia} />
+                        ) : (
+                          <View style={[styles.trailerMedia, styles.heroFallback]} />
+                        )}
+                        <LinearGradient
+                          pointerEvents="none"
+                          colors={['rgba(0,0,0,0.0)', 'rgba(0,0,0,0.78)']}
+                          start={{ x: 0.5, y: 0 }}
+                          end={{ x: 0.5, y: 1 }}
+                          style={styles.trailerFade}
+                        />
+                        <View style={styles.trailerMeta}>
+                          <View style={styles.trailerPlayPill}>
+                            <Ionicons name="play" size={14} color="#fff" />
+                            <Text style={styles.trailerPlayText}>Watch trailer</Text>
+                          </View>
+                        </View>
+                      </TvFocusable>
+                    ) : (
+                      <Text style={styles.trailerHint}>Trailer unavailable.</Text>
+                    )}
+                  </View>
 
                   <View style={styles.quickGrid}>
                     <View style={styles.quickCard}>
@@ -718,7 +859,7 @@ export default function TvDetailsScreen() {
                           {seasons.map((s) => {
                             const selected = s.season_number === selectedSeasonNumber;
                             return (
-                              <Pressable
+                              <TvFocusable
                                 key={s.id}
                                 onPress={() => setSelectedSeasonNumber(s.season_number)}
                                 style={({ focused }: any) => [
@@ -730,7 +871,7 @@ export default function TvDetailsScreen() {
                                 <Text style={styles.seasonChipText} numberOfLines={1}>
                                   {s.name}
                                 </Text>
-                              </Pressable>
+                              </TvFocusable>
                             );
                           })}
                         </ScrollView>
@@ -754,7 +895,7 @@ export default function TvDetailsScreen() {
                             const stillUri = ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : heroUri;
                             const badge = `E${String(ep.episode_number).padStart(2, '0')}`;
                             return (
-                              <Pressable
+                              <TvFocusable
                                 onPress={() => playEpisode(ep)}
                                 style={({ focused }: any) => [
                                   styles.episodeCard,
@@ -782,7 +923,7 @@ export default function TvDetailsScreen() {
                                     {selectedSeasonMeta?.name ?? `Season ${selectedSeasonNumber ?? ''}`}
                                   </Text>
                                 </View>
-                              </Pressable>
+                              </TvFocusable>
                             );
                           }}
                         />
@@ -888,6 +1029,36 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.08)',
   },
   genreText: { color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: '800' },
+
+  trailerSection: { marginTop: 18 },
+  trailerLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6 },
+  trailerHint: { color: 'rgba(255,255,255,0.72)', fontSize: 14, fontWeight: '800', marginTop: 6 },
+  trailerCard: {
+    width: '100%',
+    height: 170,
+    borderRadius: 22,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  trailerCardFocused: { transform: [{ scale: 1.02 }], borderColor: '#fff' },
+  trailerMedia: { ...StyleSheet.absoluteFillObject, width: undefined, height: undefined },
+  trailerFade: { ...StyleSheet.absoluteFillObject },
+  trailerMeta: { position: 'absolute', left: 12, right: 12, bottom: 12 },
+  trailerPlayPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  trailerPlayText: { color: '#fff', fontSize: 13, fontWeight: '900' },
 
   quickGrid: { flexDirection: 'row', gap: 12, marginTop: 16 },
   quickCard: {

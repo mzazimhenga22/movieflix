@@ -8,14 +8,18 @@ import {
   Alert,
   FlatList,
   Image,
+  PixelRatio,
   Platform,
   RefreshControl,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
@@ -23,7 +27,6 @@ import { API_BASE_URL, API_KEY } from '../../constants/api';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types';
 import { useAccent } from '../components/AccentContext';
-import BottomNav from '../components/social-feed/BottomNav';
 import FeedCard from '../components/social-feed/FeedCard';
 import FeedCardPlaceholder from '../components/social-feed/FeedCardPlaceholder';
 import { ReviewItem, useSocialReactions } from '../components/social-feed/hooks';
@@ -32,11 +35,13 @@ import StoriesRow from '../components/social-feed/StoriesRow';
 import FeedTabs from '../components/social-feed/Tabs';
 import { getProducts, isProductPromoted, type Product as MarketplaceProduct } from '../marketplace/api';
 import { useActiveProfile } from '../../hooks/use-active-profile';
+import { useUnreadMessagesBadgeCount } from '../../hooks/use-unread-messages';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
 import RecommendedView from '../components/social-feed/RecommendedView';
 import MovieMatchView from '../components/social-feed/MovieMatchView';
 import { listenToLiveStreams } from '@/lib/live/liveService';
 import type { LiveStream } from '@/lib/live/types';
+import { putNavPayload } from '@/lib/navPayloadCache';
 
 import NativeAdCard from '../../components/ads/NativeAdCard';
 import { injectAdsWithPattern } from '../../lib/ads/sequence';
@@ -74,6 +79,12 @@ const SocialFeed = () => {
   const router = useRouter();
   const { accentColor } = useAccent();
   const { currentPlan } = useSubscription();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
+  const listBottomPadding = 110 + insets.bottom;
+  const headerIconSize = isCompactLayout ? 20 : 22;
   const {
     reviews,
     refreshReviews,
@@ -86,7 +97,6 @@ const SocialFeed = () => {
     deleteReview,
   } = useSocialReactions();
 
-  const scrollY = useRef(new Animated.Value(0)).current;
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<
     'Feed' | 'Recommended' | 'Live' | 'Movie Match'
@@ -100,6 +110,7 @@ const SocialFeed = () => {
   const [promotedProducts, setPromotedProducts] = useState<MarketplaceProduct[]>([]);
   const activeProfile = useActiveProfile();
   const activeProfileName = activeProfile?.name ?? 'watcher';
+  const unreadBadgeCount = useUnreadMessagesBadgeCount();
   const [adMessagingBusy, setAdMessagingBusy] = useState(false);
   const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -112,7 +123,7 @@ const SocialFeed = () => {
         end={{ x: 1, y: 1 }}
         style={styles.headerGlow}
       />
-      <View style={styles.headerBar}>
+      <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
         <View style={styles.titleRow}>
           <View style={styles.accentDot} />
           <View>
@@ -122,7 +133,11 @@ const SocialFeed = () => {
             <Text style={styles.headerGreeting} numberOfLines={1} ellipsizeMode="tail">
               Welcome, {activeProfileName}
             </Text>
-            <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
+            <Text
+              style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+            >
               {activeTab === 'Feed'
                 ? 'Social Feed'
                 : activeTab === 'Recommended'
@@ -134,17 +149,31 @@ const SocialFeed = () => {
           </View>
         </View>
 
-        <View style={styles.headerIcons}>
+        <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
           <Link href="/messaging" asChild>
             <TouchableOpacity style={styles.iconBtn}>
-              <LinearGradient
-                colors={['#e50914', '#b20710']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.iconBg}
-              >
-                <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-              </LinearGradient>
+              <View style={styles.iconBadgeWrap}>
+                <LinearGradient
+                  colors={['#e50914', '#b20710']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                >
+                  <Ionicons
+                    name="chatbubble-outline"
+                    size={headerIconSize}
+                    color="#ffffff"
+                    style={styles.iconMargin}
+                  />
+                </LinearGradient>
+                {unreadBadgeCount > 0 ? (
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadBadgeText}>
+                      {unreadBadgeCount > 99 ? '99+' : String(unreadBadgeCount)}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
             </TouchableOpacity>
           </Link>
           <Link href="/search" asChild>
@@ -153,9 +182,9 @@ const SocialFeed = () => {
                 colors={['#e50914', '#b20710']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
-                style={styles.iconBg}
+                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
               >
-                <Ionicons name="search" size={22} color="#ffffff" style={styles.iconMargin} />
+                <Ionicons name="search" size={headerIconSize} color="#ffffff" style={styles.iconMargin} />
               </LinearGradient>
             </TouchableOpacity>
           </Link>
@@ -166,9 +195,9 @@ const SocialFeed = () => {
                 colors={['#e50914', '#b20710']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
-                style={styles.iconBg}
+                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
               >
-                <FontAwesome name="user-circle" size={24} color="#ffffff" />
+                <FontAwesome name="user-circle" size={isCompactLayout ? 22 : 24} color="#ffffff" />
               </LinearGradient>
             </TouchableOpacity>
           </Link>
@@ -317,7 +346,8 @@ const SocialFeed = () => {
         docId: (item as any).docId ?? null,
         videoUrl: item.videoUrl ?? null,
         avatar: (item as any).avatar ?? null,
-        user: (item as any).user ?? null,
+        userId: (item as any).userId ?? null,
+        username: (item as any).user ?? null,
         likes: (item as any).likes ?? 0,
         commentsCount: (item as any).commentsCount ?? 0,
         likerAvatars: [],
@@ -331,11 +361,11 @@ const SocialFeed = () => {
         Alert.alert('No reels', 'No video posts are available right now.');
         return;
       }
-      const list = JSON.stringify(reelsQueue);
+      const queueKey = putNavPayload('feedReels', reelsQueue);
       router.push({
         pathname: '/reels/feed',
         params: {
-          list,
+          queueKey,
           id: startId ?? reelsQueue[0].id,
           title: 'Reels',
         },
@@ -366,7 +396,8 @@ const SocialFeed = () => {
         id: 'reels',
         title: 'Movie Reels',
         movies: movieReels,
-        onItemPress: () => {},
+        onItemPress: (m) =>
+          router.push(`/details/${m.id}?mediaType=${m.media_type || 'movie'}`),
       });
     }
 
@@ -473,7 +504,12 @@ const SocialFeed = () => {
           ))}
         </View>
 
-        <View style={styles.filterRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.filterRowWrap}
+          contentContainerStyle={styles.filterRow}
+        >
           {['All', 'TopRated', 'New', 'ForYou'].map((key) => {
             const labelMap: Record<string, string> = {
               All: 'All',
@@ -494,7 +530,7 @@ const SocialFeed = () => {
               </TouchableOpacity>
             );
           })}
-        </View>
+        </ScrollView>
 
         <StoriesRow showAddStory={currentPlan !== 'free'} />
 
@@ -551,7 +587,7 @@ const SocialFeed = () => {
           ) : activeTab === 'Movie Match' ? (
             <MovieMatchView />
           ) : activeTab === 'Live' ? (
-            <View style={{ flex: 1, paddingHorizontal: 12, paddingBottom: 160 }}>
+            <View style={{ flex: 1, paddingHorizontal: 12, paddingBottom: listBottomPadding }}>
             <View style={styles.liveHeaderRow}>
               <Text style={styles.liveTitle}>Live now</Text>
               <TouchableOpacity
@@ -679,7 +715,7 @@ const SocialFeed = () => {
               }
               contentContainerStyle={{
                 paddingTop: 0,
-                paddingBottom: 160,
+                paddingBottom: listBottomPadding,
                 paddingHorizontal: 10,
               }}
               showsVerticalScrollIndicator={false}
@@ -689,15 +725,13 @@ const SocialFeed = () => {
 
         {currentPlan !== 'free' && (
           <TouchableOpacity
-            style={[styles.fab, { backgroundColor: accentColor }]}
+            style={[styles.fab, { backgroundColor: accentColor, bottom: insets.bottom + 96 }]}
             onPress={() => router.push('/social-feed/go-live')}
           >
             <Ionicons name="add" size={28} color="#fff" />
           </TouchableOpacity>
         )}
       </ScreenWrapper>
-
-      <BottomNav />
     </View>
   );
 };
@@ -723,7 +757,9 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => (
     <Image source={{ uri: product.imageUrl }} style={styles.promoImage} />
     <View style={styles.promoCopy}>
       <Text style={styles.promoBadge}>Sponsored</Text>
-      <Text style={styles.promoTitle}>{product.name}</Text>
+      <Text style={styles.promoTitle} numberOfLines={2} ellipsizeMode="tail">
+        {product.name}
+      </Text>
       <Text numberOfLines={2} style={styles.promoDescription}>
         {product.description}
       </Text>
@@ -739,9 +775,17 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => (
               </Text>
             </View>
           )}
-          <Text style={styles.promoSellerName}>{product.sellerName || 'Marketplace seller'}</Text>
+          <Text style={styles.promoSellerName} numberOfLines={1} ellipsizeMode="tail">
+            {product.sellerName || 'Marketplace seller'}
+          </Text>
         </View>
-        <TouchableOpacity style={styles.promoChatBtn} onPress={onMessage}>
+        <TouchableOpacity
+          style={styles.promoChatBtn}
+          onPress={(e) => {
+            e?.stopPropagation?.();
+            onMessage();
+          }}
+        >
           <Ionicons name="chatbubble-outline" size={16} color="#fff" />
           <Text style={styles.promoChatText}>Chat</Text>
         </TouchableOpacity>
@@ -797,6 +841,8 @@ const styles = StyleSheet.create({
   modeSwitcher: {
     flexDirection: 'row',
     gap: 8,
+    flexWrap: 'wrap',
+    rowGap: 8,
   },
 
   modeBtn: {
@@ -809,11 +855,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(229,9,20,0.8)',
   },
 
+  filterRowWrap: {
+    marginBottom: 10,
+  },
   filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
-    marginBottom: 10,
+    paddingVertical: 2,
     gap: 8,
   },
   filterChip: {
@@ -884,6 +933,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginTop: 6,
     marginBottom: 12,
+    flexWrap: 'wrap',
+    rowGap: 10,
+    columnGap: 12,
   },
   liveTitle: {
     color: '#fff',
@@ -976,7 +1028,10 @@ const styles = StyleSheet.create({
 
   quickActionsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    rowGap: 10,
+    columnGap: 14,
     backgroundColor: 'rgba(255,255,255,0.04)',
     borderRadius: 14,
     borderWidth: 1,
@@ -1000,7 +1055,7 @@ const styles = StyleSheet.create({
   // Header styles
   headerWrap: {
     marginHorizontal: 12,
-    marginTop: Platform.OS === 'ios' ? 42 : 28,
+    marginTop: 8,
     marginBottom: 6,
     borderRadius: 18,
     overflow: 'hidden',
@@ -1010,8 +1065,8 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   headerBar: {
-    paddingVertical: 14,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
@@ -1023,6 +1078,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.14,
     shadowRadius: 20,
+  },
+  headerBarCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    rowGap: 10,
   },
   titleRow: {
     flexDirection: 'row',
@@ -1054,14 +1114,22 @@ const styles = StyleSheet.create({
   },
   headerText: {
     color: '#FFFFFF',
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     letterSpacing: 0.3,
+  },
+  headerTextCompact: {
+    fontSize: 18,
   },
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
     flexShrink: 0,
+  },
+  headerIconsCompact: {
+    flexWrap: 'wrap',
+    rowGap: 8,
+    justifyContent: 'flex-start',
   },
   iconBtn: {
     marginLeft: 8,
@@ -1077,6 +1145,33 @@ const styles = StyleSheet.create({
   iconBg: {
     padding: 10,
     borderRadius: 12,
+  },
+  iconBgCompact: {
+    padding: 8,
+  },
+  iconBadgeWrap: {
+    position: 'relative',
+  },
+  unreadBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 5,
+    borderRadius: 999,
+    backgroundColor: '#e50914',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '900',
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
   iconMargin: {
     marginRight: 4,
@@ -1126,10 +1221,13 @@ const styles = StyleSheet.create({
   upgradeBannerContent: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
+    rowGap: 10,
   },
   upgradeBannerText: {
     flex: 1,
     marginLeft: 12,
+    minWidth: 0,
   },
   upgradeBannerTitle: {
     color: '#fff',
@@ -1204,7 +1302,10 @@ const styles = StyleSheet.create({
   promoFooter: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
+    flexWrap: 'wrap',
+    rowGap: 10,
+    columnGap: 12,
   },
   promoPrice: {
     color: '#e50914',
@@ -1216,6 +1317,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
     marginHorizontal: 12,
+    minWidth: 0,
   },
   promoSellerAvatar: {
     width: 32,
@@ -1242,6 +1344,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     flex: 1,
+    minWidth: 0,
   },
   promoChatBtn: {
     backgroundColor: '#e50914',
@@ -1251,6 +1354,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    marginLeft: 'auto',
   },
   promoChatText: {
     color: '#fff',

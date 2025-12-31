@@ -60,13 +60,50 @@ async function requireFirebaseAuth(req: Request) {
 }
 
 function initAdminApp() {
-  const json = (Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON') ?? Deno.env.get('FIREBASE_SERVICE_ACCOUNT') ?? '').trim();
-  const b64 = (Deno.env.get('FIREBASE_SERVICE_ACCOUNT_BASE64') ?? '').trim();
+  const json = (
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON_TV') ??
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT_TV') ??
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON') ??
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT') ??
+    ''
+  ).trim();
+
+  const b64 = (
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT_BASE64_TV') ??
+    Deno.env.get('FIREBASE_SERVICE_ACCOUNT_BASE64') ??
+    ''
+  ).trim();
   if (!json && !b64) {
-    throw new HttpError(500, 'Missing Firebase service account env (FIREBASE_SERVICE_ACCOUNT_JSON/BASE64)');
+    throw new HttpError(
+      500,
+      'Missing Firebase service account env (FIREBASE_SERVICE_ACCOUNT_JSON_TV/BASE64_TV or FIREBASE_SERVICE_ACCOUNT_JSON/BASE64)',
+    );
   }
   const raw = json || atob(b64);
-  const credentials = JSON.parse(raw);
+
+  let credentials: any;
+  try {
+    credentials = JSON.parse(raw);
+  } catch {
+    throw new HttpError(500, 'Invalid Firebase service account JSON (expected Admin SDK service account key)');
+  }
+
+  // firebase-admin expects a service account key JSON with top-level `project_id`, `client_email`, `private_key`, etc.
+  // If you accidentally paste google-services.json, it will not work here.
+  if (!credentials || typeof credentials.project_id !== 'string' || !credentials.project_id.trim()) {
+    const maybeGoogleServicesProjectId =
+      credentials?.project_info && typeof credentials.project_info.project_id === 'string'
+        ? String(credentials.project_info.project_id)
+        : '';
+
+    throw new HttpError(
+      500,
+      maybeGoogleServicesProjectId
+        ? 'Invalid Firebase Admin credentials: looks like google-services.json was provided. Use a Firebase Admin SDK service account key JSON (must include top-level "project_id").'
+        : 'Invalid Firebase Admin credentials: missing top-level "project_id". Use a Firebase Admin SDK service account key JSON.',
+    );
+  }
+
   return getApps()[0] ?? initializeApp({ credential: cert(credentials as Record<string, unknown>) });
 }
 

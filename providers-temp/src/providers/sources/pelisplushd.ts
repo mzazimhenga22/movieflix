@@ -8,6 +8,12 @@ import { NotFoundError } from '@/utils/errors';
 
 const baseUrl = 'https://ww3.pelisplus.to';
 
+const TMDB_API_KEY = (
+  (typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_TMDB_API_KEY) ||
+  (typeof process !== 'undefined' && (process.env as any)?.MOVIE_WEB_TMDB_API_KEY) ||
+  ''
+).trim();
+
 function normalizeTitle(title: string): string {
   return title
     .normalize('NFD')
@@ -126,13 +132,16 @@ async function fallbackSearchByGithub(
 async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promise<SourcererOutput> {
   const mediaType = ctx.media.type;
   const tmdbId = ctx.media.tmdbId;
-  const apiKey = '7604525319adb2db8e7e841cb98e9217'; // API key for TMDB
+
+  if (!TMDB_API_KEY) {
+    throw new NotFoundError('Missing TMDB API key. Set EXPO_PUBLIC_TMDB_API_KEY.');
+  }
 
   if (!tmdbId) throw new NotFoundError('TMDB ID is required to fetch the title in Spanish');
 
   let translatedTitle = '';
   try {
-    translatedTitle = await fetchTmdbTitleInSpanish(Number(tmdbId), apiKey, mediaType);
+    translatedTitle = await fetchTmdbTitleInSpanish(Number(tmdbId), TMDB_API_KEY, mediaType);
   } catch {
     throw new NotFoundError('Could not get the title from TMDB');
   }

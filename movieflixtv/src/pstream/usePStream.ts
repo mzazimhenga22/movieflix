@@ -362,7 +362,7 @@ async function validatePlayback(playback: PStreamPlayback): Promise<boolean> {
   if (!uri) return false;
   const headers = (playback.headers ?? {}) as Record<string, string>;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5500);
+  const timeout = setTimeout(() => controller.abort(), 12_000);
   try {
     const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
     if (isHls) {
@@ -439,8 +439,8 @@ function orderEmbedsEnglishFirst(embeds: Embed[]): Embed[] {
 /* ───────── FALLBACK SOURCES ───────── */
 
 const FALLBACK_SOURCES = ['cuevana3', 'ridomovies', 'hdrezka', 'warezcdn'];
-const SOURCE_CONCURRENCY = 3;
-const EMBED_CONCURRENCY = 3;
+const SOURCE_CONCURRENCY = 2;
+const EMBED_CONCURRENCY = 2;
 
 async function runWithSlidingWindow<T>(
   items: T[],

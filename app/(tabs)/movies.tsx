@@ -10,11 +10,13 @@ import {
   Easing,
   Image,
   InteractionManager,
+  PixelRatio,
   Platform,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { FlashList, type ListRenderItem } from '@shopify/flash-list';
@@ -35,7 +37,6 @@ import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types/index';
 import { useAccent } from '../components/AccentContext';
 import { onConversationsUpdate, type Conversation } from '../messaging/controller';
-import InAppBanner from './movies/components/InAppBanner';
 import LoadingSkeleton from './movies/components/LoadingSkeleton';
 import { useMoviesData } from './movies/hooks/useMoviesData';
 
@@ -55,6 +56,15 @@ const FILTER_LABELS: Record<(typeof FILTER_KEYS)[number], string> = {
 
 const HomeScreen: React.FC = () => {
   const { currentPlan } = useSubscription();
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
+
+  const [showPulseCards, setShowPulseCards] = useState(() => !isCompactLayout);
+  useEffect(() => {
+    if (isCompactLayout) setShowPulseCards(false);
+  }, [isCompactLayout]);
+
   const [accountName, setAccountName] = useState('watcher');
   const [userId, setUserId] = useState<string | null>(null);
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
@@ -118,7 +128,6 @@ const HomeScreen: React.FC = () => {
     featuredMovie,
     setFeaturedMovie,
     stories,
-    setStories,
     netflix,
     amazon,
     hbo,
@@ -126,7 +135,6 @@ const HomeScreen: React.FC = () => {
     error,
     continueWatching,
     lastWatched,
-    filterForKids,
   } = useMoviesData(activeProfileId, isKidsProfile, profileReady);
 
   const router = useRouter();
@@ -145,65 +153,6 @@ const HomeScreen: React.FC = () => {
       });
     });
   }, []);
-
-  // notification queue (toasts)
-  type ToastItem = {
-    id: string;
-    message: string;
-    actionLabel?: string;
-    action?: () => void;
-    duration?: number;
-  };
-
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [lastToastTime, setLastToastTime] = useState<number>(0);
-  const TOAST_COOLDOWN_MS = 3 * 60 * 1000; // 3 minutes
-  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearToastTimer = useCallback(() => {
-    if (toastTimerRef.current) {
-      clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = null;
-    }
-  }, []);
-
-  const dismissToast = useCallback(
-    (id?: string) => {
-      clearToastTimer();
-      setToasts((prev) => {
-        if (!id) return [];
-        return prev.filter((item) => item.id !== id);
-      });
-    },
-    [clearToastTimer],
-  );
-
-  const pushToast = useCallback(
-    (message: string, actionLabel?: string, action?: () => void, duration = 5000) => {
-      const now = Date.now();
-      const timeSinceLastToast = now - lastToastTime;
-
-      if (timeSinceLastToast < TOAST_COOLDOWN_MS) {
-        console.log(
-          `Toast skipped - cooldown active. ${Math.ceil((TOAST_COOLDOWN_MS - timeSinceLastToast) / 1000)}s remaining`,
-        );
-        return;
-      }
-
-      setLastToastTime(now);
-      const id = `${now}-${Math.random().toString(36).slice(2, 9)}`;
-      const item: ToastItem = { id, message, actionLabel, action, duration };
-      clearToastTimer();
-      setToasts([item]);
-
-      toastTimerRef.current = setTimeout(() => {
-        dismissToast(id);
-      }, duration);
-    },
-    [TOAST_COOLDOWN_MS, clearToastTimer, dismissToast, lastToastTime],
-  );
-
-  useEffect(() => clearToastTimer, [clearToastTimer]);
 
   const myListKey = useMemo(() => buildProfileScopedKey('myList', activeProfileId), [activeProfileId]);
   useEffect(() => {
@@ -317,7 +266,8 @@ const HomeScreen: React.FC = () => {
       }
 
       let alive = true;
-      const unsub = onConversationsUpdate((conversations: Conversation[]) => {
+      const unsub = onConversationsUpdate(
+        (conversations: Conversation[]) => {
         if (!alive) return;
         const uid = userId;
         if (!uid) {
@@ -349,7 +299,9 @@ const HomeScreen: React.FC = () => {
         }, 0);
 
         setUnreadMessageCount(totalUnread);
-      });
+        },
+        { uid: userId },
+      );
 
       return () => {
         alive = false;
@@ -402,6 +354,8 @@ const HomeScreen: React.FC = () => {
     useCallback(() => {
       let alive = true;
 
+      void activeProfileId;
+
       InteractionManager.runAfterInteractions(() => {
         void (async () => {
           const stored = await getFavoriteGenre();
@@ -441,7 +395,7 @@ const HomeScreen: React.FC = () => {
         const json = await res.json();
         const results = (json?.results || []) as Media[];
         if (!cancelled) setFavoriteGenreMovies(results);
-      } catch (err) {
+      } catch {
         if (!cancelled) setFavoriteGenreMovies([]);
       } finally {
         if (!cancelled) setFavoriteGenreLoading(false);
@@ -585,7 +539,7 @@ const HomeScreen: React.FC = () => {
     }, 20000);
 
     return () => clearInterval(interval);
-  }, [trending]);
+  }, [setFeaturedMovie, trending]);
 
   // NOTE: removed automatic featured-movie toasts to avoid frequent notifications.
   // Use `pushToast` to display important notifications from anywhere in this screen.
@@ -617,41 +571,14 @@ const HomeScreen: React.FC = () => {
   );
 
   const handleShuffle = () => {
-    const allContent = [...trending, ...movieReels, ...recommended, ...netflix, ...amazon, ...hbo];
-    if (allContent.length > 0) {
-      const randomItem = allContent[Math.floor(Math.random() * allContent.length)];
-      router.push(`/details/${randomItem.id}?mediaType=${randomItem.media_type || 'movie'}`);
-    }
+    deferNav(() => {
+      const allContent = [...trending, ...movieReels, ...recommended, ...netflix, ...amazon, ...hbo];
+      if (allContent.length > 0) {
+        const randomItem = allContent[Math.floor(Math.random() * allContent.length)];
+        router.push(`/details/${randomItem.id}?mediaType=${randomItem.media_type || 'movie'}`);
+      }
+    });
   };
-
-  // Beautiful love-themed toast notifications
-  useEffect(() => {
-    if (movieTrailers && movieTrailers.length > 0) {
-      pushToast(
-        `✨ Magical trailers just arrived! (${movieTrailers.length}) cinematic dreams await`,
-        'Watch Now',
-        () => {
-          if (movieTrailers[0]) router.push(`/details/${movieTrailers[0].id}?mediaType=movie`);
-        },
-        6000
-      );
-    }
-  }, [movieTrailers, pushToast, router]);
-
-  // Welcome toast for first-time users
-  useEffect(() => {
-    if (profileReady && !loading) {
-      const timer = setTimeout(() => {
-        pushToast(
-          `💖 Welcome to MovieFlix! Your cinematic journey begins with love and wonder`,
-          'Explore',
-          () => router.push('/search'),
-          8000
-        );
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [profileReady, loading, pushToast, router]);
 
   const displayedStories = stories.slice(storyIndex, storyIndex + 4);
   const showStoriesSection = !isKidsProfile && stories.length > 0;
@@ -741,27 +668,30 @@ const HomeScreen: React.FC = () => {
     }
   }, [featuredAccent, setAccentColor]);
 
-  const openQuickPreview = (movie: Media) => {
-    if (!movie) return;
-    setFeaturedMovie(movie);
-    setPreviewVisible(true);
-    previewTranslate.setValue(320);
-    Animated.timing(previewTranslate, {
-      toValue: 0,
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  };
+  const openQuickPreview = useCallback(
+    (movie: Media) => {
+      if (!movie) return;
+      setFeaturedMovie(movie);
+      setPreviewVisible(true);
+      previewTranslate.setValue(320);
+      Animated.timing(previewTranslate, {
+        toValue: 0,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    },
+    [previewTranslate, setFeaturedMovie],
+  );
 
-  const closeQuickPreview = () => {
+  const closeQuickPreview = useCallback(() => {
     Animated.timing(previewTranslate, {
       toValue: 340,
       duration: 220,
       easing: Easing.in(Easing.cubic),
       useNativeDriver: true,
     }).start(() => setPreviewVisible(false));
-  };
+  }, [previewTranslate]);
 
   type HomeSection =
     | { key: 'featured' }
@@ -793,25 +723,6 @@ const HomeScreen: React.FC = () => {
         return 'carousel';
     }
   }, []);
-
-  const overrideSectionLayout = useCallback(
-    (layout: { size?: number }, section: HomeSection) => {
-      switch (section.key) {
-        case 'featured':
-          layout.size = 290;
-          return;
-        case 'trailers':
-          layout.size = 400;
-          return;
-        case 'songs':
-          layout.size = 340;
-          return;
-        default:
-          layout.size = 330;
-      }
-    },
-    [],
-  );
 
   const sections = useMemo<HomeSection[]>(() => {
     if (isEmptyState) return [];
@@ -1167,159 +1078,11 @@ const HomeScreen: React.FC = () => {
           style={styles.bgOrbSecondary}
         />
           <View style={styles.container}>
-            {/* Toast notification */}
-            {toasts.length > 0 && (
-              <InAppBanner
-                key={toasts[0].id}
-                item={toasts[0]}
-                accent={featuredAccent}
-                onDismiss={() => dismissToast(toasts[0].id)}
-              />
-            )}
-          {/* Header (glassy hero) */}
-          <Animated.View style={[styles.headerWrap, { opacity: headerFadeAnim }]}>
-            <LinearGradient
-              colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.headerGlow}
-            />
-            <View style={styles.headerBar}>
-              <View style={styles.titleRow}>
-                <View style={styles.accentDot} />
-                <View>
-                  <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">{`Tonight's picks`}</Text>
-                  <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
-                    Welcome, {activeProfileName ?? accountName}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.headerIcons}>
-                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconBg}
-                    >
-                      <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                      {unreadMessageCount > 0 ? (
-                        <View style={styles.messageBadge}>
-                          <Text style={styles.messageBadgeText}>
-                            {unreadMessageCount > 99 ? '99+' : unreadMessageCount > 9 ? '9+' : String(unreadMessageCount)}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </LinearGradient>
-                  </TouchableOpacity>
-
-                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/marketplace'))}>
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconBg}
-                    >
-                      <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                    </LinearGradient>
-                  </TouchableOpacity>
-
-                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/social-feed'))}>
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconBg}
-                    >
-                      <Ionicons name="camera-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                    </LinearGradient>
-                  </TouchableOpacity>
-
-                <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/profile'))}>
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconBg}
-                    >
-                      <FontAwesome name="user-circle" size={24} color="#ffffff" />
-                    </LinearGradient>
-                  </TouchableOpacity>
-              </View>
-            </View>
-
-            <Animated.View style={[styles.headerMetaRow, { transform: [{ translateY: metaRowAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }], opacity: metaRowAnim }]}>
-              <View style={styles.metaPill}>
-                <Ionicons name="flame" size={14} color="#fff" />
-                <Text style={styles.metaText}>{trendingCount} trending</Text>
-              </View>
-              <View style={[styles.metaPill, styles.metaPillSoft]}>
-                <Ionicons name="film-outline" size={14} color="#fff" />
-                <Text style={styles.metaText}>{reelsCount} reels</Text>
-              </View>
-              <View style={[styles.metaPill, styles.metaPillOutline]}>
-                <Ionicons name="star" size={14} color="#fff" />
-                <Text style={styles.metaText}>Fresh drops</Text>
-              </View>
-            </Animated.View>
-          </Animated.View>
-
-          <View style={styles.pulseRow}>
-            {cinematicPulse.map((stat) => (
-              <LinearGradient
-                key={stat.label}
-                colors={stat.palette}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.pulseCard}
-              >
-                <Text style={styles.pulseValue}>{stat.value}</Text>
-                <Text style={styles.pulseLabel}>{stat.label}</Text>
-                <View style={styles.pulseMeter}>
-                  <View style={[styles.pulseMeterFill, { width: `${Math.max(stat.progress * 100, 8)}%` }]} />
-                </View>
-              </LinearGradient>
-            ))}
-          </View>
-
-          {currentPlan === 'free' && (
-            <View style={styles.upgradeBanner}>
-              <LinearGradient
-                colors={['rgba(229,9,20,0.9)', 'rgba(185,7,16,0.9)']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.upgradeBannerGradient}
-              >
-                <View style={styles.upgradeBannerContent}>
-                  <Ionicons name="star" size={20} color="#fff" />
-                  <View style={styles.upgradeBannerText}>
-                    <Text style={styles.upgradeBannerTitle}>Upgrade to Plus</Text>
-                    <Text style={styles.upgradeBannerSubtitle}>
-                      Unlock unlimited profiles, premium features & more
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.upgradeBannerButton}
-                    onPress={() => router.push('/premium?source=movies')}
-                  >
-                    <Text style={styles.upgradeBannerButtonText}>Upgrade</Text>
-                  </TouchableOpacity>
-                </View>
-              </LinearGradient>
-            </View>
-          )}
-
-          <View style={{ marginHorizontal: 12, marginBottom: 12 }}>
-            <AdBanner placement="feed" />
-          </View>
-
             <FlashList
               data={sections}
               renderItem={renderSection}
-              keyExtractor={(it) => it.key}
+              keyExtractor={(it: HomeSection) => it.key}
               getItemType={getSectionItemType}
-              overrideItemLayout={overrideSectionLayout}
               estimatedItemSize={330}
               drawDistance={Platform.OS === 'android' ? 900 : 1100}
               decelerationRate="fast"
@@ -1331,6 +1094,173 @@ const HomeScreen: React.FC = () => {
               contentContainerStyle={styles.scrollViewContent}
               ListHeaderComponent={
                 <>
+                  {/* Header (glassy hero) */}
+                  <Animated.View style={[styles.headerWrap, { opacity: headerFadeAnim }]}>
+                    <LinearGradient
+                      colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.headerGlow}
+                    />
+                    <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
+                      <View style={styles.titleRow}>
+                        <View style={styles.accentDot} />
+                        <View>
+                          <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">{`Tonight's picks`}</Text>
+                          <Text
+                            style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
+                            Welcome, {activeProfileName ?? accountName}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
+                          <LinearGradient
+                            colors={['#e50914', '#b20710']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                          >
+                            <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                            {unreadMessageCount > 0 ? (
+                              <View style={styles.messageBadge}>
+                                <Text style={styles.messageBadgeText}>
+                                  {unreadMessageCount > 99 ? '99+' : unreadMessageCount > 9 ? '9+' : String(unreadMessageCount)}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </LinearGradient>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/marketplace'))}>
+                          <LinearGradient
+                            colors={['#e50914', '#b20710']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                          >
+                            <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                          </LinearGradient>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/social-feed'))}>
+                          <LinearGradient
+                            colors={['#e50914', '#b20710']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                          >
+                            <Ionicons name="camera-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                          </LinearGradient>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/profile'))}>
+                          <LinearGradient
+                            colors={['#e50914', '#b20710']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                          >
+                            <FontAwesome name="user-circle" size={24} color="#ffffff" />
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    <Animated.View
+                      style={[
+                        styles.headerMetaRow,
+                        {
+                          transform: [
+                            {
+                              translateY: metaRowAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
+                            },
+                          ],
+                          opacity: metaRowAnim,
+                        },
+                      ]}
+                    >
+                      <View style={styles.metaPill}>
+                        <Ionicons name="flame" size={14} color="#fff" />
+                        <Text style={styles.metaText}>{trendingCount} trending</Text>
+                      </View>
+                      <View style={[styles.metaPill, styles.metaPillSoft]}>
+                        <Ionicons name="film-outline" size={14} color="#fff" />
+                        <Text style={styles.metaText}>{reelsCount} reels</Text>
+                      </View>
+                      <View style={[styles.metaPill, styles.metaPillOutline]}>
+                        <Ionicons name="star" size={14} color="#fff" />
+                        <Text style={styles.metaText}>Fresh drops</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[styles.metaPill, styles.metaPillOutline]}
+                        onPress={() => setShowPulseCards((v) => !v)}
+                        activeOpacity={0.9}
+                        accessibilityRole="button"
+                      >
+                        <Ionicons name={showPulseCards ? 'eye-off-outline' : 'eye-outline'} size={14} color="#fff" />
+                        <Text style={styles.metaText}>{showPulseCards ? 'Hide stats' : 'Show stats'}</Text>
+                      </TouchableOpacity>
+                    </Animated.View>
+                  </Animated.View>
+
+                  {showPulseCards ? (
+                    <View style={styles.pulseRow}>
+                      {cinematicPulse.map((stat) => (
+                        <LinearGradient
+                          key={stat.label}
+                          colors={stat.palette}
+                          start={{ x: 0, y: 0 }}
+                          end={{ x: 1, y: 1 }}
+                          style={styles.pulseCard}
+                        >
+                          <Text style={styles.pulseValue}>{stat.value}</Text>
+                          <Text style={styles.pulseLabel}>{stat.label}</Text>
+                          <View style={styles.pulseMeter}>
+                            <View
+                              style={[styles.pulseMeterFill, { width: `${Math.max(stat.progress * 100, 8)}%` }]}
+                            />
+                          </View>
+                        </LinearGradient>
+                      ))}
+                    </View>
+                  ) : null}
+
+                  {currentPlan === 'free' && (
+                    <View style={styles.upgradeBanner}>
+                      <LinearGradient
+                        colors={['rgba(229,9,20,0.9)', 'rgba(185,7,16,0.9)']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.upgradeBannerGradient}
+                      >
+                        <View style={styles.upgradeBannerContent}>
+                          <Ionicons name="star" size={20} color="#fff" />
+                          <View style={styles.upgradeBannerText}>
+                            <Text style={styles.upgradeBannerTitle}>Upgrade to Plus</Text>
+                            <Text style={styles.upgradeBannerSubtitle}>
+                              Unlock unlimited profiles, premium features & more
+                            </Text>
+                          </View>
+                          <TouchableOpacity
+                            style={styles.upgradeBannerButton}
+                            onPress={() => router.push('/premium?source=movies')}
+                          >
+                            <Text style={styles.upgradeBannerButtonText}>Upgrade</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </LinearGradient>
+                    </View>
+                  )}
+
+                  <View style={{ marginHorizontal: 12, marginBottom: 12 }}>
+                    <AdBanner placement="feed" />
+                  </View>
+
                   {/* Browse by genre above stories */}
                   {genres.length > 0 && (
                     <Animated.View
@@ -1384,32 +1314,35 @@ const HomeScreen: React.FC = () => {
 
                   {/* Main filter chips below stories */}
                   <Animated.View
-                    style={[
-                      styles.filterRow,
-                      {
-                        transform: [
-                          {
-                            translateY: filtersAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
-                          },
-                        ],
-                        opacity: filtersAnim,
-                      },
-                    ]}
+                    style={{
+                      transform: [
+                        {
+                          translateY: filtersAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
+                        },
+                      ],
+                      opacity: filtersAnim,
+                    }}
                   >
-                    {FILTER_KEYS.map((key) => {
-                      const isActive = activeFilter === (key as any);
-                      return (
-                        <TouchableOpacity
-                          key={key}
-                          style={[styles.filterChip, isActive && styles.filterChipActive]}
-                          onPress={() => setActiveFilter(key as any)}
-                        >
-                          <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
-                            {FILTER_LABELS[key]}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.filterRow}
+                    >
+                      {FILTER_KEYS.map((key) => {
+                        const isActive = activeFilter === (key as any);
+                        return (
+                          <TouchableOpacity
+                            key={key}
+                            style={[styles.filterChip, isActive && styles.filterChipActive]}
+                            onPress={() => setActiveFilter(key as any)}
+                          >
+                            <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
+                              {FILTER_LABELS[key]}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
                   </Animated.View>
 
                   {isEmptyState ? (
@@ -1429,11 +1362,11 @@ const HomeScreen: React.FC = () => {
               const firstOffset = SUB_FAB_SIZE + SUB_FAB_GAP;
               const spacing = SUB_FAB_SIZE + SUB_FAB_GAP;
               const items = [
-                { key: 'shuffle', icon: 'shuffle', onPress: async () => { await handleShuffle(); } },
-                { key: 'mylist', icon: 'list-sharp', onPress: () => router.push('/my-list') },
-                { key: 'search', icon: 'search', onPress: () => router.push('/search') },
-                { key: 'watchparty', icon: 'people-outline', onPress: () => router.push('/watchparty') },
-                { key: 'tvlogin', icon: 'qr-code-outline', onPress: () => router.push('/tv-login/scan') },
+                { key: 'shuffle', icon: 'shuffle', onPress: handleShuffle },
+                { key: 'mylist', icon: 'list-sharp', onPress: () => deferNav(() => router.push('/my-list')) },
+                { key: 'search', icon: 'search', onPress: () => deferNav(() => router.push('/search')) },
+                { key: 'watchparty', icon: 'people-outline', onPress: () => deferNav(() => router.push('/watchparty')) },
+                { key: 'tvlogin', icon: 'qr-code-outline', onPress: () => deferNav(() => router.push('/tv-login/scan')) },
               ];
 
               return (
@@ -1582,7 +1515,7 @@ const HomeScreen: React.FC = () => {
   // Header glass hero
   headerWrap: {
     marginHorizontal: 12,
-    marginTop: Platform.OS === 'ios' ? 80 : 50,
+    marginTop: 8,
     marginBottom: 6,
     borderRadius: 18,
     overflow: 'hidden',
@@ -1592,8 +1525,8 @@ const HomeScreen: React.FC = () => {
     opacity: 0.7,
   },
   headerBar: {
-    paddingVertical: 14,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
@@ -1605,6 +1538,11 @@ const HomeScreen: React.FC = () => {
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.14,
     shadowRadius: 20,
+  },
+  headerBarCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    rowGap: 10,
   },
   titleRow: {
     flexDirection: 'row',
@@ -1631,14 +1569,22 @@ const HomeScreen: React.FC = () => {
   },
   headerText: {
     color: '#FFFFFF',
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     letterSpacing: 0.3,
+  },
+  headerTextCompact: {
+    fontSize: 18,
   },
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
     flexShrink: 0,
+  },
+  headerIconsCompact: {
+    flexWrap: 'wrap',
+    rowGap: 8,
+    justifyContent: 'flex-start',
   },
   iconBtn: {
     marginLeft: 8,
@@ -1655,6 +1601,9 @@ const HomeScreen: React.FC = () => {
     padding: 10,
     borderRadius: 12,
     position: 'relative',
+  },
+  iconBgCompact: {
+    padding: 8,
   },
   messageBadge: {
     position: 'absolute',
@@ -1693,9 +1642,12 @@ const HomeScreen: React.FC = () => {
     paddingHorizontal: 12,
     marginTop: 8,
     marginBottom: 18,
+    flexWrap: 'wrap',
+    rowGap: 12,
   },
   pulseCard: {
     flex: 1,
+    minWidth: 150,
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -1763,7 +1715,7 @@ const HomeScreen: React.FC = () => {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
-    marginBottom: 6,
+    paddingBottom: 6,
     gap: 8,
   },
   filterChip: {
@@ -2166,10 +2118,13 @@ const HomeScreen: React.FC = () => {
   upgradeBannerContent: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
+    rowGap: 10,
   },
   upgradeBannerText: {
     flex: 1,
     marginLeft: 12,
+    minWidth: 0,
   },
   upgradeBannerTitle: {
     color: '#fff',

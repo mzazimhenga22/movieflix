@@ -93,7 +93,7 @@ export const notifyPush = async (payload: NotifyPayload): Promise<void> => {
   if (!token) return;
 
   try {
-    await fetch(endpoint, {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -101,6 +101,11 @@ export const notifyPush = async (payload: NotifyPayload): Promise<void> => {
       },
       body: JSON.stringify(payload),
     });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.warn('[push] notify failed', res.status, text);
+    }
   } catch (err) {
     console.warn('[push] notify failed', err);
   }

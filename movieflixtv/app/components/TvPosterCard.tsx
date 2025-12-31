@@ -1,7 +1,9 @@
-import React, { useMemo } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
-import { IMAGE_BASE_URL } from '@/constants/api';
-import type { Media } from '@/types';
+import React, { memo, useMemo } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { Image } from 'expo-image';
+import { IMAGE_BASE_URL } from '../../constants/api';
+import type { Media } from '../../types';
+import { TvFocusable } from './TvSpatialNavigation';
 
 type Props = {
   item: Media;
@@ -13,7 +15,7 @@ type Props = {
   onFocus?: (item: Media) => void;
 };
 
-export default function TvPosterCard({
+function TvPosterCard({
   item,
   width = 168,
   variant = 'poster',
@@ -41,7 +43,7 @@ export default function TvPosterCard({
   const rating = typeof item?.vote_average === 'number' ? item.vote_average : 0;
 
   return (
-    <Pressable
+    <TvFocusable
       onPress={() => onPress?.(item)}
       onFocus={() => onFocus?.(item)}
       style={({ focused }: any) => [
@@ -51,7 +53,7 @@ export default function TvPosterCard({
       ]}
     >
       {imageUri ? (
-        <Image source={{ uri: imageUri }} style={styles.image} resizeMode="cover" />
+        <Image source={{ uri: imageUri }} style={styles.image} contentFit="cover" />
       ) : (
         <View style={styles.imageFallback} />
       )}
@@ -79,9 +81,11 @@ export default function TvPosterCard({
           <View style={[styles.progressFill, { width: `${normalizedProgress * 100}%` }]} />
         </View>
       ) : null}
-    </Pressable>
+    </TvFocusable>
   );
 }
+
+export default memo(TvPosterCard);
 
 const styles = StyleSheet.create({
   card: {

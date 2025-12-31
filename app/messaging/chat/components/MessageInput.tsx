@@ -262,14 +262,14 @@ const MessageInput = ({
   const handleMic = () => {
     if (disabled) return;
     if (isRecording) {
-      stopRecording();
+      void stopRecording();
     } else {
-      startRecording();
+      void startRecording();
     }
   };
 
   const handleRightPress = () => {
-    if (hasText) {
+    if (hasText || recordedUri) {
       handleSend();
     } else {
       handleMic();
@@ -306,8 +306,10 @@ const MessageInput = ({
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
-        videoExportPreset: ImagePicker.VideoExportPreset.HEVC_1920x1080,
         quality: 0.9,
+        ...(Platform.OS === 'ios'
+          ? { videoExportPreset: ImagePicker.VideoExportPreset.HEVC_1920x1080 }
+          : {}),
       });
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const asset = result.assets[0];

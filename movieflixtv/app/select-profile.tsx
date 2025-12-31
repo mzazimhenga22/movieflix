@@ -5,9 +5,10 @@ import { router } from 'expo-router';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, StyleSheet, Text, View } from 'react-native';
 
 import { authPromise, firestore } from '@/constants/firebase';
+import { TvFocusable } from './components/TvSpatialNavigation';
 
 type HouseholdProfile = {
   id: string;
@@ -139,13 +140,13 @@ export default function SelectProfileTv() {
           <Text style={styles.title}>Who’s watching?</Text>
           <Text style={styles.subtitle}>Pick a profile (create/manage profiles on phone).</Text>
         </View>
-        <Pressable
+        <TvFocusable
           onPress={() => router.push('/continue-on-phone?feature=profiles')}
           style={styles.phoneBtn}
         >
           <Ionicons name="phone-portrait-outline" size={18} color="#fff" />
           <Text style={styles.phoneBtnText}>Manage on phone</Text>
-        </Pressable>
+        </TvFocusable>
       </View>
 
       <View style={styles.body}>
@@ -158,12 +159,12 @@ export default function SelectProfileTv() {
             <Text style={styles.emptySubtitle}>
               Create profiles in the MovieFlix phone app, then come back.
             </Text>
-            <Pressable
+            <TvFocusable
               onPress={() => router.push('/continue-on-phone?feature=profiles')}
               style={styles.primaryBtn}
             >
               <Text style={styles.primaryText}>Continue on phone</Text>
-            </Pressable>
+            </TvFocusable>
           </View>
         ) : (
           <FlatList
@@ -173,7 +174,7 @@ export default function SelectProfileTv() {
             columnWrapperStyle={styles.gridRow}
             contentContainerStyle={styles.grid}
             renderItem={({ item }) => (
-              <Pressable
+              <TvFocusable
                 onPress={() => void selectProfile(item)}
                 style={({ focused }: any) => [
                   styles.card,
@@ -188,7 +189,7 @@ export default function SelectProfileTv() {
                   {item.name}
                 </Text>
                 {item.isKids ? <Text style={styles.kids}>Kids</Text> : null}
-              </Pressable>
+              </TvFocusable>
             )}
           />
         )}

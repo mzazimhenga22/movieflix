@@ -1,6 +1,7 @@
 ﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
+import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, InterruptionModeAndroid, InterruptionModeIOS, ResizeMode, Video } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -43,6 +44,17 @@ import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
 import { VideoMaskingOverlay } from '../lib/engineer';
 import NativeAdCard from '../components/ads/NativeAdCard';
 import { useSubscription } from '../providers/SubscriptionProvider';
+
+import NewChatSheet from './messaging/components/NewChatSheet';
+import {
+  findOrCreateConversation,
+  getFollowing as getMessagingFollowing,
+  getProfileById,
+  onConversationsUpdate as onMessagingConversationsUpdate,
+  sendMessage as sendMessagingMessage,
+  type Conversation as MessagingConversation,
+  type Profile as MessagingProfile,
+} from './messaging/controller';
 const FALLBACK_EPISODE_IMAGE = 'https://via.placeholder.com/160x90?text=Episode';
 type UpcomingEpisode = {
   id?: number;
@@ -91,6 +103,13 @@ type QualityOption = {
   resolution?: string;
   bandwidth?: number;
   codecs?: string;
+};
+type InPlayerMessageToast = {
+  conversationId: string;
+  fromId: string;
+  fromName: string;
+  text: string;
+  updatedAtMs: number;
 };
 const CONTROLS_HIDE_DELAY_PLAYING = 10500;
 const CONTROLS_HIDE_DELAY_PAUSED = 16500;
@@ -658,6 +677,203 @@ const VideoPlayerScreen = () => {
     positionMillisRef.current = positionMillis;
   }, [positionMillis]);
   const { user } = useUser();
+
+  const uid = user?.uid ?? '';
+  const quickReplySheetRef = useRef<BottomSheet | null>(null);
+  const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const quickReplySnapPoints = useMemo(() => ['42%', '72%'], []);
+
+  const [messageToast, setMessageToast] = useState<InPlayerMessageToast | null>(null);
+  const messageToastAnim = useRef(new Animated.Value(0)).current;
+  const messageToastHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastIncomingMessageKeyRef = useRef<string>('');
+
+  const [quickReplyConversationId, setQuickReplyConversationId] = useState<string | null>(null);
+  const [quickReplyTitle, setQuickReplyTitle] = useState<string>('Messages');
+  const [quickReplyPreview, setQuickReplyPreview] = useState<string>('');
+  const [quickReplyText, setQuickReplyText] = useState('');
+  const [quickReplySending, setQuickReplySending] = useState(false);
+
+  const [newChatVisible, setNewChatVisible] = useState(false);
+  const [followingForNewChat, setFollowingForNewChat] = useState<MessagingProfile[]>([]);
+  const [followingLoading, setFollowingLoading] = useState(false);
+
+  const tsToMillis = useCallback((value: any): number | null => {
+    if (!value) return null;
+    if (typeof value?.toMillis === 'function') return value.toMillis();
+    if (typeof value?.seconds === 'number') return value.seconds * 1000;
+    if (typeof value === 'number') return value;
+    return null;
+  }, []);
+
+  const isConversationUnread = useCallback(
+    (conversation: MessagingConversation): boolean => {
+      if (!uid) return false;
+
+      const lastMessage = String((conversation as any)?.lastMessage ?? '').trim();
+      const lastSender = String((conversation as any)?.lastMessageSenderId ?? '').trim();
+      if (!lastMessage || !lastSender || lastSender === uid) return false;
+
+      // Match messaging badge behavior: don't count incoming pending requests.
+      const status = String((conversation as any)?.status ?? '').trim();
+      const requestInitiatorId = String((conversation as any)?.requestInitiatorId ?? '').trim();
+      if (status === 'pending' && requestInitiatorId && requestInitiatorId !== uid) return false;
+
+      const updatedAtMs = tsToMillis((conversation as any)?.updatedAt);
+      const lastReadMs = tsToMillis((conversation as any)?.lastReadAtBy?.[uid]);
+      if (!updatedAtMs) return true;
+      if (!lastReadMs) return true;
+      return lastReadMs < updatedAtMs - 500;
+    },
+    [tsToMillis, uid],
+  );
+
+  const hideMessageToast = useCallback(() => {
+    if (messageToastHideTimerRef.current) {
+      clearTimeout(messageToastHideTimerRef.current);
+      messageToastHideTimerRef.current = null;
+    }
+
+    Animated.timing(messageToastAnim, {
+      toValue: 0,
+      duration: 160,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setMessageToast(null);
+    });
+  }, [messageToastAnim]);
+
+  const showMessageToast = useCallback(
+    (next: InPlayerMessageToast) => {
+      if (messageToastHideTimerRef.current) {
+        clearTimeout(messageToastHideTimerRef.current);
+        messageToastHideTimerRef.current = null;
+      }
+
+      setMessageToast(next);
+      messageToastAnim.setValue(0);
+      Animated.timing(messageToastAnim, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }).start();
+
+      messageToastHideTimerRef.current = setTimeout(() => {
+        hideMessageToast();
+      }, 8500);
+    },
+    [hideMessageToast, messageToastAnim],
+  );
+
+  const openQuickReply = useCallback(
+    (toast: InPlayerMessageToast) => {
+      setQuickReplyConversationId(toast.conversationId);
+      setQuickReplyTitle(toast.fromName ? `Message from ${toast.fromName}` : 'Message');
+      setQuickReplyPreview(toast.text);
+      quickReplySheetRef.current?.snapToIndex(0);
+    },
+    [],
+  );
+
+  const closeQuickReply = useCallback(() => {
+    setQuickReplyText('');
+    quickReplySheetRef.current?.close();
+  }, []);
+
+  const sendQuickReply = useCallback(async () => {
+    const trimmed = quickReplyText.trim();
+    if (!trimmed) return;
+    if (!quickReplyConversationId) return;
+    if (quickReplySending) return;
+
+    setQuickReplySending(true);
+    try {
+      await sendMessagingMessage(quickReplyConversationId, { text: trimmed });
+      setQuickReplyText('');
+    } catch (err: any) {
+      Alert.alert('Message failed', err?.message || 'Unable to send message right now.');
+    } finally {
+      setQuickReplySending(false);
+    }
+  }, [quickReplyConversationId, quickReplySending, quickReplyText]);
+
+  const ensureFollowingLoaded = useCallback(async () => {
+    if (!uid) return;
+    if (followingLoading) return;
+    if (followingForNewChat.length) return;
+    setFollowingLoading(true);
+    try {
+      const list = await getMessagingFollowing();
+      setFollowingForNewChat(Array.isArray(list) ? list : []);
+    } catch {
+      setFollowingForNewChat([]);
+    } finally {
+      setFollowingLoading(false);
+    }
+  }, [followingForNewChat.length, followingLoading, uid]);
+
+  const openNewChat = useCallback(async () => {
+    await ensureFollowingLoaded();
+    setNewChatVisible(true);
+  }, [ensureFollowingLoaded]);
+
+  useEffect(() => {
+    if (!uid) return;
+    void ensureFollowingLoaded();
+  }, [ensureFollowingLoaded, uid]);
+
+  useEffect(() => {
+    return () => {
+      if (messageToastHideTimerRef.current) {
+        clearTimeout(messageToastHideTimerRef.current);
+        messageToastHideTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!uid) return;
+    let alive = true;
+    const unsub = onMessagingConversationsUpdate((conversations) => {
+      if (!alive) return;
+      if (!Array.isArray(conversations) || !conversations.length) return;
+      if (quickReplyOpen) return;
+
+      const candidate = conversations.find((c) => isConversationUnread(c));
+      if (!candidate) return;
+
+      const updatedAtMs = tsToMillis((candidate as any)?.updatedAt) ?? Date.now();
+      const key = `${candidate.id}:${updatedAtMs}`;
+      if (key === lastIncomingMessageKeyRef.current) return;
+      lastIncomingMessageKeyRef.current = key;
+
+      const fromId = String((candidate as any)?.lastMessageSenderId ?? '').trim();
+      const text = String((candidate as any)?.lastMessage ?? 'New message');
+      if (!fromId) return;
+
+      void (async () => {
+        const profile = await getProfileById(fromId).catch(() => null);
+        const fromName = profile?.displayName ? String(profile.displayName) : 'New message';
+        showMessageToast({
+          conversationId: candidate.id,
+          fromId,
+          fromName,
+          text,
+          updatedAtMs,
+        });
+      })();
+    });
+
+    return () => {
+      alive = false;
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+    };
+  }, [isConversationUnread, quickReplyOpen, showMessageToast, tsToMillis, uid]);
+
   const [chatMessages, setChatMessages] = useState<
     Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }>
   >([]);
@@ -2424,6 +2640,22 @@ useEffect(() => {
         {transitionReady && videoPlaybackSource && showBufferingOverlay && !scrapeError ? (
           <BufferingPill message="Buffering…" />
         ) : null}
+        {messageToast ? (
+          <IncomingMessagePill
+            toast={messageToast}
+            anim={messageToastAnim}
+            topOffset={
+              showQualitySwitchPill || (transitionReady && videoPlaybackSource && showBufferingOverlay && !scrapeError)
+                ? 64
+                : 16
+            }
+            onPress={() => {
+              openQuickReply(messageToast);
+              hideMessageToast();
+            }}
+            onDismiss={hideMessageToast}
+          />
+        ) : null}
         {transitionReady && videoPlaybackSource && midrollActive ? (
           <View style={styles.midrollOverlay} pointerEvents="auto">
             <LinearGradient
@@ -2950,6 +3182,122 @@ useEffect(() => {
           </View>
         ) : null}
       </TouchableOpacity>
+
+      <BottomSheet
+        ref={quickReplySheetRef}
+        index={-1}
+        snapPoints={quickReplySnapPoints}
+        enablePanDownToClose
+        onChange={(index) => setQuickReplyOpen(index >= 0)}
+        backdropComponent={(props) => (
+          <BottomSheetBackdrop
+            {...props}
+            appearsOnIndex={0}
+            disappearsOnIndex={-1}
+            pressBehavior="close"
+          />
+        )}
+        backgroundStyle={styles.quickReplySheetBackground}
+        handleIndicatorStyle={styles.quickReplySheetHandle}
+      >
+        <View style={styles.quickReplySheetContent}>
+          <View style={styles.quickReplySheetHeader}>
+            <Text style={styles.quickReplySheetTitle} numberOfLines={1}>
+              {quickReplyTitle}
+            </Text>
+
+            <View style={styles.quickReplySheetHeaderActions}>
+              <TouchableOpacity onPress={() => void openNewChat()} style={styles.quickReplyIconButton}>
+                <Ionicons name="add" size={20} color="#fff" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={closeQuickReply} style={styles.quickReplyIconButton}>
+                <Ionicons name="close" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {quickReplyPreview ? (
+            <Text style={styles.quickReplyPreview} numberOfLines={2}>
+              {quickReplyPreview}
+            </Text>
+          ) : null}
+
+          <View style={styles.quickReplyInputRow}>
+            <TextInput
+              value={quickReplyText}
+              onChangeText={setQuickReplyText}
+              placeholder="Reply…"
+              placeholderTextColor="rgba(255,255,255,0.55)"
+              style={styles.quickReplyInput}
+              multiline
+            />
+            <TouchableOpacity
+              onPress={() => void sendQuickReply()}
+              disabled={!quickReplyConversationId || !quickReplyText.trim() || quickReplySending}
+              style={[
+                styles.quickReplySendButton,
+                (!quickReplyConversationId || !quickReplyText.trim() || quickReplySending) &&
+                  styles.quickReplySendButtonDisabled,
+              ]}
+            >
+              {quickReplySending ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Ionicons name="send" size={18} color="#fff" />
+              )}
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.quickReplyActionsRow}>
+            <TouchableOpacity
+              style={styles.quickReplyAction}
+              onPress={() => {
+                if (!quickReplyConversationId) return;
+                closeQuickReply();
+                router.push((`/messaging/chat/${quickReplyConversationId}`) as any);
+              }}
+              disabled={!quickReplyConversationId}
+            >
+              <Ionicons name="chatbubbles-outline" size={18} color="#fff" />
+              <Text style={styles.quickReplyActionText}>Open chat</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.quickReplyAction} onPress={() => void openNewChat()}>
+              <Ionicons name="person-add-outline" size={18} color="#fff" />
+              <Text style={styles.quickReplyActionText}>New message</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.quickReplyAction}
+              onPress={() => {
+                closeQuickReply();
+                router.push('/messaging' as any);
+              }}
+            >
+              <Ionicons name="mail-unread-outline" size={18} color="#fff" />
+              <Text style={styles.quickReplyActionText}>Inbox</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </BottomSheet>
+
+      <NewChatSheet
+        isVisible={newChatVisible}
+        onClose={() => setNewChatVisible(false)}
+        following={followingForNewChat}
+        onStartChat={(person) => {
+          setNewChatVisible(false);
+          void (async () => {
+            try {
+              const conversationId = await findOrCreateConversation(person);
+              setQuickReplyConversationId(conversationId);
+              setQuickReplyTitle(person.displayName ? `Message ${person.displayName}` : 'Message');
+              setQuickReplyPreview('');
+              quickReplySheetRef.current?.snapToIndex(0);
+            } catch (err: any) {
+              Alert.alert('Unable to start chat', err?.message || 'Please try again.');
+            }
+          })();
+        }}
+      />
     </View>
   );
 };
@@ -3017,6 +3365,53 @@ const BufferingPill: React.FC<{ message: string }> = ({ message }) => {
     </View>
   );
 };
+
+const IncomingMessagePill: React.FC<{
+  toast: InPlayerMessageToast;
+  anim: Animated.Value;
+  topOffset: number;
+  onPress: () => void;
+  onDismiss: () => void;
+}> = ({ toast, anim, topOffset, onPress, onDismiss }) => {
+  const translateY = anim.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] });
+  const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [0.98, 1] });
+  return (
+    <Animated.View
+      style={[
+        styles.messagePillWrap,
+        {
+          top: topOffset,
+          opacity: anim,
+          transform: [{ translateY }, { scale }],
+        },
+      ]}
+      pointerEvents="box-none"
+    >
+      <TouchableOpacity activeOpacity={0.88} style={styles.messagePill} onPress={onPress}>
+        <Ionicons name="chatbubble-ellipses-outline" size={18} color="#fff" style={{ marginRight: 10 }} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.messagePillTitle} numberOfLines={1}>
+            {toast.fromName || 'New message'}
+          </Text>
+          <Text style={styles.messagePillText} numberOfLines={1}>
+            {toast.text || 'Tap to reply'}
+          </Text>
+        </View>
+        <TouchableOpacity
+          onPress={(e) => {
+            e.stopPropagation();
+            onDismiss();
+          }}
+          style={styles.messagePillDismiss}
+          hitSlop={{ top: 8, left: 8, right: 8, bottom: 8 }}
+        >
+          <Ionicons name="close" size={18} color="rgba(255,255,255,0.85)" />
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+};
+
 function parseCaptionPayload(payload: string, type: 'srt' | 'vtt'): CaptionCue[] {
   const sanitized = payload.replace(/\r/g, '').replace('\uFEFF', '');
   const content = type === 'vtt' ? sanitized.replace(/^WEBVTT.*\n/, '') : sanitized;
@@ -4140,6 +4535,136 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     letterSpacing: 0.2,
+  },
+  messagePillWrap: {
+    position: 'absolute',
+    alignSelf: 'center',
+    zIndex: 41,
+  },
+  messagePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(229,9,20,0.26)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    minWidth: 260,
+    maxWidth: 340,
+  },
+  messagePillTitle: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  messagePillText: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  messagePillDismiss: {
+    marginLeft: 10,
+    padding: 2,
+  },
+  quickReplySheetBackground: {
+    backgroundColor: 'rgba(18,18,22,0.98)',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+  },
+  quickReplySheetHandle: {
+    backgroundColor: 'rgba(255,255,255,0.22)',
+  },
+  quickReplySheetContent: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  quickReplySheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 10,
+  },
+  quickReplySheetHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  quickReplyIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  quickReplySheetTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+    flex: 1,
+    paddingRight: 10,
+  },
+  quickReplyPreview: {
+    color: 'rgba(255,255,255,0.82)',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  quickReplyInputRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  quickReplyInput: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 110,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#fff',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  quickReplySendButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(229,9,20,0.85)',
+  },
+  quickReplySendButtonDisabled: {
+    opacity: 0.5,
+  },
+  quickReplyActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 16,
+  },
+  quickReplyAction: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    marginHorizontal: 6,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    gap: 6,
+  },
+  quickReplyActionText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
   },
   loaderTitle: {
     color: '#e50914',

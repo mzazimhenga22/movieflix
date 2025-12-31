@@ -7,7 +7,16 @@ import type { Firestore, Transaction, DocumentReference, DocumentData } from 'fi
 import { corsHeaders } from '../_shared/cors.ts';
 
 type PlanTier = 'plus' | 'premium';
-type DarajaAction = 'stkpush' | 'query' | 'marketplace_stkpush' | 'marketplace_query';
+type DarajaAction =
+  | 'stkpush'
+  | 'query'
+  | 'marketplace_stkpush'
+  | 'marketplace_query'
+  | 'promo_credits_stkpush'
+  | 'promo_credits_query'
+  | 'marketplace_promote_credits'
+  | 'marketplace_extend_promo_credits'
+  | 'marketplace_cancel_promo';
 
 class HttpError extends Error {
   status: number;
@@ -56,6 +65,23 @@ const PLATFORM_WALLET_ID =
 const WALLET_ACCOUNTS_COLLECTION = 'wallet_accounts';
 const WALLET_TRANSACTIONS_COLLECTION = 'wallet_transactions';
 const MARKETPLACE_ORDERS_COLLECTION = 'marketplace_orders';
+
+const PROMO_CREDITS_ACCOUNTS_COLLECTION = 'promo_credits_accounts';
+const PROMO_CREDITS_TRANSACTIONS_COLLECTION = 'promo_credits_transactions';
+const PROMO_CREDITS_TOPUPS_COLLECTION = 'promo_credits_topups';
+const MARKETPLACE_PRODUCTS_COLLECTION = 'marketplace_products';
+
+const PROMO_CREDITS_KES_PER_CREDIT = Number(Deno.env.get('PROMO_CREDITS_KES_PER_CREDIT') ?? '10');
+const PROMO_CREDITS_MIN_TOPUP_KSH = 50;
+const PROMO_CREDITS_MAX_TOPUP_KSH = 50_000;
+
+type PromotionPlacement = 'search' | 'story' | 'feed';
+type PromotionDurationUnit = 'hours' | 'days';
+
+const PROMO_RATES_CREDITS: Record<PromotionDurationUnit, Record<PromotionPlacement, number>> = {
+  hours: { search: 3, story: 6, feed: 8 },
+  days: { search: 50, story: 90, feed: 120 },
+};
 
 const AMOUNTS_KSH: Record<PlanTier, number> = {
   plus: 100,
@@ -114,6 +140,56 @@ function normalizeAmountKsh(raw: unknown): number {
   if (amount <= 0) throw new HttpError(400, 'Amount must be greater than zero');
   if (amount > STK_PUSH_MAX_KSH) throw new HttpError(400, `Amount is too high (max ${STK_PUSH_MAX_KSH} KSh)`);
   return amount;
+}
+
+function normalizePromoTopupAmountKsh(raw: unknown): number {
+  const amount = normalizeAmountKsh(raw);
+  if (amount < PROMO_CREDITS_MIN_TOPUP_KSH) {
+    throw new HttpError(400, `Minimum top up is ${PROMO_CREDITS_MIN_TOPUP_KSH} KSh`);
+  }
+  if (amount > PROMO_CREDITS_MAX_TOPUP_KSH) {
+    throw new HttpError(400, `Maximum top up is ${PROMO_CREDITS_MAX_TOPUP_KSH} KSh`);
+  }
+  if (!Number.isFinite(PROMO_CREDITS_KES_PER_CREDIT) || PROMO_CREDITS_KES_PER_CREDIT <= 0) {
+    throw new HttpError(500, 'Server misconfigured: PROMO_CREDITS_KES_PER_CREDIT must be a positive number');
+  }
+  if (amount % PROMO_CREDITS_KES_PER_CREDIT !== 0) {
+    throw new HttpError(400, `Amount must be a multiple of ${PROMO_CREDITS_KES_PER_CREDIT} KSh`);
+  }
+  return amount;
+}
+
+function normalizePlacement(raw: unknown): PromotionPlacement {
+  const v = String(raw ?? '').toLowerCase().trim();
+  if (v === 'search' || v === 'story' || v === 'feed') return v;
+  throw new HttpError(400, 'Invalid placement. Expected search, story, or feed.');
+}
+
+function normalizeDurationUnit(raw: unknown): PromotionDurationUnit {
+  const v = String(raw ?? '').toLowerCase().trim();
+  if (v === 'hours' || v === 'days') return v;
+  throw new HttpError(400, 'Invalid duration unit. Expected hours or days.');
+}
+
+function normalizeDurationValue(raw: unknown, unit: PromotionDurationUnit): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new HttpError(400, 'durationValue must be a number');
+  const value = Math.round(n);
+  if (value <= 0) throw new HttpError(400, 'durationValue must be greater than zero');
+  const max = unit === 'hours' ? 72 : 30;
+  if (value > max) throw new HttpError(400, `durationValue is too high (max ${max} ${unit})`);
+  return value;
+}
+
+function normalizeProductIds(raw: unknown): string[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  const seen = new Set<string>();
+  const ids = arr
+    .map((v) => String(v ?? '').trim())
+    .filter((v) => v && !seen.has(v) && (seen.add(v), true));
+  if (ids.length === 0) throw new HttpError(400, 'productIds is required');
+  if (ids.length > 25) throw new HttpError(400, 'Too many products selected');
+  return ids;
 }
 
 function normalizeReference(raw: unknown, fallback: string) {
@@ -273,6 +349,52 @@ function defaultWalletAccount(userId: string, currency: string): WalletAccountRe
     lifetimeIn: 0,
     lifetimeOut: 0,
   };
+}
+
+type PromoCreditsAccountRecord = {
+  userId: string;
+  availableCredits: number;
+  lifetimeIn: number;
+  lifetimeOut: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
+type PromoCreditsAccountContext = {
+  ref: DocumentReference<DocumentData>;
+  data: PromoCreditsAccountRecord;
+  exists: boolean;
+};
+
+function defaultPromoCreditsAccount(userId: string): PromoCreditsAccountRecord {
+  return {
+    userId,
+    availableCredits: 0,
+    lifetimeIn: 0,
+    lifetimeOut: 0,
+  };
+}
+
+async function getPromoCreditsAccount(tx: Transaction, userId: string): Promise<PromoCreditsAccountContext> {
+  if (!userId.trim()) throw new HttpError(500, 'Promo credits account missing userId');
+  const firestore = requireFirestore();
+  const ref = firestore.collection(PROMO_CREDITS_ACCOUNTS_COLLECTION).doc(userId);
+  const snap = await tx.get(ref);
+  const base = defaultPromoCreditsAccount(userId);
+  const data = snap.exists ? { ...base, ...(snap.data() as PromoCreditsAccountRecord) } : base;
+  return { ref, data, exists: snap.exists };
+}
+
+function computePromoCostCredits(args: {
+  unit: PromotionDurationUnit;
+  value: number;
+  placement: PromotionPlacement;
+  productCount: number;
+}): number {
+  const rate = PROMO_RATES_CREDITS?.[args.unit]?.[args.placement] ?? 0;
+  const base = Math.max(0, Math.round(rate * args.value));
+  const count = Math.max(1, Math.min(25, Math.floor(args.productCount)));
+  return base * count;
 }
 
 async function getWalletAccount(tx: Transaction, userId: string, currency: string): Promise<WalletAccountContext> {
@@ -741,6 +863,100 @@ serve(async (req: Request) => {
       });
     }
 
+    if (action === 'promo_credits_stkpush') {
+      rateLimitStkPush(auth.uid);
+      const phone = normalizePhone(body?.phone);
+      const amount = normalizePromoTopupAmountKsh(body?.amount);
+      const credits = Math.round(amount / PROMO_CREDITS_KES_PER_CREDIT);
+      if (credits <= 0) throw new HttpError(400, 'Top up amount is too low');
+
+      const firestore = requireFirestore();
+      const topupRef = firestore.collection(PROMO_CREDITS_TOPUPS_COLLECTION).doc();
+      const timestamp = timestampNow();
+      const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
+
+      const callbackUrl =
+        (Deno.env.get('DARAJA_CALLBACK_URL') ?? '').trim() || `${url.origin}${url.pathname}?action=callback`;
+      const accountReference = normalizeReference(body?.accountReference, `movieflix-credits-${auth.uid.slice(0, 6)}`);
+      const transactionDesc = normalizeDesc(body?.transactionDesc, 'MovieFlix promo credits');
+
+      await topupRef.set({
+        userId: auth.uid,
+        phone,
+        amountKsh: amount,
+        credits,
+        status: 'initiated',
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      try {
+        const accessToken = await getDarajaAccessToken();
+        const res = await fetch(`${baseUrl}/mpesa/stkpush/v1/processrequest`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            BusinessShortCode: BUSINESS_SHORTCODE,
+            Password: password,
+            Timestamp: timestamp,
+            TransactionType: TRANSACTION_TYPE,
+            Amount: amount,
+            PartyA: phone,
+            PartyB: BUSINESS_SHORTCODE,
+            PhoneNumber: phone,
+            CallBackURL: callbackUrl,
+            AccountReference: accountReference,
+            TransactionDesc: transactionDesc,
+          }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new HttpError(502, `Daraja STK push failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+        }
+
+        const merchantRequestId = (data as any)?.MerchantRequestID ?? null;
+        const checkoutRequestId = (data as any)?.CheckoutRequestID ?? null;
+
+        await topupRef.set(
+          {
+            merchantRequestId,
+            checkoutRequestId,
+            responseCode: (data as any)?.ResponseCode ?? null,
+            responseDescription: (data as any)?.ResponseDescription ?? null,
+            customerMessage: (data as any)?.CustomerMessage ?? null,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        return okResponse({
+          ok: true,
+          uid: auth.uid,
+          topupDocId: topupRef.id,
+          phone,
+          amount,
+          credits,
+          merchantRequestId,
+          checkoutRequestId,
+          customerMessage: (data as any)?.CustomerMessage ?? null,
+        });
+      } catch (err) {
+        await topupRef.set(
+          {
+            status: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        throw err;
+      }
+    }
+
     if (action === 'query' || action === 'marketplace_query') {
       const checkoutRequestId = String(body?.checkoutRequestId ?? '').trim();
       if (!checkoutRequestId) return badRequest('checkoutRequestId is required');
@@ -822,7 +1038,312 @@ serve(async (req: Request) => {
       });
     }
 
-    throw new HttpError(400, 'Invalid action. Expected stkpush, query, marketplace_stkpush, or marketplace_query.');
+    if (action === 'promo_credits_query') {
+      const firestore = requireFirestore();
+      const topupDocId = String(body?.topupDocId ?? '').trim();
+      if (!topupDocId) throw new HttpError(400, 'topupDocId is required');
+
+      const topupRef = firestore.collection(PROMO_CREDITS_TOPUPS_COLLECTION).doc(topupDocId);
+      const topupSnap = await topupRef.get();
+      if (!topupSnap.exists) throw new HttpError(404, 'Top up not found');
+
+      const topup = topupSnap.data() as any;
+      if (String(topup?.userId ?? '').trim() !== auth.uid) throw new HttpError(403, 'Not allowed');
+
+      const checkoutRequestId = String(topup?.checkoutRequestId ?? '').trim();
+      if (!checkoutRequestId) throw new HttpError(409, 'Top up is missing checkoutRequestId');
+
+      const timestamp = timestampNow();
+      const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
+      const accessToken = await getDarajaAccessToken();
+
+      const res = await fetch(`${baseUrl}/mpesa/stkpushquery/v1/query`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          BusinessShortCode: BUSINESS_SHORTCODE,
+          Password: password,
+          Timestamp: timestamp,
+          CheckoutRequestID: checkoutRequestId,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new HttpError(502, `Daraja query failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+      }
+
+      const resultCode = String((data as any)?.ResultCode ?? (data as any)?.resultCode ?? '').trim();
+      const resultDesc = (data as any)?.ResultDesc ?? null;
+
+      if (resultCode !== '0') {
+        await topupRef.set(
+          {
+            status: 'failed',
+            resultCode: resultCode || null,
+            resultDesc: resultDesc ? String(resultDesc) : null,
+            raw: data,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        return okResponse({
+          ok: true,
+          uid: auth.uid,
+          topupDocId,
+          checkoutRequestId,
+          status: 'failed',
+          resultCode: resultCode || null,
+          resultDesc: resultDesc ? String(resultDesc) : null,
+          raw: data,
+        });
+      }
+
+      const creditsToCredit = Math.max(0, Math.round(Number(topup?.credits ?? 0)));
+      const amountKsh = Math.max(0, Math.round(Number(topup?.amountKsh ?? 0)));
+      if (creditsToCredit <= 0 || amountKsh <= 0) throw new HttpError(500, 'Invalid top up record');
+
+      const txCollection = firestore.collection(PROMO_CREDITS_TRANSACTIONS_COLLECTION);
+
+      const result = await firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(topupRef);
+        if (!snap.exists) throw new HttpError(404, 'Top up not found');
+        const current = snap.data() as any;
+        if (String(current?.userId ?? '').trim() !== auth.uid) throw new HttpError(403, 'Not allowed');
+
+        const status = String(current?.status ?? '').toLowerCase();
+        if (status === 'confirmed') {
+          const account = await getPromoCreditsAccount(tx, auth.uid);
+          return {
+            alreadyProcessed: true,
+            availableCredits: account.data.availableCredits ?? 0,
+          };
+        }
+
+        const account = await getPromoCreditsAccount(tx, auth.uid);
+        const before = Math.max(0, Math.round(Number(account.data.availableCredits ?? 0)));
+        const after = before + creditsToCredit;
+
+        const promoTxRef = txCollection.doc();
+        tx.set(promoTxRef, {
+          userId: auth.uid,
+          type: 'topup',
+          direction: 'credit',
+          credits: creditsToCredit,
+          balanceAfter: after,
+          amountKsh,
+          reference: {
+            topupDocId,
+            checkoutRequestId,
+          },
+          createdAt: FieldValue.serverTimestamp(),
+        });
+
+        tx.set(
+          account.ref,
+          {
+            userId: auth.uid,
+            availableCredits: after,
+            lifetimeIn: (account.data.lifetimeIn ?? 0) + creditsToCredit,
+            lifetimeOut: account.data.lifetimeOut ?? 0,
+            updatedAt: FieldValue.serverTimestamp(),
+            ...(account.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+          },
+          { merge: true }
+        );
+
+        tx.set(
+          topupRef,
+          {
+            status: 'confirmed',
+            confirmedAt: FieldValue.serverTimestamp(),
+            resultCode: resultCode || null,
+            resultDesc: resultDesc ? String(resultDesc) : null,
+            raw: data,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        return {
+          alreadyProcessed: false,
+          availableCredits: after,
+          transactionId: promoTxRef.id,
+        };
+      });
+
+      return okResponse({
+        ok: true,
+        uid: auth.uid,
+        topupDocId,
+        checkoutRequestId,
+        status: 'confirmed',
+        resultCode: resultCode || null,
+        resultDesc: resultDesc ? String(resultDesc) : null,
+        availableCredits: (result as any)?.availableCredits ?? null,
+        raw: data,
+      });
+    }
+
+    if (action === 'marketplace_promote_credits' || action === 'marketplace_extend_promo_credits') {
+      const firestore = requireFirestore();
+      const productIds = normalizeProductIds(body?.productIds);
+      const placement = normalizePlacement(body?.placement);
+      const unit = normalizeDurationUnit(body?.durationUnit);
+      const durationValue = normalizeDurationValue(body?.durationValue, unit);
+
+      const now = Date.now();
+      const msPerUnit = unit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      const addMs = durationValue * msPerUnit;
+
+      const totalCredits = computePromoCostCredits({
+        unit,
+        value: durationValue,
+        placement,
+        productCount: productIds.length,
+      });
+
+      const productsCollection = firestore.collection(MARKETPLACE_PRODUCTS_COLLECTION);
+      const promoTxCollection = firestore.collection(PROMO_CREDITS_TRANSACTIONS_COLLECTION);
+
+      const result = await firestore.runTransaction(async (tx) => {
+        // Validate ownership + calculate current endsAt for extension
+        const productRefs = productIds.map((id) => productsCollection.doc(id));
+        const productSnaps = await Promise.all(productRefs.map((ref) => tx.get(ref)));
+
+        let baseEndsAtMs = now;
+        for (const snap of productSnaps) {
+          if (!snap.exists) throw new HttpError(404, 'One or more products not found');
+          const data = snap.data() as any;
+          const sellerId = String(data?.sellerId ?? '').trim();
+          if (!sellerId || sellerId !== auth.uid) throw new HttpError(403, 'You can only promote your own products');
+
+          if (action === 'marketplace_extend_promo_credits') {
+            const rawEnds = data?.promotionEndsAt ?? null;
+            const endsMs =
+              rawEnds && typeof rawEnds?.toMillis === 'function'
+                ? rawEnds.toMillis()
+                : rawEnds && typeof rawEnds?.toDate === 'function'
+                  ? rawEnds.toDate().getTime()
+                  : rawEnds instanceof Date
+                    ? rawEnds.getTime()
+                    : typeof rawEnds === 'number'
+                      ? rawEnds
+                      : typeof rawEnds === 'string'
+                        ? Date.parse(rawEnds)
+                        : null;
+            if (typeof endsMs === 'number' && Number.isFinite(endsMs)) {
+              baseEndsAtMs = Math.max(baseEndsAtMs, endsMs);
+            }
+          }
+        }
+
+        const account = await getPromoCreditsAccount(tx, auth.uid);
+        const available = Math.max(0, Math.round(Number(account.data.availableCredits ?? 0)));
+        if (totalCredits <= 0) throw new HttpError(400, 'Promotion cost must be greater than zero');
+        if (available < totalCredits) throw new HttpError(402, 'Insufficient promo credits. Please top up to continue.');
+
+        const after = available - totalCredits;
+
+        const promoTxRef = promoTxCollection.doc();
+        tx.set(promoTxRef, {
+          userId: auth.uid,
+          type: action === 'marketplace_extend_promo_credits' ? 'promotion_extend' : 'promotion_purchase',
+          direction: 'debit',
+          credits: totalCredits,
+          balanceAfter: after,
+          reference: {
+            productIds,
+            placement,
+            durationUnit: unit,
+            durationValue,
+          },
+          createdAt: FieldValue.serverTimestamp(),
+        });
+
+        tx.set(
+          account.ref,
+          {
+            userId: auth.uid,
+            availableCredits: after,
+            lifetimeIn: account.data.lifetimeIn ?? 0,
+            lifetimeOut: (account.data.lifetimeOut ?? 0) + totalCredits,
+            updatedAt: FieldValue.serverTimestamp(),
+            ...(account.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+          },
+          { merge: true }
+        );
+
+        const endsAt = new Date(baseEndsAtMs + addMs);
+        const perProductCredits = Math.round(totalCredits / productIds.length);
+
+        for (const ref of productRefs) {
+          tx.set(
+            ref,
+            {
+              promoted: true,
+              promotionPlacement: placement,
+              promotionDurationUnit: unit,
+              promotionDurationValue: durationValue,
+              promotionEndsAt: endsAt,
+              // Backwards-compatible fields used by existing client sorting/display.
+              promotionBid: perProductCredits,
+              promotionCost: perProductCredits,
+              promotionCurrency: 'credits',
+              promotionCostCredits: perProductCredits,
+              promotionLastPurchaseTxId: promoTxRef.id,
+              promotionUpdatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+
+        return {
+          availableCredits: after,
+          totalCredits,
+          endsAt: endsAt.toISOString(),
+          transactionId: promoTxRef.id,
+        };
+      });
+
+      return okResponse({ ok: true, uid: auth.uid, ...result });
+    }
+
+    if (action === 'marketplace_cancel_promo') {
+      const firestore = requireFirestore();
+      const productId = String(body?.productId ?? '').trim();
+      if (!productId) throw new HttpError(400, 'productId is required');
+
+      const ref = firestore.collection(MARKETPLACE_PRODUCTS_COLLECTION).doc(productId);
+      await firestore.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new HttpError(404, 'Product not found');
+        const data = snap.data() as any;
+        const sellerId = String(data?.sellerId ?? '').trim();
+        if (!sellerId || sellerId !== auth.uid) throw new HttpError(403, 'You can only cancel promotions for your own products');
+
+        tx.set(
+          ref,
+          {
+            promoted: false,
+            promotionEndsAt: new Date(),
+            promotionUpdatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      });
+
+      return okResponse({ ok: true, uid: auth.uid, productId });
+    }
+
+    throw new HttpError(
+      400,
+      'Invalid action. Expected stkpush, query, marketplace_stkpush, marketplace_query, promo_credits_stkpush, promo_credits_query, marketplace_promote_credits, marketplace_extend_promo_credits, or marketplace_cancel_promo.'
+    );
   } catch (err) {
     const status = err instanceof HttpError ? err.status : 500;
     const message = err instanceof Error ? err.message : String(err);
