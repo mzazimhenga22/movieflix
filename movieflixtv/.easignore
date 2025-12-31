@@ -1,0 +1,12 @@
+.git/
+.expo/
+node_modules/
+
+# Local env files
+.env
+.env.*
+
+# Never upload Firebase Admin SDK service account keys
+*adminsdk*.json
+firebase-adminsdk*.json
+movieflixreactnative-firebase-adminsdk-*.json
