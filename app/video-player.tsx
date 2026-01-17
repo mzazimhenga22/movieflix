@@ -4,12 +4,14 @@ import Slider from '@react-native-community/slider';
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, InterruptionModeAndroid, InterruptionModeIOS, ResizeMode, Video } from 'expo-av';
 import * as Brightness from 'expo-brightness';
+import { activateKeepAwakeAsync, deactivateKeepAwake, isAvailableAsync } from 'expo-keep-awake';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppStateStatus } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
     ActivityIndicator,
     AppState,
@@ -114,6 +116,99 @@ type InPlayerMessageToast = {
 const CONTROLS_HIDE_DELAY_PLAYING = 10500;
 const CONTROLS_HIDE_DELAY_PAUSED = 16500;
 const SURFACE_DOUBLE_TAP_MS = 350;
+const INTRO_DEFAULT_START_MS = 12000;
+const INTRO_DEFAULT_END_MS = 90000;
+const NEXT_EPISODE_WINDOW_MS = 90000;
+
+// Fetch subtitles from multiple free sources
+async function fetchFallbackSubtitles(
+  imdbId?: string,
+  tmdbId?: string,
+  mediaType?: string,
+  seasonNum?: number,
+  episodeNum?: number,
+): Promise<CaptionSource[]> {
+  if (!imdbId && !tmdbId) return [];
+  
+  const subs: CaptionSource[] = [];
+  
+  // Try OpenSubtitles.org hash-less search (free endpoint)
+  try {
+    const imdbNum = imdbId?.replace('tt', '') || '';
+    let osUrl = `https://rest.opensubtitles.org/search/imdbid-${imdbNum}`;
+    if (mediaType === 'tv' && seasonNum && episodeNum) {
+      osUrl += `/season-${seasonNum}/episode-${episodeNum}`;
+    }
+    
+    const osResponse = await fetch(osUrl, {
+      headers: {
+        'User-Agent': 'TemporaryUserAgent',
+        'X-User-Agent': 'TemporaryUserAgent',
+      },
+    });
+    
+    if (osResponse.ok) {
+      const osData = await osResponse.json();
+      const seenLangs = new Set<string>();
+      
+      for (const item of osData ?? []) {
+        if (!item?.SubDownloadLink) continue;
+        
+        const lang = item.ISO639?.toLowerCase() || item.LanguageName?.toLowerCase() || 'en';
+        if (seenLangs.has(lang)) continue;
+        seenLangs.add(lang);
+        
+        subs.push({
+          id: `os-${item.IDSubtitleFile || subs.length}`,
+          type: 'srt',
+          url: item.SubDownloadLink.replace('.gz', ''),
+          language: lang,
+          display: item.LanguageName || lang.toUpperCase(),
+        });
+        
+        if (subs.length >= 10) break;
+      }
+    }
+  } catch (err) {
+    if (__DEV__) console.warn('[OpenSubs] Fetch failed', err);
+  }
+  
+  // If no subs found, try YIFY subs for movies
+  if (subs.length === 0 && mediaType !== 'tv' && imdbId) {
+    try {
+      const yifyRes = await fetch(`https://yifysubtitles.ch/movie-imdb/${imdbId}`);
+      if (yifyRes.ok) {
+        const html = await yifyRes.text();
+        // Parse subtitle links from HTML
+        const matches = html.matchAll(/href="(\/subtitles\/[^"]+)"/g);
+        let count = 0;
+        for (const match of matches) {
+          if (count >= 5) break;
+          const subPage = match[1];
+          const langMatch = subPage.match(/\/subtitles\/[^/]+\/([^/]+)/);
+          const lang = langMatch?.[1] || 'english';
+          
+          subs.push({
+            id: `yify-${count}`,
+            type: 'srt',
+            url: `https://yifysubtitles.ch${subPage}`,
+            language: lang.slice(0, 2),
+            display: lang.charAt(0).toUpperCase() + lang.slice(1),
+          });
+          count++;
+        }
+      }
+    } catch (err) {
+      if (__DEV__) console.warn('[YIFY] Fetch failed', err);
+    }
+  }
+  
+  if (__DEV__ && subs.length > 0) {
+    console.log('[Subtitles] Found fallback subs:', subs.length);
+  }
+  
+  return subs;
+}
 const DEFAULT_STREAM_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const RGSHOWS_REFERER = 'https://www.rgshows.ru/';
@@ -140,7 +235,7 @@ function normalizePlaybackUri(uri: string): string {
   return uri;
 }
 
-type TmdbEnrichment = { imdbId?: string; releaseYear?: number };
+type TmdbEnrichment = { imdbId?: string; releaseYear?: number; contentRating?: string; runtime?: number };
 const tmdbEnrichmentCache = new Map<string, TmdbEnrichment>();
 
 async function fetchTmdbEnrichment(
@@ -148,7 +243,10 @@ async function fetchTmdbEnrichment(
   mediaType: 'movie' | 'tv',
   signal?: AbortSignal,
 ): Promise<TmdbEnrichment> {
-  const url = `${API_BASE_URL}/${mediaType}/${tmdbId}?api_key=${API_KEY}&append_to_response=external_ids`;
+  const appendResponse = mediaType === 'movie' 
+    ? 'external_ids,release_dates' 
+    : 'external_ids,content_ratings';
+  const url = `${API_BASE_URL}/${mediaType}/${tmdbId}?api_key=${API_KEY}&append_to_response=${appendResponse}`;
   const res = await fetch(url, { signal });
   if (!res.ok) return {};
   const data: any = await res.json();
@@ -160,7 +258,24 @@ async function fetchTmdbEnrichment(
   const yearRaw = typeof dateRaw === 'string' ? parseInt(dateRaw.slice(0, 4), 10) : NaN;
   const releaseYear = Number.isFinite(yearRaw) ? yearRaw : undefined;
 
-  return { imdbId, releaseYear };
+  // Extract content rating (US preferred, fallback to any available)
+  let contentRating: string | undefined;
+  if (mediaType === 'movie') {
+    const releaseDates = data?.release_dates?.results ?? [];
+    const usRelease = releaseDates.find((r: any) => r?.iso_3166_1 === 'US');
+    const certification = usRelease?.release_dates?.find((d: any) => d?.certification)?.certification;
+    contentRating = certification || releaseDates[0]?.release_dates?.[0]?.certification;
+  } else {
+    const contentRatings = data?.content_ratings?.results ?? [];
+    const usRating = contentRatings.find((r: any) => r?.iso_3166_1 === 'US');
+    contentRating = usRating?.rating || contentRatings[0]?.rating;
+  }
+
+  // Extract runtime
+  const runtime = typeof data?.runtime === 'number' ? data.runtime : 
+                  (Array.isArray(data?.episode_run_time) && data.episode_run_time[0]) || undefined;
+
+  return { imdbId, releaseYear, contentRating, runtime };
 }
 
 const needsRgShowsHeaders = (uri?: string, sourceId?: string, embedId?: string) => {
@@ -369,6 +484,7 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
 const VideoPlayerScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
+  const insets = useSafeAreaInsets();
   const { currentPlan } = useSubscription();
   const { products: promotedProducts, hasAds: hasPromotedAds } = usePromotedProducts({ placement: 'story', limit: 20 });
 
@@ -467,6 +583,9 @@ const VideoPlayerScreen = () => {
   const seasonEpisodeCountParam = parseNumericParam(
     typeof params.seasonEpisodeCount === 'string' ? params.seasonEpisodeCount : undefined,
   );
+  const resumeMillisParam = parseNumericParam(
+    typeof params.resumeMillis === 'string' ? params.resumeMillis : undefined,
+  );
   const initialSeasonNumber = isTvShow ? seasonNumberParam ?? undefined : undefined;
   const initialEpisodeNumber = isTvShow ? episodeNumberParam ?? undefined : undefined;
   const initialSeasonTitleValue = isTvShow
@@ -544,6 +663,8 @@ const VideoPlayerScreen = () => {
   const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
   const isPlayingRef = useRef(true);
   const pendingAudioFocusRetryRef = useRef(false);
+  const keepAwakeAvailableRef = useRef<boolean | null>(null);
+  const keepAwakeActiveRef = useRef(false);
   const [activeTitle, setActiveTitle] = useState(displayTitle);
   useEffect(() => {
     setActiveTitle(displayTitle);
@@ -552,16 +673,58 @@ const VideoPlayerScreen = () => {
   const lastPlayPauseIntentTsRef = useRef(0);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (keepAwakeAvailableRef.current !== null) return;
+      try {
+        const available = await isAvailableAsync();
+        if (!cancelled) keepAwakeAvailableRef.current = available;
+      } catch {
+        if (!cancelled) keepAwakeAvailableRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
 
-  const ensurePlaybackAudioMode = useCallback(async () => {
+  useEffect(() => {
+    const tag = 'MovieFlixVideoPlayer';
+    return () => {
+      keepAwakeActiveRef.current = false;
+      void deactivateKeepAwake(tag).catch(() => {});
+    };
+  }, []);
+
+  const resolvePipHandlers = useCallback(() => {
+    const player = videoRef.current as any;
+    if (!player) return { enterPip: null, exitPip: null };
+    const enterPip =
+      typeof player?.presentPictureInPictureAsync === 'function'
+        ? player.presentPictureInPictureAsync.bind(player)
+        : typeof player?.enterPictureInPictureAsync === 'function'
+        ? player.enterPictureInPictureAsync.bind(player)
+        : null;
+    const exitPip =
+      typeof player?.dismissPictureInPictureAsync === 'function'
+        ? player.dismissPictureInPictureAsync.bind(player)
+        : typeof player?.exitPictureInPictureAsync === 'function'
+        ? player.exitPictureInPictureAsync.bind(player)
+        : null;
+    return { enterPip, exitPip };
+  }, []);
+
+  const ensurePlaybackAudioMode = useCallback(async (allowBackground = false) => {
     try {
       await Audio.setIsEnabledAsync(true);
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
+        staysActiveInBackground: allowBackground,
         interruptionModeIOS: InterruptionModeIOS.DuckOthers,
         interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
         shouldDuckAndroid: true,
@@ -578,6 +741,49 @@ const VideoPlayerScreen = () => {
       const isActive = nextState === 'active';
       setAppIsActive(isActive);
 
+      if ((nextState === 'background' || nextState === 'inactive') && pipUiEnabled) {
+        if (!isPipActiveRef.current && !pipPendingRef.current && isPlayingRef.current && !midrollActiveRef.current) {
+          setPipPending(true);
+          if (pipPendingTimeoutRef.current) {
+            clearTimeout(pipPendingTimeoutRef.current);
+            pipPendingTimeoutRef.current = null;
+          }
+          const { enterPip } = resolvePipHandlers();
+          if (enterPip) {
+            void (async () => {
+              await ensurePlaybackAudioMode(true);
+              try {
+                await enterPip();
+              } catch {
+                // ignore
+              } finally {
+                setPipPending(false);
+              }
+            })();
+          } else {
+            pipPendingTimeoutRef.current = setTimeout(() => {
+              setPipPending(false);
+              pipPendingTimeoutRef.current = null;
+            }, 1500);
+          }
+        }
+      }
+
+      if (isActive) {
+        if (pipPendingTimeoutRef.current) {
+          clearTimeout(pipPendingTimeoutRef.current);
+          pipPendingTimeoutRef.current = null;
+        }
+        setPipPending(false);
+        if (isPipActiveRef.current) {
+          const { exitPip } = resolvePipHandlers();
+          if (exitPip) {
+            void exitPip().catch(() => {});
+          }
+          setIsPipActive(false);
+        }
+      }
+
       if (isActive && pendingAudioFocusRetryRef.current) {
         pendingAudioFocusRetryRef.current = false;
         const video = videoRef.current;
@@ -593,19 +799,33 @@ const VideoPlayerScreen = () => {
         })();
       }
     });
-    return () => sub.remove();
-  }, [ensurePlaybackAudioMode]);
+    return () => {
+      sub.remove();
+      if (pipPendingTimeoutRef.current) {
+        clearTimeout(pipPendingTimeoutRef.current);
+        pipPendingTimeoutRef.current = null;
+      }
+    };
+  }, [ensurePlaybackAudioMode, pipUiEnabled, resolvePipHandlers]);
 
   const [showControls, setShowControls] = useState(true);
   const [controlsSession, setControlsSession] = useState(0);
+  const [showContentRating, setShowContentRating] = useState(false);
+  const contentRatingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSurfaceTapRef = useRef(0);
   const [positionMillis, setPositionMillis] = useState(0);
   const positionMillisRef = useRef(0);
   const [durationMillis, setDurationMillis] = useState(0);
+  const durationMillisRef = useRef(0);
   const [bufferedMillis, setBufferedMillis] = useState(0);
   const bufferedMillisRef = useRef(0);
   const [seekPosition, setSeekPosition] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
+  const [introWindow, setIntroWindow] = useState({ start: INTRO_DEFAULT_START_MS, end: INTRO_DEFAULT_END_MS });
+  const [skipIntroShown, setSkipIntroShown] = useState(false);
+  const [showSkipIntro, setShowSkipIntro] = useState(false);
+  const [showNextEpisode, setShowNextEpisode] = useState(false);
+  const [nextEpisodeProgress, setNextEpisodeProgress] = useState(0);
   const [brightness, setBrightness] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [volume, setVolume] = useState(1);
@@ -674,8 +894,19 @@ const VideoPlayerScreen = () => {
   }, [midrollActive]);
 
   useEffect(() => {
+    isPipActiveRef.current = isPipActive;
+  }, [isPipActive]);
+
+  useEffect(() => {
+    pipPendingRef.current = pipPending;
+  }, [pipPending]);
+
+  useEffect(() => {
     positionMillisRef.current = positionMillis;
   }, [positionMillis]);
+  useEffect(() => {
+    durationMillisRef.current = durationMillis;
+  }, [durationMillis]);
   const { user } = useUser();
 
   const uid = user?.uid ?? '';
@@ -901,7 +1132,8 @@ const VideoPlayerScreen = () => {
       if (!user?.uid) return;
 
       const now = Date.now();
-      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 900) return;
+      // More frequent sync - every 500ms for smooth realtime experience
+      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 500) return;
       lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
 
       await updateDoc(watchPartyRef, {
@@ -909,6 +1141,26 @@ const VideoPlayerScreen = () => {
         playback: {
           isPlaying: next.isPlaying,
           positionMillis: Math.max(0, Math.floor(next.positionMillis)),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp(),
+        },
+      }).catch(() => {});
+    },
+    [isWatchPartyHost, user?.uid, watchPartyRef],
+  );
+
+  // Publish episode change to watch party
+  const publishWatchPartyEpisode = useCallback(
+    async (episodeData: { seasonNumber: number; episodeNumber: number; title: string }) => {
+      if (!watchPartyRef) return;
+      if (!isWatchPartyHost) return;
+      if (!user?.uid) return;
+
+      await updateDoc(watchPartyRef, {
+        currentEpisode: {
+          seasonNumber: episodeData.seasonNumber,
+          episodeNumber: episodeData.episodeNumber,
+          title: episodeData.title,
           updatedBy: user.uid,
           updatedAt: serverTimestamp(),
         },
@@ -1021,6 +1273,11 @@ const VideoPlayerScreen = () => {
   const [videoReloadKey, setVideoReloadKey] = useState(0);
   const prefetchKey = typeof params.__prefetchKey === 'string' ? params.__prefetchKey : undefined;
   const [prefetchChecked, setPrefetchChecked] = useState(() => !prefetchKey);
+
+  const resumeAppliedRef = useRef(false);
+  useEffect(() => {
+    resumeAppliedRef.current = false;
+  }, [playbackSource?.uri, resumeMillisParam, tmdbId, seasonNumberParam, episodeNumberParam]);
   const watchHistoryEntry = useMemo<Media | null>(() => {
     if (!parsedTmdbNumericId) return null;
     const releaseDateForEntry = rawReleaseDateParam ?? (releaseYear ? `${releaseYear}` : undefined);
@@ -1068,6 +1325,12 @@ const VideoPlayerScreen = () => {
   const [isLocked, setIsLocked] = useState(false);
   const [isPipSupported, setIsPipSupported] = useState(false);
   const [isPipActive, setIsPipActive] = useState(false);
+  const [pipPending, setPipPending] = useState(false);
+  const isPipActiveRef = useRef(false);
+  const pipPendingRef = useRef(false);
+  const pipPendingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Only show the PiP button when the underlying Video instance exposes PiP methods on iOS.
+  // Android can auto-enter PiP via Home button, so keep it enabled there.
   const pipUiEnabled = Platform.OS === 'android' ? true : isPipSupported;
   const [isMini, setIsMini] = useState(false);
   const captionPreferenceKeyRef = useRef<string | null>(null);
@@ -1088,6 +1351,7 @@ const VideoPlayerScreen = () => {
   const prevPositionRef = useRef<number>(0);
   const lastAdvanceTsRef = useRef<number>(Date.now());
   const statusLogRef = useRef<{ lastTs: number; lastKey: string }>({ lastTs: 0, lastKey: '' });
+  const uiProgressUpdateRef = useRef<{ lastTs: number; lastPos: number }>({ lastTs: 0, lastPos: 0 });
   const autoQualityStepRef = useRef(0);
   const lastAutoDowngradeTsRef = useRef(0);
   const [avDrawerOpen, setAvDrawerOpen] = useState(false);
@@ -1195,6 +1459,12 @@ const VideoPlayerScreen = () => {
     masterPlaylistRef.current = playbackSource?.uri ?? null;
   }, [playbackSource?.uri]);
   useEffect(() => {
+    setSkipIntroShown(false);
+    setShowSkipIntro(false);
+    setShowNextEpisode(false);
+    setNextEpisodeProgress(0);
+  }, [playbackSource?.uri]);
+  useEffect(() => {
     let active = true;
     const syncHistoryKey = async () => {
       try {
@@ -1217,12 +1487,134 @@ const VideoPlayerScreen = () => {
     };
   }, []);
   const [episodeQueue, setEpisodeQueue] = useState(upcomingEpisodes);
+  const [episodesFetching, setEpisodesFetching] = useState(false);
+  const nextUpEpisode = useMemo(() => episodeQueue[0], [episodeQueue]);
+  const nextUpEpisodeRef = useRef<UpcomingEpisode | undefined>(nextUpEpisode);
   useEffect(() => {
-    setEpisodeQueue(upcomingEpisodes);
-    if (!upcomingEpisodes.length) {
-      setEpisodeDrawerOpen(false);
+    nextUpEpisodeRef.current = nextUpEpisode;
+  }, [nextUpEpisode]);
+  
+  // Fetch upcoming episodes from TMDB if not provided (e.g., from Continue Watching)
+  useEffect(() => {
+    if (upcomingEpisodes.length > 0) {
+      setEpisodeQueue(upcomingEpisodes);
+      return;
     }
-  }, [upcomingEpisodes]);
+    
+    // Only fetch for TV shows with season/episode info
+    if (!isTvShow || !tmdbId || !transitionReady) {
+      setEpisodeQueue([]);
+      setEpisodeDrawerOpen(false);
+      return;
+    }
+    
+    let cancelled = false;
+    const fetchEpisodesFromTmdb = async () => {
+      setEpisodesFetching(true);
+      try {
+        // First fetch TV show details to get seasons
+        const showUrl = `${API_BASE_URL}/tv/${tmdbId}?api_key=${API_KEY}`;
+        const showRes = await fetch(showUrl);
+        if (!showRes.ok) throw new Error('Failed to fetch TV show');
+        const showData = await showRes.json();
+        
+        const seasons = (showData?.seasons ?? []).filter(
+          (s: any) => typeof s?.season_number === 'number' && s.season_number > 0
+        );
+        
+        if (!seasons.length || cancelled) {
+          setEpisodeQueue([]);
+          return;
+        }
+        
+        // Determine current season (use param or default to 1)
+        const currentSeasonNum = initialSeasonNumber ?? 1;
+        const currentEpisodeNum = initialEpisodeNumber ?? 1;
+        
+        // Fetch current season details
+        const seasonUrl = `${API_BASE_URL}/tv/${tmdbId}/season/${currentSeasonNum}?api_key=${API_KEY}`;
+        const seasonRes = await fetch(seasonUrl);
+        if (!seasonRes.ok) throw new Error('Failed to fetch season');
+        const seasonData = await seasonRes.json();
+        
+        const upcoming: UpcomingEpisode[] = [];
+        const episodes = seasonData?.episodes ?? [];
+        
+        // Add remaining episodes from current season
+        episodes
+          .filter((ep: any) => ep.episode_number > currentEpisodeNum)
+          .forEach((ep: any) => {
+            upcoming.push({
+              id: ep.id,
+              title: ep.name,
+              seasonName: seasonData?.name ?? `Season ${currentSeasonNum}`,
+              episodeNumber: ep.episode_number,
+              overview: ep.overview,
+              runtime: ep.runtime,
+              stillPath: ep.still_path,
+              seasonNumber: currentSeasonNum,
+              seasonTmdbId: seasonData?.id,
+              episodeTmdbId: ep.id,
+              seasonEpisodeCount: episodes.length,
+            });
+          });
+        
+        // Optionally fetch next season if current is almost done
+        if (upcoming.length < 5 && seasons.length > currentSeasonNum) {
+          const nextSeasonNum = currentSeasonNum + 1;
+          try {
+            const nextSeasonUrl = `${API_BASE_URL}/tv/${tmdbId}/season/${nextSeasonNum}?api_key=${API_KEY}`;
+            const nextRes = await fetch(nextSeasonUrl);
+            if (nextRes.ok) {
+              const nextSeasonData = await nextRes.json();
+              const nextEpisodes = nextSeasonData?.episodes ?? [];
+              nextEpisodes.slice(0, 10).forEach((ep: any) => {
+                upcoming.push({
+                  id: ep.id,
+                  title: ep.name,
+                  seasonName: nextSeasonData?.name ?? `Season ${nextSeasonNum}`,
+                  episodeNumber: ep.episode_number,
+                  overview: ep.overview,
+                  runtime: ep.runtime,
+                  stillPath: ep.still_path,
+                  seasonNumber: nextSeasonNum,
+                  seasonTmdbId: nextSeasonData?.id,
+                  episodeTmdbId: ep.id,
+                  seasonEpisodeCount: nextEpisodes.length,
+                });
+              });
+            }
+          } catch {
+            // Ignore next season fetch errors
+          }
+        }
+        
+        if (!cancelled) {
+          setEpisodeQueue(upcoming);
+          if (__DEV__) {
+            console.log('[VideoPlayer] Fetched upcoming episodes from TMDB:', upcoming.length);
+          }
+        }
+      } catch (err) {
+        if (__DEV__) {
+          console.warn('[VideoPlayer] Failed to fetch episodes from TMDB:', err);
+        }
+        if (!cancelled) {
+          setEpisodeQueue([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setEpisodesFetching(false);
+        }
+      }
+    };
+    
+    fetchEpisodesFromTmdb();
+    
+    return () => {
+      cancelled = true;
+    };
+  }, [upcomingEpisodes, isTvShow, tmdbId, transitionReady, initialSeasonNumber, initialEpisodeNumber]);
   const applyPlaybackResult = useCallback(
     (playback: PStreamPlayback, options?: { title?: string }) => {
       if (!playback) return;
@@ -1237,16 +1629,41 @@ const VideoPlayerScreen = () => {
           title: options?.title,
         });
       }
+      // Map PStreamCaption to CaptionSource format
+      let mappedCaptions: CaptionSource[] = (playback.stream?.captions ?? [])
+        .filter((cap: any) => cap?.url)
+        .map((cap: any, idx: number) => ({
+          id: cap.id || `caption-${idx}`,
+          type: (cap.type === 'srt' || cap.type === 'vtt') ? cap.type : 'vtt',
+          url: cap.url,
+          language: cap.lang || cap.language,
+          display: cap.label || cap.lang || cap.language || `Subtitle ${idx + 1}`,
+        }));
+
       const payload = createPlaybackSource({
         uri: playback.uri,
         headers: playback.headers,
         streamType: playback.stream?.type,
-        captions: playback.stream?.captions,
+        captions: mappedCaptions,
         sourceId: playback.sourceId,
         embedId: playback.embedId,
       });
       setPlaybackSource(payload);
-      setCaptionSources(playback.stream?.captions ?? []);
+      setCaptionSources(mappedCaptions);
+
+      // Fetch subtitle fallback if stream has no captions
+      if (mappedCaptions.length === 0) {
+        fetchFallbackSubtitles(imdbId, tmdbId, rawMediaType, seasonNumberParam, episodeNumberParam)
+          .then((fallbackSubs) => {
+            if (fallbackSubs.length > 0) {
+              setCaptionSources(fallbackSubs);
+              if (__DEV__) {
+                console.log('[VideoPlayer] Loaded fallback subtitles', fallbackSubs.length);
+              }
+            }
+          })
+          .catch(() => {});
+      }
       setSelectedCaptionId('off');
       captionCacheRef.current = {};
       captionCuesRef.current = [];
@@ -1488,6 +1905,35 @@ const VideoPlayerScreen = () => {
   }, [transitionReady, videoPlaybackSource, appIsActive, ensurePlaybackAudioMode]);
 
   useEffect(() => {
+    const tag = 'MovieFlixVideoPlayer';
+    const shouldKeepAwake =
+      transitionReady &&
+      Boolean(videoPlaybackSource) &&
+      (appIsActive || isPipActive || pipPending) &&
+      isPlaying &&
+      !midrollActive;
+
+    if (keepAwakeActiveRef.current === shouldKeepAwake) return;
+    keepAwakeActiveRef.current = shouldKeepAwake;
+
+    void (async () => {
+      try {
+        const available =
+          keepAwakeAvailableRef.current ?? (keepAwakeAvailableRef.current = await isAvailableAsync());
+        if (!available) return;
+
+        if (shouldKeepAwake) {
+          await activateKeepAwakeAsync(tag);
+        } else {
+          await deactivateKeepAwake(tag);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [transitionReady, videoPlaybackSource, appIsActive, isPipActive, pipPending, isPlaying, midrollActive]);
+
+  useEffect(() => {
     if (__DEV__) {
       if (videoPlaybackSource) {
         console.log('[VideoPlayer] Prepared AVPlaybackSource', {
@@ -1505,6 +1951,9 @@ const VideoPlayerScreen = () => {
   useEffect(() => {
     if (!transitionReady) return;
     if (!isHlsSource) return;
+    if (!videoPlaybackSource) return;
+    if (!isPlaying || midrollActive) return;
+    if (!(appIsActive || isPipActive || pipPending)) return;
     const uri = qualityOverrideUri ?? playbackSource?.uri;
     if (!uri) return;
 
@@ -1536,7 +1985,7 @@ const VideoPlayerScreen = () => {
     const interval = setInterval(() => {
       if (cancelled) return;
       void warmup(showBufferingOverlay ? 'aggressive' : 'normal');
-    }, 45000);
+    }, 70000);
 
     return () => {
       cancelled = true;
@@ -1545,6 +1994,12 @@ const VideoPlayerScreen = () => {
   }, [
     transitionReady,
     isHlsSource,
+    videoPlaybackSource,
+    isPlaying,
+    midrollActive,
+    appIsActive,
+    isPipActive,
+    pipPending,
     playbackSource?.uri,
     qualityOverrideUri,
     selectedQualityId,
@@ -1556,6 +2011,9 @@ const VideoPlayerScreen = () => {
     if (!showBufferingOverlay) return;
     if (!transitionReady) return;
     if (!isHlsSource) return;
+    if (!videoPlaybackSource) return;
+    if (!isPlaying || midrollActive) return;
+    if (!(appIsActive || isPipActive || pipPending)) return;
     const uri = qualityOverrideUri ?? playbackSource?.uri;
     if (!uri) return;
     (async () => {
@@ -1572,7 +2030,20 @@ const VideoPlayerScreen = () => {
         // ignore
       }
     })();
-  }, [showBufferingOverlay, transitionReady, isHlsSource, playbackSource?.uri, qualityOverrideUri, activeStreamHeaders]);
+  }, [
+    showBufferingOverlay,
+    transitionReady,
+    isHlsSource,
+    videoPlaybackSource,
+    isPlaying,
+    midrollActive,
+    appIsActive,
+    isPipActive,
+    pipPending,
+    playbackSource?.uri,
+    qualityOverrideUri,
+    activeStreamHeaders,
+  ]);
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
   const shouldShowMovieFlixLoader = isFetchingStream || isInitialStreamPending || !transitionReady;
   let loaderMessage = 'Fetching stream...';
@@ -1714,34 +2185,96 @@ useEffect(() => {
     }).catch(() => {});
   }
 }, [audioTrackOptions]);
-  // lock orientation + setup brightness
-  useEffect(() => {
-    const setup = async () => {
-      try {
-        await ScreenOrientation.lockAsync(
-          ScreenOrientation.OrientationLock.LANDSCAPE
-        );
-        await Brightness.requestPermissionsAsync();
-        const current = await Brightness.getBrightnessAsync();
-        pendingBrightnessRef.current = current;
-        setBrightness(current);
-      } catch (e) {
-        console.warn('Video setup error', e);
-      }
-    };
-    setup();
-    return () => {
-      Brightness.restoreSystemBrightnessAsync();
-      ScreenOrientation.unlockAsync();
-    };
-  }, []);
+
+  // lock orientation + setup brightness (focus-aware so the app doesn't stay landscape after leaving this screen)
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      let lockActive = true;
+
+      const setup = async () => {
+        try {
+          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+          await Brightness.requestPermissionsAsync();
+          const current = await Brightness.getBrightnessAsync();
+          if (cancelled) return;
+          pendingBrightnessRef.current = current;
+          setBrightness(current);
+        } catch (e) {
+          console.warn('Video setup error', e);
+        }
+      };
+
+      setup();
+
+      // If the app is backgrounded from the landscape player, force portrait so we don't re-open the app in landscape.
+      const sub = AppState.addEventListener('change', (state) => {
+        if (!lockActive) return;
+        if (state === 'background' || state === 'inactive') {
+          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+        }
+        if (state === 'active') {
+          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
+        }
+      });
+
+      return () => {
+        lockActive = false;
+        cancelled = true;
+        sub.remove();
+        void Brightness.restoreSystemBrightnessAsync().catch(() => {});
+        void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
+          .catch(() => ScreenOrientation.unlockAsync().catch(() => {}));
+      };
+    }, []),
+  );
+
   // auto-hide controls when playing
   useEffect(() => {
+    if (isPipActive) {
+      setShowControls(false);
+      return;
+    }
     if (!showControls || episodeDrawerOpen || isLocked) return;
     const delay = isPlaying ? CONTROLS_HIDE_DELAY_PLAYING : CONTROLS_HIDE_DELAY_PAUSED;
     const timeout = setTimeout(() => setShowControls(false), delay);
     return () => clearTimeout(timeout);
-  }, [showControls, isPlaying, episodeDrawerOpen, controlsSession, isLocked]);
+  }, [showControls, isPlaying, episodeDrawerOpen, controlsSession, isLocked, isPipActive]);
+
+  // Track if playback has actually started (position > 0 and has duration)
+  const hasPlaybackStarted = positionMillis > 500 && durationMillis > 0;
+  const contentRatingShownRef = useRef(false);
+
+  // Show content rating badge once when playback starts (not on controls hide)
+  useEffect(() => {
+    if (contentRatingTimeoutRef.current) {
+      clearTimeout(contentRatingTimeoutRef.current);
+      contentRatingTimeoutRef.current = null;
+    }
+
+    // Only show once per playback session when video actually starts playing
+    if (hasPlaybackStarted && isPlaying && !contentRatingShownRef.current && !midrollActive && !isLocked) {
+      contentRatingShownRef.current = true;
+      setShowContentRating(true);
+      // Auto-hide after 5 seconds
+      contentRatingTimeoutRef.current = setTimeout(() => {
+        setShowContentRating(false);
+      }, 5000);
+    }
+
+    return () => {
+      if (contentRatingTimeoutRef.current) {
+        clearTimeout(contentRatingTimeoutRef.current);
+        contentRatingTimeoutRef.current = null;
+      }
+    };
+  }, [hasPlaybackStarted, isPlaying, midrollActive, isLocked]);
+
+  // Reset content rating shown flag when episode/source changes
+  useEffect(() => {
+    contentRatingShownRef.current = false;
+    setShowContentRating(false);
+  }, [playbackSource?.uri]);
 
   const startMidrollAd = useCallback(async () => {
     if (currentPlan !== 'free') return;
@@ -1864,6 +2397,40 @@ useEffect(() => {
         const filtered = parsed.filter((entry) => entry?.id !== baseEntry.id);
         if (shouldRemove) {
           await AsyncStorage.setItem(watchHistoryKey, JSON.stringify(filtered));
+
+          if (user?.uid) {
+            const profileId = activeProfile?.id ?? 'default';
+            const mediaTypeForDoc = (baseEntry.media_type || normalizedMediaType || 'movie') as string;
+            const docId = `${profileId}_${mediaTypeForDoc}_${String(baseEntry.id)}`;
+            void setDoc(
+              doc(firestore, 'users', user.uid, 'watchHistory', docId),
+              {
+                userId: user.uid,
+                profileId,
+                tmdbId: baseEntry.id,
+                mediaType: mediaTypeForDoc,
+                title: baseEntry.title || baseEntry.name || null,
+                posterPath: baseEntry.poster_path ?? null,
+                backdropPath: baseEntry.backdrop_path ?? null,
+                genreIds: baseEntry.genre_ids ?? null,
+                voteAverage: baseEntry.vote_average ?? null,
+                seasonNumber: (baseEntry as any)?.seasonNumber ?? null,
+                episodeNumber: (baseEntry as any)?.episodeNumber ?? null,
+                seasonTitle: (baseEntry as any)?.seasonTitle ?? null,
+                watchProgress: {
+                  positionMillis: positionValue,
+                  durationMillis: durationValue,
+                  progress: progressValue,
+                  updatedAtMs: now,
+                },
+                completed: true,
+                completedAtMs: now,
+                updatedAtMs: now,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true },
+            ).catch(() => {});
+          }
           return;
         }
         const enriched: Media = {
@@ -1877,6 +2444,39 @@ useEffect(() => {
         };
         const next = [enriched, ...filtered].slice(0, 40);
         await AsyncStorage.setItem(watchHistoryKey, JSON.stringify(next));
+
+        if (user?.uid) {
+          const profileId = activeProfile?.id ?? 'default';
+          const mediaTypeForDoc = (enriched.media_type || normalizedMediaType || 'movie') as string;
+          const docId = `${profileId}_${mediaTypeForDoc}_${String(enriched.id)}`;
+          void setDoc(
+            doc(firestore, 'users', user.uid, 'watchHistory', docId),
+            {
+              userId: user.uid,
+              profileId,
+              tmdbId: enriched.id,
+              mediaType: mediaTypeForDoc,
+              title: enriched.title || enriched.name || null,
+              posterPath: enriched.poster_path ?? null,
+              backdropPath: enriched.backdrop_path ?? null,
+              genreIds: enriched.genre_ids ?? null,
+              voteAverage: enriched.vote_average ?? null,
+              seasonNumber: (enriched as any)?.seasonNumber ?? null,
+              episodeNumber: (enriched as any)?.episodeNumber ?? null,
+              seasonTitle: (enriched as any)?.seasonTitle ?? null,
+              watchProgress: {
+                positionMillis: positionValue,
+                durationMillis: durationValue,
+                progress: progressValue,
+                updatedAtMs: now,
+              },
+              completed: false,
+              updatedAtMs: now,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          ).catch(() => {});
+        }
         if (progressValue >= 0.7 && user?.uid) {
           const profileName =
             activeProfile?.name ||
@@ -1904,14 +2504,24 @@ useEffect(() => {
             },
           });
           try {
-            void logInteraction({ type: 'watch', actorId: user.uid, targetId: enriched.id, meta: { progress: progressValue } });
+            void logInteraction({ 
+              type: progressValue >= 0.9 ? 'watch_complete' : 'watch_partial', 
+              actorId: user.uid, 
+              targetId: enriched.id, 
+              targetType: enriched.media_type === 'tv' ? 'tv' : 'movie',
+              meta: { 
+                progress: progressValue,
+                genres: enriched.genre_ids,
+                title: enriched.title || enriched.name
+              } 
+            });
           } catch {}
         }
       } catch (err) {
         console.warn('Failed to update watch history', err);
       }
     },
-    [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
+    [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL, normalizedMediaType],
   );
 
   // Prefer native ABR for HLS (ExoPlayer/AVPlayer).
@@ -2035,6 +2645,7 @@ useEffect(() => {
       setIsPlaying(playingNow);
     }
     const currentPos = status.positionMillis || 0;
+    positionMillisRef.current = currentPos;
     // detect progress: if position advanced by >300ms, update last advance timestamp
     try {
       if (typeof prevPositionRef.current === 'number') {
@@ -2071,9 +2682,15 @@ useEffect(() => {
     }
     const currentPosition = status.positionMillis || 0;
     if (!isSeeking) {
-      setSeekPosition(currentPosition);
+      const lastUi = uiProgressUpdateRef.current;
+      const shouldUpdateUi =
+        now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250;
+      if (shouldUpdateUi) {
+        uiProgressUpdateRef.current = { lastTs: now, lastPos: currentPosition };
+        setSeekPosition(currentPosition);
+        setPositionMillis(currentPosition);
+      }
     }
-    setPositionMillis(currentPosition);
 
     const playable = (status as any)?.playableDurationMillis;
     if (typeof playable === 'number' && Number.isFinite(playable)) {
@@ -2081,6 +2698,36 @@ useEffect(() => {
       if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
         bufferedMillisRef.current = nextBuffered;
         setBufferedMillis(nextBuffered);
+      }
+    }
+
+    const derivedDuration = status.durationMillis ?? durationMillisRef.current;
+    if (derivedDuration && derivedDuration > 0) {
+      const introStart = Math.min(
+        Math.max(INTRO_DEFAULT_START_MS, derivedDuration * 0.05),
+        INTRO_DEFAULT_END_MS,
+      );
+      const introEnd = Math.min(INTRO_DEFAULT_END_MS, Math.max(introStart + 12000, derivedDuration * 0.22));
+      if (introWindow.start !== introStart || introWindow.end !== introEnd) {
+        setIntroWindow({ start: introStart, end: introEnd });
+      }
+
+      const inIntroWindow = currentPosition >= introStart && currentPosition <= introEnd;
+      const canShowIntro = !skipIntroShown && inIntroWindow && !midrollActiveRef.current && !isLocked && !isSeeking;
+      if (showSkipIntro !== canShowIntro) setShowSkipIntro(canShowIntro);
+
+      const nextEp = nextUpEpisodeRef.current;
+      if (isTvShow && nextEp) {
+        const windowMs = Math.min(NEXT_EPISODE_WINDOW_MS, Math.max(15000, derivedDuration * 0.18));
+        const windowStart = Math.max(0, derivedDuration - windowMs);
+        const inWindow = currentPosition >= windowStart;
+        const nextProgress = clamp01((currentPosition - windowStart) / windowMs);
+        setNextEpisodeProgress(nextProgress);
+        const shouldShowNext = inWindow && !midrollActiveRef.current && !isLocked && derivedDuration - currentPosition > 2000;
+        if (showNextEpisode !== shouldShowNext) setShowNextEpisode(shouldShowNext);
+      } else {
+        if (showNextEpisode) setShowNextEpisode(false);
+        if (nextEpisodeProgress !== 0) setNextEpisodeProgress(0);
       }
     }
 
@@ -2095,11 +2742,34 @@ useEffect(() => {
       }
     }
 
-    updateActiveCaption(currentPosition);
-    if (status.durationMillis) {
-      setDurationMillis(status.durationMillis);
+    // Apply resume position once, when we have a stream loaded.
+    if (!resumeAppliedRef.current && !isSeeking && typeof resumeMillisParam === 'number' && resumeMillisParam > 0) {
+      try {
+        const currentPos = status.positionMillis || 0;
+        const duration = status.durationMillis;
+        const desired = duration && duration > 2000
+          ? Math.min(resumeMillisParam, Math.max(0, duration - 2000))
+          : resumeMillisParam;
+
+        if (currentPos + 1500 < desired) {
+          resumeAppliedRef.current = true;
+          (videoRef.current as any)?.setPositionAsync(desired).catch(() => {});
+          setSeekPosition(desired);
+        } else {
+          resumeAppliedRef.current = true;
+        }
+      } catch {
+        resumeAppliedRef.current = true;
+      }
     }
-    const derivedDuration = status.durationMillis ?? durationMillis;
+
+    updateActiveCaption(currentPosition);
+    if (typeof status.durationMillis === 'number' && Number.isFinite(status.durationMillis) && status.durationMillis > 0) {
+      if (durationMillisRef.current !== status.durationMillis) {
+        durationMillisRef.current = status.durationMillis;
+        setDurationMillis(status.durationMillis);
+      }
+    }
     if (derivedDuration && derivedDuration > 0) {
       void persistWatchProgress(currentPosition, derivedDuration, {
         force: status.didJustFinish,
@@ -2127,11 +2797,11 @@ useEffect(() => {
   };
   useEffect(() => {
     return () => {
-      if (positionMillis > 0 && durationMillis > 0) {
-        void persistWatchProgress(positionMillis, durationMillis, { force: true });
-      }
+      const pos = positionMillisRef.current;
+      const dur = durationMillisRef.current;
+      if (pos > 0 && dur > 0) void persistWatchProgress(pos, dur, { force: true });
     };
-  }, [positionMillis, durationMillis, persistWatchProgress]);
+  }, [persistWatchProgress]);
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -2201,9 +2871,10 @@ useEffect(() => {
     bumpControlsLife();
     const next = Math.max(
       0,
-      Math.min(positionMillis + deltaMillis, durationMillis)
+      Math.min(positionMillisRef.current + deltaMillis, durationMillisRef.current)
     );
     await video.setPositionAsync(next);
+    positionMillisRef.current = next;
     setSeekPosition(next);
 
     void publishWatchPartyPlayback(
@@ -2211,6 +2882,31 @@ useEffect(() => {
       { force: true },
     );
   };
+  const handleSkipIntro = useCallback(async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const target = Math.min(
+      Math.max(introWindow.end + 1000, positionMillisRef.current),
+      Math.max(0, durationMillisRef.current - 2000),
+    );
+    try {
+      await video.setPositionAsync(target);
+      setSeekPosition(target);
+      positionMillisRef.current = target;
+      setSkipIntroShown(true);
+      setShowSkipIntro(false);
+    } catch {}
+  }, [introWindow.end]);
+  const handleNextEpisodePill = useCallback(() => {
+    const next = nextUpEpisodeRef.current;
+    if (!next) return;
+    const idx = episodeQueue.findIndex((ep) => ep === next || (ep.id && ep.id === next.id));
+    setShowNextEpisode(false);
+    setNextEpisodeProgress(0);
+    setTimeout(() => {
+      void handleEpisodePlay(next, idx >= 0 ? idx : 0);
+    }, 0);
+  }, [episodeQueue]);
   const handleRateToggle = async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -2261,6 +2957,7 @@ useEffect(() => {
   const handleSurfacePress = useCallback(() => {
     if (episodeDrawerOpen) return;
     if (isLocked) return; // when locked, ignore surface taps
+    if (isPipActive) return; // ignore taps in PiP
     if (isMini) {
       // tapping mini player expands to full
       setIsMini(false);
@@ -2329,37 +3026,28 @@ useEffect(() => {
   }, [bumpControlsLife]);
   const handlePipStatusUpdate = useCallback((event: { isPictureInPictureActive?: boolean }) => {
     setIsPipActive(Boolean(event?.isPictureInPictureActive));
+    setPipPending(false);
+    if (pipPendingTimeoutRef.current) {
+      clearTimeout(pipPendingTimeoutRef.current);
+      pipPendingTimeoutRef.current = null;
+    }
   }, []);
   const handlePipToggle = useCallback(async () => {
     if (!videoRef.current) return;
     if (!pipUiEnabled) return;
     bumpControlsLife();
-    const player = videoRef.current as any;
-    const enterPip =
-      typeof player?.presentPictureInPictureAsync === 'function'
-        ? player.presentPictureInPictureAsync.bind(player)
-        : typeof player?.enterPictureInPictureAsync === 'function'
-        ? player.enterPictureInPictureAsync.bind(player)
-        : null;
-    const exitPip =
-      typeof player?.dismissPictureInPictureAsync === 'function'
-        ? player.dismissPictureInPictureAsync.bind(player)
-        : typeof player?.exitPictureInPictureAsync === 'function'
-        ? player.exitPictureInPictureAsync.bind(player)
-        : null;
+    const { enterPip, exitPip } = resolvePipHandlers();
     if (!enterPip && !exitPip) {
-      if (Platform.OS === 'android') {
-        Alert.alert(
-          'Picture in Picture',
-          'PiP can start automatically when you press the Home button (if enabled in system settings).\n\nIf it still doesn\'t work, you may need a new dev build/app update with PiP enabled.',
-        );
-      } else {
-        setIsPipSupported(false);
-      }
+      // If PiP functions are not available, it means the platform/device doesn't support it
+      // or the Video component isn't exposing the methods as expected.
+      // We will let the try...catch block handle a more generic error message if enterPip() fails.
+      setIsPipSupported(false);
       return;
     }
     try {
       if (!isPipActive && enterPip) {
+        setPipPending(true);
+        await ensurePlaybackAudioMode(true);
         await enterPip();
         setIsPipActive(true);
       } else if (isPipActive && exitPip) {
@@ -2368,15 +3056,18 @@ useEffect(() => {
       }
     } catch (err) {
       console.warn('PiP toggle failed', err);
+      Alert.alert('Picture in Picture', 'Unable to start Picture in Picture on this device/build.');
+    } finally {
+      setPipPending(false);
     }
-  }, [isPipActive, pipUiEnabled, bumpControlsLife]);
+  }, [isPipActive, pipUiEnabled, bumpControlsLife, resolvePipHandlers]);
 
   const handleQualitySelect = useCallback(
     async (option: QualityOption | null) => {
       if (!playbackSource) return;
       if (!option) {
         if (selectedQualityId === 'auto' && !qualityOverrideUri) return;
-        pendingSeekAfterReloadRef.current = positionMillis;
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
         pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(null);
         setSelectedQualityId('auto');
@@ -2388,7 +3079,7 @@ useEffect(() => {
       setQualityLoadingId(option.id);
       try {
         await preloadQualityVariant(option.uri, playbackSource.headers);
-        pendingSeekAfterReloadRef.current = positionMillis;
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
         pendingShouldPlayAfterReloadRef.current = isPlaying;
         setQualityOverrideUri(option.uri);
         setSelectedQualityId(option.id);
@@ -2401,7 +3092,7 @@ useEffect(() => {
         setQualityLoadingId(null);
       }
     },
-    [playbackSource, selectedQualityId, qualityOverrideUri, positionMillis, isPlaying],
+    [playbackSource, selectedQualityId, qualityOverrideUri, isPlaying],
   );
   const getCaptionLabel = useCallback((caption: CaptionSource) => {
     if (caption.display) return caption.display;
@@ -2436,7 +3127,7 @@ useEffect(() => {
       if (cached) {
         captionCuesRef.current = cached;
         captionIndexRef.current = 0;
-        updateActiveCaption(positionMillis, true);
+        updateActiveCaption(positionMillisRef.current, true);
         return;
       }
       setCaptionLoadingId(captionId);
@@ -2447,7 +3138,7 @@ useEffect(() => {
         captionCacheRef.current[captionId] = cues;
         captionCuesRef.current = cues;
         captionIndexRef.current = 0;
-        updateActiveCaption(positionMillis, true);
+        updateActiveCaption(positionMillisRef.current, true);
       } catch (err) {
         console.warn('Failed to load captions', err);
         Alert.alert('Captions unavailable', 'Unable to load captions for this language right now.');
@@ -2458,7 +3149,7 @@ useEffect(() => {
         setCaptionLoadingId(null);
       }
     },
-    [captionSources, positionMillis, selectedCaptionId, updateActiveCaption, bumpControlsLife],
+    [captionSources, selectedCaptionId, updateActiveCaption, bumpControlsLife],
   );
   const handleAudioSelect = useCallback(
   async (option: AudioTrackOption | null) => {
@@ -2593,10 +3284,19 @@ useEffect(() => {
     }
   };
   const videoPipProps = useMemo(() => ({ allowsPictureInPicture: pipUiEnabled }), [pipUiEnabled]);
+
+  const overlayPaddingStyle = useMemo(
+    () => ({
+      paddingTop: Math.max(18, insets.top + 10),
+      paddingBottom: Math.max(18, insets.bottom + 12),
+    }),
+    [insets.bottom, insets.top],
+  );
+
   return (
     <View style={styles.container}>
       <StatusBar hidden />
-      <TouchableOpacity activeOpacity={1} style={styles.touchLayer} onPress={handleSurfacePress}>
+      <View style={styles.touchLayer}>
         {transitionReady && videoPlaybackSource ? (
           <>
             <Video
@@ -2605,7 +3305,7 @@ useEffect(() => {
               source={videoPlaybackSource}
               style={styles.video}
               resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={isPlaying && !midrollActive && (appIsActive || isPipActive)}
+              shouldPlay={isPlaying && !midrollActive && (appIsActive || isPipActive || pipPending)}
               useNativeControls={false}
               onPlaybackStatusUpdate={handleStatusUpdate}
               onError={handleVideoError}
@@ -2686,20 +3386,79 @@ useEffect(() => {
             </View>
           </View>
         ) : null}
-        {!showControls && !isLocked && !midrollActive ? (
+
+        {/* Surface tap handler sits behind controls so it never steals button presses. */}
+        {!isLocked && (
+          <Pressable style={styles.surfacePressLayer} onPress={handleSurfacePress} />
+        )}
+
+        {/* Big paused info - shows when paused AND controls are hidden */}
+        {!isPlaying && !showControls && !isLocked && !midrollActive && !isPipActive && rawOverview && (
+          <View style={styles.pausedOverlay} pointerEvents="none">
+            <LinearGradient
+              colors={['transparent', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)']}
+              style={styles.pausedGradient}
+            />
+            <View style={[styles.pausedContent, { paddingBottom: insets.bottom + 40 }]}>
+              <View style={styles.pausedBadgeRow}>
+                <View style={styles.pausedBadge}>
+                  <Ionicons name="pause" size={14} color="#fff" />
+                  <Text style={styles.pausedBadgeText}>PAUSED</Text>
+                </View>
+                {durationMillis > 0 && (
+                  <Text style={styles.pausedTime}>
+                    {Math.floor(durationMillis / 60000)} min
+                  </Text>
+                )}
+              </View>
+              <Text style={styles.pausedTitle}>{activeTitle}</Text>
+              {isTvShow && initialSeasonNumber && initialEpisodeNumber && (
+                <Text style={styles.pausedEpisode}>
+                  Season {initialSeasonNumber}, Episode {initialEpisodeNumber}
+                </Text>
+              )}
+              <Text style={styles.pausedDesc} numberOfLines={4}>{rawOverview}</Text>
+              <Text style={styles.pausedHint}>Tap anywhere to resume</Text>
+            </View>
+          </View>
+        )}
+
+        {!showControls && !isLocked && !midrollActive && !isPipActive ? (
           <Pressable style={styles.touchCatcher} onPress={handleSurfacePress} />
         ) : null}
-        {showControls && !isLocked && (
-          <View style={styles.overlay}>
+
+        {/* Netflix-style content rating badge - appears when controls hide */}
+        {showContentRating && !midrollActive && !isPipActive && (
+          <Animated.View style={styles.contentRatingContainer}>
+            <View style={styles.contentRatingBadge}>
+              <View style={styles.contentRatingBox}>
+                <Text style={styles.contentRatingText}>
+                  {tmdbEnrichment?.contentRating || (isTvShow ? 'TV-MA' : 'PG-13')}
+                </Text>
+              </View>
+              <View style={styles.contentRatingDivider} />
+              <Text style={styles.contentRatingInfo}>
+                {tmdbEnrichment?.runtime 
+                  ? `${tmdbEnrichment.runtime} min${isTvShow ? ' per episode' : ''}`
+                  : (isTvShow 
+                    ? 'May contain violence, language, sexual content' 
+                    : 'Some material may be inappropriate for children under 13')}
+              </Text>
+            </View>
+          </Animated.View>
+        )}
+
+        {showControls && !isLocked && !isPipActive && (
+          <View style={[styles.overlay, overlayPaddingStyle]}>
             {/* Top fade */}
             <LinearGradient
               colors={['rgba(0,0,0,0.8)', 'transparent']}
-              style={styles.topGradient}
+              style={[styles.topGradient, { height: 140 + insets.top }]}
             />
             {/* Bottom fade */}
             <LinearGradient
               colors={['transparent', 'rgba(0,0,0,0.9)']}
-              style={styles.bottomGradient}
+              style={[styles.bottomGradient, { height: 180 + insets.bottom }]}
             />
             {/* TOP BAR */}
             <View style={styles.topBar}>
@@ -2707,8 +3466,10 @@ useEffect(() => {
                 <TouchableOpacity
                   style={styles.roundButton}
                   onPress={() => router.back()}
+                  activeOpacity={0.7}
+                  delayPressIn={0}
                 >
-                  <Ionicons name="chevron-back" size={20} color="#fff" />
+                  <Ionicons name="arrow-back" size={22} color="#fff" />
                 </TouchableOpacity>
                 <View style={styles.titleWrap}>
                   <Text style={styles.title}>{activeTitle}</Text>
@@ -2718,23 +3479,30 @@ useEffect(() => {
                 </View>
               </View>
               <View style={styles.topRight}>
-                <TouchableOpacity style={styles.roundButton}>
-                  <MaterialCommunityIcons name="thumb-down-outline" size={22} color="#fff" />
+                <TouchableOpacity style={styles.roundButton} activeOpacity={0.7} delayPressIn={0}>
+                  <Ionicons name="share-outline" size={20} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.roundButton}>
-                  <MaterialCommunityIcons name="thumb-up-outline" size={22} color="#fff" />
+                <TouchableOpacity style={styles.roundButton} activeOpacity={0.7} delayPressIn={0}>
+                  <Ionicons name="download-outline" size={20} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.roundButton}>
-                  <MaterialCommunityIcons name="monitor-share" size={22} color="#fff" />
+                <TouchableOpacity 
+                  style={styles.roundButton} 
+                  activeOpacity={0.7}
+                  delayPressIn={0}
+                  onPress={() => setAvDrawerOpen(true)}
+                >
+                  <MaterialCommunityIcons name="cog-outline" size={20} color="#fff" />
                 </TouchableOpacity>
                 {roomCode ? (
                   <TouchableOpacity
                     style={styles.roundButton}
                     onPress={() => setShowChat((prev) => !prev)}
+                    activeOpacity={0.7}
+                    delayPressIn={0}
                   >
-                    <MaterialCommunityIcons
-                      name={showChat ? 'message-text-outline' : 'message-outline'}
-                      size={22}
+                    <Ionicons
+                      name={showChat ? 'chatbubble' : 'chatbubble-outline'}
+                      size={20}
                       color="#fff"
                     />
                   </TouchableOpacity>
@@ -2743,6 +3511,8 @@ useEffect(() => {
                   <TouchableOpacity
                     style={styles.roundButton}
                     onPress={() => setEpisodeDrawerOpen((prev) => !prev)}
+                    activeOpacity={0.7}
+                    delayPressIn={0}
                   >
                     <MaterialCommunityIcons name="playlist-play" size={22} color="#fff" />
                   </TouchableOpacity>
@@ -2769,24 +3539,33 @@ useEffect(() => {
                   <TouchableOpacity
                     style={styles.iconCircleSmall}
                     onPress={() => seekBy(-10000)}
+                    activeOpacity={0.7}
+                    delayPressIn={0}
                   >
-                    <MaterialCommunityIcons name="rewind-10" size={30} color="#fff" />
+                    <Ionicons name="play-back" size={26} color="#fff" />
+                    <Text style={styles.seekLabel}>10</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={togglePlayPause}
                     style={styles.iconCircle}
+                    activeOpacity={0.8}
+                    delayPressIn={0}
                   >
-                    <MaterialCommunityIcons
+                    <Ionicons
                       name={isPlaying ? 'pause' : 'play'}
-                      size={48}
+                      size={44}
                       color="#fff"
+                      style={!isPlaying ? { marginLeft: 4 } : undefined}
                     />
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={styles.iconCircleSmall}
                     onPress={() => seekBy(10000)}
+                    activeOpacity={0.7}
+                    delayPressIn={0}
                   >
-                    <MaterialCommunityIcons name="fast-forward-10" size={30} color="#fff" />
+                    <Ionicons name="play-forward" size={26} color="#fff" />
+                    <Text style={styles.seekLabel}>10</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -2855,6 +3634,7 @@ useEffect(() => {
                 </View>
               </View>
             </View>
+
             {episodeDrawerOpen && isTvShow && episodeQueue.length > 0 && (
               <View style={styles.episodeDrawer}>
                 <View style={styles.episodeDrawerHeader}>
@@ -3057,6 +3837,56 @@ useEffect(() => {
                 </View>
               </View>
             )}
+            {(showSkipIntro || (showNextEpisode && nextUpEpisode)) && (
+              <View style={styles.quickActionsRow}>
+                {showSkipIntro && (
+                  <TouchableOpacity
+                    style={styles.skipIntroButton}
+                    activeOpacity={0.9}
+                    onPress={handleSkipIntro}
+                  >
+                    <LinearGradient
+                      colors={['#e50914', '#b20710']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.skipIntroBg}
+                    >
+                      <Ionicons name="play-skip-forward" size={18} color="#fff" />
+                      <Text style={styles.skipIntroText}>Skip intro</Text>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                )}
+                {showNextEpisode && nextUpEpisode ? (
+                  <TouchableOpacity
+                    style={styles.nextEpisodeButton}
+                    activeOpacity={0.9}
+                    onPress={handleNextEpisodePill}
+                  >
+                    <LinearGradient
+                      colors={['rgba(0,0,0,0.75)', 'rgba(0,0,0,0.55)']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.nextEpisodeBg}
+                    >
+                      <View style={styles.nextEpisodeMeta}>
+                        <Text style={styles.nextEpisodeLabel}>Next episode</Text>
+                        <Text style={styles.nextEpisodeTitle} numberOfLines={1}>
+                          {nextUpEpisode.title || 'Play next'}
+                        </Text>
+                        <View style={styles.nextEpisodeProgressTrack}>
+                          <View
+                            style={[styles.nextEpisodeProgressFill, { width: `${Math.round(nextEpisodeProgress * 100)}%` }]}
+                          />
+                        </View>
+                      </View>
+                      <View style={styles.nextEpisodeIconWrap}>
+                        <Ionicons name="play" size={18} color="#fff" />
+                      </View>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            )}
             {/* BOTTOM BAR */}
             <View style={styles.bottomControls}>
               {/* Progress */}
@@ -3112,33 +3942,37 @@ useEffect(() => {
                 <TouchableOpacity
                   style={styles.bottomButton}
                   onPress={handleRateToggle}
+                  activeOpacity={0.7}
+                  delayPressIn={0}
                 >
-                  <MaterialCommunityIcons name="speedometer" size={18} color="#fff" />
-                  <Text style={styles.bottomText}>
-                    {`Speed (${playbackRate.toFixed(1)}x)`}
-                  </Text>
+                  <Ionicons name="speedometer-outline" size={20} color="#fff" />
+                  <Text style={styles.bottomText}>{playbackRate.toFixed(1)}x</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.bottomButton}
                   onPress={toggleLock}
+                  activeOpacity={0.7}
+                  delayPressIn={0}
                 >
-                  <MaterialCommunityIcons
-                    name={isLocked ? "lock" : "lock-outline"}
-                    size={18}
+                  <Ionicons
+                    name={isLocked ? 'lock-closed' : 'lock-open-outline'}
+                    size={20}
                     color="#fff"
                   />
                   <Text style={styles.bottomText}>
-                    {isLocked ? "Locked" : "Lock"}
+                    {isLocked ? 'Unlock' : 'Lock'}
                   </Text>
                 </TouchableOpacity>
                 {pipUiEnabled ? (
                   <TouchableOpacity
                     style={styles.bottomButton}
                     onPress={handlePipToggle}
+                    activeOpacity={0.7}
+                    delayPressIn={0}
                   >
-                    <MaterialCommunityIcons
-                      name={isPipActive ? 'picture-in-picture-bottom-right' : 'picture-in-picture-bottom-right-outline'}
-                      size={18}
+                    <Ionicons
+                      name={isPipActive ? 'contract-outline' : 'expand-outline'}
+                      size={20}
                       color="#fff"
                     />
                     <Text style={styles.bottomText}>
@@ -3154,11 +3988,11 @@ useEffect(() => {
                     setAvDrawerOpen((prev) => !prev);
                   }}
                   disabled={!avControlsEnabled}
+                  activeOpacity={0.7}
+                  delayPressIn={0}
                 >
-                  <MaterialCommunityIcons name="subtitles-outline" size={18} color="#fff" />
-                  <Text style={styles.bottomText}>
-                    {avDrawerOpen ? 'Hide' : 'Audio & Subtitles'}
-                  </Text>
+                  <Ionicons name="text-outline" size={20} color="#fff" />
+                  <Text style={styles.bottomText}>Subs</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -3166,22 +4000,26 @@ useEffect(() => {
         )}
         {isLocked && (
           <View pointerEvents="box-none" style={styles.lockBadgeWrapper}>
-            <TouchableOpacity style={styles.lockBadge} onPress={toggleLock} activeOpacity={0.85}>
-              <MaterialCommunityIcons name="lock" size={20} color="#fff" />
+            <Pressable 
+              style={styles.lockBadge} 
+              onPress={toggleLock}
+              android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: false }}
+            >
+              <Ionicons name="lock-closed" size={18} color="#fff" />
               <View style={styles.lockBadgeTextWrap}>
                 <Text style={styles.lockBadgeTitle}>Screen locked</Text>
                 <Text style={styles.lockBadgeHint}>Tap to unlock</Text>
               </View>
-              <MaterialCommunityIcons name="lock-open-variant" size={20} color="#fff" />
-            </TouchableOpacity>
+              <Ionicons name="lock-open-outline" size={18} color="#fff" />
+            </Pressable>
           </View>
         )}
-        {activeCaptionText ? (
+        {activeCaptionText && !isPipActive ? (
           <View pointerEvents="none" style={styles.subtitleWrapper}>
             <Text style={styles.subtitleText}>{activeCaptionText}</Text>
           </View>
         ) : null}
-      </TouchableOpacity>
+      </View>
 
       <BottomSheet
         ref={quickReplySheetRef}
@@ -3859,6 +4697,10 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  surfacePressLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
   touchCatcher: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 2,
@@ -3898,6 +4740,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 18,
     justifyContent: 'space-between',
+    zIndex: 3,
   },
   midrollOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -3976,12 +4819,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   roundButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: 'rgba(10,12,25,0.85)',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.6)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 10,
@@ -4088,30 +4931,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   iconCircle: {
-    width: 86,
-    height: 86,
-    borderRadius: 43,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: '#e50914',
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 22,
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.65)',
-    shadowColor: '#000',
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
+    marginHorizontal: 24,
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.9)',
+    shadowColor: '#e50914',
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 12,
   },
   iconCircleSmall: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: 'rgba(0,0,0,0.8)',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(0,0,0,0.75)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.35)',
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  seekLabel: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 10,
+    fontWeight: '700',
+    marginTop: -2,
   },
   middleRightPlaceholder: {
     width: 220,
@@ -4260,7 +5110,7 @@ const styles = StyleSheet.create({
     top: 13,
     height: 6,
     borderRadius: 999,
-    backgroundColor: '#ff5f6d',
+    backgroundColor: '#e50914',
   },
   progressLabels: {
     flexDirection: 'row',
@@ -4273,23 +5123,89 @@ const styles = StyleSheet.create({
   },
   bottomActions: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 12,
-    flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 14,
+    gap: 8,
   },
   bottomButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   bottomButtonDisabled: {
-    opacity: 0.4,
+    opacity: 0.35,
   },
   bottomText: {
     color: '#fff',
     fontSize: 12,
-    marginLeft: 4,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  pausedOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+  },
+  pausedGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  pausedContent: {
+    paddingHorizontal: 32,
+  },
+  pausedBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 16,
+  },
+  pausedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+  },
+  pausedBadgeText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  pausedTime: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  pausedTitle: {
+    color: '#fff',
+    fontSize: 32,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  pausedEpisode: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  pausedDesc: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 16,
+    lineHeight: 24,
+    maxWidth: 600,
+  },
+  pausedHint: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 24,
   },
   episodeDrawer: {
     position: 'absolute',
@@ -4298,10 +5214,15 @@ const styles = StyleSheet.create({
     bottom: 140,
     width: 280,
     borderRadius: 18,
-    backgroundColor: 'rgba(5,6,15,0.92)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(5,6,15,0.95)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(229,9,20,0.3)',
     padding: 14,
+    shadowColor: '#e50914',
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 16,
   },
   episodeDrawerHeader: {
     flexDirection: 'row',
@@ -4310,7 +5231,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   episodeDrawerTitle: {
-    color: '#ffffff',
+    color: '#e50914',
     fontSize: 16,
     fontWeight: '700',
   },
@@ -4367,6 +5288,86 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 11,
     marginTop: 6,
+  },
+  quickActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 12,
+    paddingHorizontal: 4,
+  },
+  skipIntroButton: {
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  skipIntroBg: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  skipIntroText: {
+    color: '#fff',
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  nextEpisodeButton: {
+    borderRadius: 14,
+    overflow: 'hidden',
+    minWidth: 180,
+  },
+  nextEpisodeBg: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  nextEpisodeMeta: {
+    flex: 1,
+  },
+  nextEpisodeLabel: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  nextEpisodeTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  nextEpisodeProgressTrack: {
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 4,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  nextEpisodeProgressFill: {
+    height: '100%',
+    backgroundColor: '#e50914',
+  },
+  nextEpisodeIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(229,9,20,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#e50914',
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
   },
   avDrawer: {
     position: 'absolute',
@@ -4458,6 +5459,7 @@ const styles = StyleSheet.create({
     right: 16,
     bottom: 140,
     alignItems: 'flex-start',
+    zIndex: 100,
   },
   lockBadge: {
     flexDirection: 'row',
@@ -4715,6 +5717,47 @@ ccLabel: {
   fontSize: 12,
   fontWeight: '600',
   color: 'rgba(255,255,255,0.9)',
+},
+// Netflix-style content rating badge
+contentRatingContainer: {
+  position: 'absolute',
+  top: 20,
+  left: 0,
+  zIndex: 50,
+},
+contentRatingBadge: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: 'rgba(0,0,0,0.75)',
+  paddingVertical: 8,
+  paddingLeft: 0,
+  paddingRight: 16,
+  borderTopRightRadius: 4,
+  borderBottomRightRadius: 4,
+},
+contentRatingBox: {
+  backgroundColor: '#fff',
+  paddingHorizontal: 8,
+  paddingVertical: 4,
+  marginRight: 0,
+},
+contentRatingText: {
+  color: '#000',
+  fontSize: 13,
+  fontWeight: '800',
+  letterSpacing: 0.5,
+},
+contentRatingDivider: {
+  width: 2,
+  height: 20,
+  backgroundColor: '#fff',
+  marginHorizontal: 10,
+},
+contentRatingInfo: {
+  color: 'rgba(255,255,255,0.9)',
+  fontSize: 12,
+  fontWeight: '500',
+  maxWidth: 280,
 },
 });
 // Add this helper near other helpers (after parseHlsQualityOptions or similar)
