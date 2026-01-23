@@ -1,9 +1,12 @@
-import { Stack } from 'expo-router';
-import React from 'react';
+import { Stack, usePathname } from 'expo-router';
+import React, { useMemo } from 'react';
 import { View } from 'react-native';
 import BottomNav from '../components/social-feed/BottomNav';
 
 export default function SocialFeedLayout() {
+  const pathname = usePathname();
+  const showBottomNav = useMemo(() => !pathname?.includes('match-swipe'), [pathname]);
+
   return (
     <View style={{ flex: 1 }}>
       <Stack
@@ -42,7 +45,7 @@ export default function SocialFeedLayout() {
           }}
         />
       </Stack>
-      <BottomNav />
+      {showBottomNav && <BottomNav />}
     </View>
   );
 }

@@ -1,50 +1,62 @@
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
+import { FlashList } from '@shopify/flash-list';
+import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Link, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated,
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   Image,
+  Modal,
   PixelRatio,
   Platform,
   RefreshControl,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   useWindowDimensions,
-  View,
+  View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+
+
+type ActiveTab = 'For You' | 'Live' | 'Stories';
+
+import { listenToBoostedLiveStreams, listenToLiveStreams } from '@/lib/live/liveService';
+import type { LiveStream } from '@/lib/live/types';
+import { putNavPayload } from '@/lib/navPayloadCache';
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
+import { useActiveProfile } from '../../hooks/use-active-profile';
+import { useNavigationGuard } from '../../hooks/use-navigation-guard';
+import { useUnreadMessagesBadgeCount } from '../../hooks/use-unread-messages';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types';
 import { useAccent } from '../components/AccentContext';
 import FeedCard from '../components/social-feed/FeedCard';
 import FeedCardPlaceholder from '../components/social-feed/FeedCardPlaceholder';
+import FeedCollageTile, {
+  FeedCollageTilePlaceholder,
+} from '../components/social-feed/FeedCollageTile';
 import { ReviewItem, useSocialReactions } from '../components/social-feed/hooks';
+import MovieMatchView from '../components/social-feed/MovieMatchView';
 import PostMovieReview from '../components/social-feed/PostMovieReview';
+import RecommendedView from '../components/social-feed/RecommendedView';
 import StoriesRow from '../components/social-feed/StoriesRow';
 import FeedTabs from '../components/social-feed/Tabs';
 import { getProducts, isProductPromoted, type Product as MarketplaceProduct } from '../marketplace/api';
-import { useActiveProfile } from '../../hooks/use-active-profile';
-import { useUnreadMessagesBadgeCount } from '../../hooks/use-unread-messages';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
-import RecommendedView from '../components/social-feed/RecommendedView';
-import MovieMatchView from '../components/social-feed/MovieMatchView';
-import { listenToLiveStreams } from '@/lib/live/liveService';
-import type { LiveStream } from '@/lib/live/types';
-import { putNavPayload } from '@/lib/navPayloadCache';
 
 import NativeAdCard from '../../components/ads/NativeAdCard';
 import { injectAdsWithPattern } from '../../lib/ads/sequence';
+import { scrapeImdbTrailer } from '../../src/providers/scrapeImdbTrailer';
+import { searchClipCafe } from '../../src/providers/shortclips';
 /* -------------------------------------------------------------------------- */
 /*                                Feed types                                  */
 /* -------------------------------------------------------------------------- */
@@ -52,31 +64,42 @@ import { injectAdsWithPattern } from '../../lib/ads/sequence';
 type FeedItem =
   | ReviewItem
   | {
-      type: 'movie-list';
-      id: string;
-      title: string;
-      movies: Media[];
-      onItemPress: (item: Media) => void;
-    }
+    type: 'movie-list';
+    id: string;
+    title: string;
+    movies: Media[];
+    onItemPress: (item: Media) => void;
+  }
   | {
-      type: 'promo-ad';
-      id: string;
-      product: MarketplaceProduct;
-      placement: 'feed' | 'story';
-    }
+    type: 'promo-ad';
+    id: string;
+    product: MarketplaceProduct;
+    placement: 'feed' | 'story';
+  }
   | {
-      type: 'native-ad';
-      id: string;
-      placement: 'feed';
-      product: MarketplaceProduct;
-    };
+    type: 'native-ad';
+    id: string;
+    placement: 'feed';
+    product: MarketplaceProduct;
+  };
 
 /* -------------------------------------------------------------------------- */
 /*                                Main Feed                                   */
 /* -------------------------------------------------------------------------- */
 
+async function getImdbId(tmdbId: number): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/movie/${tmdbId}/external_ids?api_key=${API_KEY}`);
+    const data = await res.json();
+    return data.imdb_id || null;
+  } catch {
+    return null;
+  }
+}
+
 const SocialFeed = () => {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const { accentColor } = useAccent();
   const { currentPlan } = useSubscription();
   const insets = useSafeAreaInsets();
@@ -85,6 +108,15 @@ const SocialFeed = () => {
   const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
   const listBottomPadding = 110 + insets.bottom;
   const headerIconSize = isCompactLayout ? 20 : 22;
+
+  // Keep tiles larger on phones; only switch to 3 columns on *very* wide displays.
+  const collageColumns = screenWidth >= 900 ? 3 : 2;
+  const collageGap = 8;
+  const collageSidePadding = 6;
+  const collageTileWidth = Math.floor(
+    (screenWidth - collageSidePadding * 2 - collageGap * (collageColumns - 1)) /
+    collageColumns
+  );
   const {
     reviews,
     refreshReviews,
@@ -101,11 +133,23 @@ const SocialFeed = () => {
   const [activeTab, setActiveTab] = useState<
     'Feed' | 'Recommended' | 'Live' | 'Movie Match'
   >('Feed');
-  const [feedMode, setFeedMode] = useState<'timeline' | 'reels'>('timeline');
+  const [feedMode, setFeedMode] = useState<'timeline' | 'collage'>('collage');
   const [activeFilter, setActiveFilter] = useState<'All' | 'TopRated' | 'New' | 'ForYou'>('All');
 
+
+  const [collageModalOpen, setCollageModalOpen] = useState(false);
+  const [collageModalIndex, setCollageModalIndex] = useState(0);
+
   const [trending, setTrending] = useState<Media[]>([]);
-  const [movieReels, setMovieReels] = useState<Media[]>([]);
+  // Define extended type locally
+  type MovieClipMedia = Media & {
+    videoUrl?: string;
+    headers?: Record<string, string>;
+    sourceType?: string;
+  };
+
+
+  const [movieReels, setMovieReels] = useState<MovieClipMedia[]>([]);
   const [loading, setLoading] = useState(true);
   const [promotedProducts, setPromotedProducts] = useState<MarketplaceProduct[]>([]);
   const activeProfile = useActiveProfile();
@@ -114,111 +158,216 @@ const SocialFeed = () => {
   const [adMessagingBusy, setAdMessagingBusy] = useState(false);
   const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [boostedLiveStreams, setBoostedLiveStreams] = useState<LiveStream[]>([]);
+
+  // Header animations - Liquid glass effect
+  const headerFadeAnim = useRef(new Animated.Value(0)).current;
+  const headerSlideAnim = useRef(new Animated.Value(-30)).current;
+  const glassShineAnim = useRef(new Animated.Value(0)).current;
+  const statsScaleAnim = useRef(new Animated.Value(0.85)).current;
+  const iconPulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    // Entrance animation
+    Animated.parallel([
+      Animated.timing(headerFadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+      Animated.spring(headerSlideAnim, { toValue: 0, tension: 60, friction: 12, useNativeDriver: true }),
+      Animated.spring(statsScaleAnim, { toValue: 1, tension: 80, friction: 10, useNativeDriver: true }),
+    ]).start();
+
+    // Continuous glass shine effect
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(glassShineAnim, { toValue: 1, duration: 3000, useNativeDriver: true }),
+        Animated.timing(glassShineAnim, { toValue: 0, duration: 3000, useNativeDriver: true }),
+      ])
+    ).start();
+
+    // Subtle icon pulse
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(iconPulseAnim, { toValue: 1.05, duration: 2000, useNativeDriver: true }),
+        Animated.timing(iconPulseAnim, { toValue: 1, duration: 2000, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
 
   const HeaderComponent = () => (
-    <View style={styles.headerWrap}>
-      <LinearGradient
-        colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.headerGlow}
-      />
-      <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
-        <View style={styles.titleRow}>
-          <View style={styles.accentDot} />
-          <View>
-            <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
-              Connect & Share
-            </Text>
-            <Text style={styles.headerGreeting} numberOfLines={1} ellipsizeMode="tail">
-              Welcome, {activeProfileName}
-            </Text>
-            <Text
-              style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
-              numberOfLines={1}
-              ellipsizeMode="tail"
-            >
-              {activeTab === 'Feed'
-                ? 'Social Feed'
-                : activeTab === 'Recommended'
-                  ? 'Recommended'
-                  : activeTab === 'Live'
-                    ? 'Live'
-                    : 'Movie Match'}
-            </Text>
-          </View>
-        </View>
+    <Animated.View
+      style={[
+        styles.headerWrap,
+        {
+          opacity: headerFadeAnim,
+          transform: [{ translateY: headerSlideAnim }],
+        }
+      ]}
+    >
+      {/* Liquid glass container */}
+      <View style={styles.liquidGlassContainer}>
+        {/* iOS Blur base layer */}
+        {Platform.OS === 'ios' ? (
+          <BlurView intensity={40} tint="dark" style={styles.blurLayer} />
+        ) : (
+          <View style={styles.androidGlassLayer} />
+        )}
 
-        <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
-          <Link href="/messaging" asChild>
-            <TouchableOpacity style={styles.iconBtn}>
+        {/* Animated gradient overlay for liquid effect */}
+        <Animated.View
+          style={[
+            styles.liquidShine,
+            {
+              opacity: glassShineAnim.interpolate({
+                inputRange: [0, 0.5, 1],
+                outputRange: [0.3, 0.6, 0.3],
+              }),
+              transform: [{
+                translateX: glassShineAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-200, 200],
+                }),
+              }],
+            }
+          ]}
+        >
+          <LinearGradient
+            colors={['transparent', 'rgba(255,255,255,0.08)', 'transparent']}
+            start={{ x: 0, y: 0.5 }}
+            end={{ x: 1, y: 0.5 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </Animated.View>
+
+        {/* Colored accent glow */}
+        <LinearGradient
+          colors={['rgba(229,9,20,0.12)', 'rgba(125,216,255,0.08)', 'transparent']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.accentGlow}
+        />
+
+        {/* Glass border highlight */}
+        <View style={styles.glassBorderTop} />
+        <View style={styles.glassBorderBottom} />
+
+        {/* Main content */}
+        <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
+          <View style={styles.titleRow}>
+            {/* Liquid accent orb */}
+            <Animated.View
+              style={[
+                styles.accentOrb,
+                { transform: [{ scale: iconPulseAnim }] }
+              ]}
+            >
+              <LinearGradient
+                colors={['#ff4757', '#e50914', '#c0392b']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.accentOrbGradient}
+              />
+              <View style={styles.accentOrbShine} />
+            </Animated.View>
+
+            <View style={styles.titleContent}>
+              <Text style={styles.headerEyebrow} numberOfLines={1}>
+                {activeTab === 'Feed' ? 'SOCIAL' : activeTab.toUpperCase()}
+              </Text>
+              <Text
+                style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
+                numberOfLines={1}
+              >
+                {activeTab === 'Feed'
+                  ? 'Your Feed'
+                  : activeTab === 'Recommended'
+                    ? 'For You'
+                    : activeTab === 'Live'
+                      ? 'Live Now'
+                      : 'Movie Match'}
+              </Text>
+              <Text style={styles.headerGreeting} numberOfLines={1}>
+                Hey, {activeProfileName} 👋
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => deferNav(() => router.push('/messaging'))}
+              activeOpacity={0.7}
+            >
               <View style={styles.iconBadgeWrap}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-                >
-                  <Ionicons
-                    name="chatbubble-outline"
-                    size={headerIconSize}
-                    color="#ffffff"
-                    style={styles.iconMargin}
-                  />
-                </LinearGradient>
-                {unreadBadgeCount > 0 ? (
+                <View style={styles.glassIconBg}>
+                  <Ionicons name="chatbubble" size={18} color="rgba(255,255,255,0.9)" />
+                </View>
+                {unreadBadgeCount > 0 && (
                   <View style={styles.unreadBadge}>
                     <Text style={styles.unreadBadgeText}>
                       {unreadBadgeCount > 99 ? '99+' : String(unreadBadgeCount)}
                     </Text>
                   </View>
-                ) : null}
+                )}
               </View>
             </TouchableOpacity>
-          </Link>
-          <Link href="/search" asChild>
-            <TouchableOpacity style={styles.iconBtn}>
-              <LinearGradient
-                colors={['#e50914', '#b20710']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-              >
-                <Ionicons name="search" size={headerIconSize} color="#ffffff" style={styles.iconMargin} />
-              </LinearGradient>
-            </TouchableOpacity>
-          </Link>
 
-          <Link href="/profile" asChild>
-            <TouchableOpacity style={styles.iconBtn}>
-              <LinearGradient
-                colors={['#e50914', '#b20710']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-              >
-                <FontAwesome name="user-circle" size={isCompactLayout ? 22 : 24} color="#ffffff" />
-              </LinearGradient>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => deferNav(() => router.push('/search'))}
+              activeOpacity={0.7}
+            >
+              <View style={styles.glassIconBg}>
+                <Ionicons name="search" size={18} color="rgba(255,255,255,0.9)" />
+              </View>
             </TouchableOpacity>
-          </Link>
-        </View>
-      </View>
 
-      <View style={styles.headerMetaRow}>
-        <View style={styles.metaPill}>
-          <Ionicons name="people" size={14} color="#fff" />
-          <Text style={styles.metaText}>{reviews.length} posts</Text>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => deferNav(() => router.push('/profile'))}
+              activeOpacity={0.7}
+            >
+              <View style={styles.profileGlassIcon}>
+                <LinearGradient
+                  colors={['rgba(229,9,20,0.9)', 'rgba(255,107,53,0.9)']}
+                  style={styles.profileIconGradient}
+                >
+                  <FontAwesome name="user" size={16} color="#fff" />
+                </LinearGradient>
+              </View>
+            </TouchableOpacity>
+          </View>
         </View>
-        <View style={[styles.metaPill, styles.metaPillSoft]}>
-          <Ionicons name="flame" size={14} color="#fff" />
-          <Text style={styles.metaText}>trending</Text>
-        </View>
-        <View style={[styles.metaPill, styles.metaPillOutline]}>
-          <Ionicons name="star" size={14} color="#fff" />
-          <Text style={styles.metaText}>featured</Text>
-        </View>
+
+        {/* Stats row with liquid glass cards */}
+        <Animated.View
+          style={[
+            styles.headerMetaRow,
+            { transform: [{ scale: statsScaleAnim }] }
+          ]}
+        >
+          <View style={styles.glassStatCard}>
+            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(125,216,255,0.15)' }]}>
+              <Ionicons name="documents" size={14} color="#7dd8ff" />
+            </View>
+            <Text style={styles.statValue}>{reviews.length}</Text>
+            <Text style={styles.statLabel}>Posts</Text>
+          </View>
+          <View style={styles.glassStatCard}>
+            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(255,107,53,0.15)' }]}>
+              <Ionicons name="flame" size={14} color="#ff6b35" />
+            </View>
+            <Text style={styles.statValue}>{trending.length}</Text>
+            <Text style={styles.statLabel}>Trending</Text>
+          </View>
+          <View style={styles.glassStatCard}>
+            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(229,9,20,0.15)' }]}>
+              <Ionicons name="radio" size={14} color="#e50914" />
+            </View>
+            <Text style={styles.statValue}>{liveStreams.length}</Text>
+            <Text style={styles.statLabel}>Live</Text>
+          </View>
+        </Animated.View>
       </View>
-    </View>
+    </Animated.View>
   );
 
   useEffect(() => {
@@ -245,11 +394,21 @@ const SocialFeed = () => {
     return () => unsubscribe();
   }, [activeTab]);
 
+  useEffect(() => {
+    const unsubscribe = listenToBoostedLiveStreams((streams) => {
+      setBoostedLiveStreams(streams);
+    });
+    return () => unsubscribe();
+  }, []);
+
   /* ------------------------------ Fetch data ------------------------------ */
 
   useEffect(() => {
     (async () => {
       try {
+        setLoading(true);
+
+        // Fetch trending and upcoming movies
         const [t, r] = await Promise.all([
           fetch(`${API_BASE_URL}/trending/all/day?api_key=${API_KEY}`).then((x) =>
             x.json()
@@ -258,9 +417,84 @@ const SocialFeed = () => {
             x.json()
           ),
         ]);
+        const combined = [...(t.results || []), ...(r.results || [])];
         setTrending(t.results || []);
-        setMovieReels(r.results || []);
-      } catch {}
+
+        console.log(`[MovieTrailers] Found ${combined.length} candidates. Starting batched fetch...`);
+
+        // Helper to process a single movie
+        const processMovie = async (m: any) => {
+          if (!m.id) return m;
+          const releaseYear = m.release_date ? m.release_date.split('-')[0] : '';
+
+          let clip = await searchClipCafe(m.title, releaseYear);
+          let source = 'clip.cafe';
+
+          if (!clip && m.original_title && m.original_title !== m.title) {
+            clip = await searchClipCafe(m.original_title, releaseYear);
+          }
+
+          if (!clip) {
+            const imdbId = await getImdbId(m.id);
+            if (imdbId) {
+              try {
+                const found = await scrapeImdbTrailer({ imdb_id: imdbId });
+                if (found) {
+                  clip = found;
+                  source = 'imdb';
+                  console.log(`[MovieTrailers] IMDB Found: ${m.title}`);
+                }
+              } catch (e) { }
+            }
+          } else {
+            console.log(`[MovieTrailers] ClipCafe Found: ${m.title}`);
+          }
+
+          if (clip) {
+            return {
+              ...m,
+              videoUrl: clip.url,
+              headers: (clip as any).headers,
+              mediaType: 'clip',
+              sourceType: source,
+              media_type: 'clip'
+            };
+          }
+          return m;
+        };
+
+        // 1. Process top 5 immediately (Critical Path)
+        const initialBatch = combined.slice(0, 5);
+        const initialResults = await Promise.all(initialBatch.map(processMovie));
+
+        // Update state immediately so user sees something
+        setMovieReels(initialResults);
+
+        // If we have at least *some* content (reviews or movie reels), stop "loading" spinner
+        if (initialResults.length > 0 || reviews.length > 0) {
+          setLoading(false);
+        }
+
+        // 2. Process the rest in background chunks
+        const remaining = combined.slice(5);
+        const CHUNK_SIZE = 3;
+
+        // We'll process remaining items in chunks to avoid spamming the network/thread
+        for (let i = 0; i < remaining.length; i += CHUNK_SIZE) {
+          const chunk = remaining.slice(i, i + CHUNK_SIZE);
+          const chunkResults = await Promise.all(chunk.map(processMovie));
+
+          // Append new results incrementally
+          setMovieReels(prev => [...prev, ...chunkResults]);
+
+          // Small delay to yield to UI thread
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+      } catch (e) {
+        console.error("Movie fetch failed", e);
+        setLoading(false);
+      }
     })();
   }, []);
 
@@ -282,15 +516,17 @@ const SocialFeed = () => {
   }, []);
 
   useEffect(() => {
-    setLoading(!reviews.length);
-  }, [reviews]);
+    if (reviews.length > 0 || movieReels.length > 0) {
+      setLoading(false);
+    }
+  }, [reviews, movieReels]);
 
   useEffect(() => {
     (async () => {
       try {
         await refreshReviews();
         shuffleReviews();
-      } catch {}
+      } catch { }
     })();
   }, [refreshReviews, shuffleReviews]);
 
@@ -312,7 +548,7 @@ const SocialFeed = () => {
           photoURL: profile.photoURL || product.sellerAvatar || product.imageUrl,
         };
         const conversationId = await findOrCreateConversation(sellerProfile);
-        router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } });
+        deferNav(() => router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } } as any));
       } catch (err) {
         console.error('[social-feed] promo chat failed', err);
         Alert.alert('Unable to start chat', 'Please try again later.');
@@ -320,7 +556,7 @@ const SocialFeed = () => {
         setAdMessagingBusy(false);
       }
     },
-    [adMessagingBusy, router]
+    [adMessagingBusy, deferNav, router]
   );
 
   /* ------------------------------ Feed items ------------------------------ */
@@ -336,24 +572,83 @@ const SocialFeed = () => {
   }, [reviews, activeFilter]);
 
   const reelsQueue = useMemo(() => {
-    return filteredReviews
+    const liveReels = boostedLiveStreams.slice(0, 5).map((s) => ({
+      id: `live-${String(s.id)}`,
+      mediaType: 'live',
+      title: (s.title || 'Live').slice(0, 120),
+      videoUrl: null,
+      coverUrl: s.coverUrl ?? null,
+      liveStreamId: String(s.id),
+      userId: s.hostId ?? null,
+      username: s.hostName ?? null,
+      likes: 0,
+      commentsCount: 0,
+      likerAvatars: [],
+      music: 'LIVE',
+    }));
+
+    const videoReels = filteredReviews
       .filter((item): item is ReviewItem => 'videoUrl' in item && !!item.videoUrl)
       .slice(0, 40)
-      .map((item) => ({
-        id: String(item.id),
-        mediaType: 'feed',
-        title: (item.movie || item.review || 'Reel').slice(0, 120),
-        docId: (item as any).docId ?? null,
-        videoUrl: item.videoUrl ?? null,
-        avatar: (item as any).avatar ?? null,
-        userId: (item as any).userId ?? null,
-        username: (item as any).user ?? null,
-        likes: (item as any).likes ?? 0,
-        commentsCount: (item as any).commentsCount ?? 0,
-        likerAvatars: [],
-        music: `Original Sound - ${(item as any).user ?? 'MovieFlix'}`,
-      }));
-  }, [filteredReviews]);
+      .map((item) => {
+        let posterUrl = null;
+        if (item.image && typeof item.image === 'object' && 'uri' in item.image) {
+          posterUrl = (item.image as any).uri;
+        }
+
+        return {
+          id: String(item.id),
+          mediaType: 'feed',
+          title: (item.movie || item.review || 'Reel').slice(0, 120),
+          docId: (item as any).docId ?? null,
+          videoUrl: item.videoUrl,
+          posterUrl,
+          userId: String(item.userId || 'anon'),
+          username: item.user || 'User',
+          userAvatar: item.avatar || null,
+          likes: item.likes || 0,
+          commentsCount: item.commentsCount || 0, // Using commentsCount form ReviewItem
+          description: item.review || '',
+          createdAt: item.date, // date string
+          isLiked: false,
+          likerAvatars: [],
+          music: 'Original Audio',
+        };
+      });
+
+    // Transform movie clips/trailers from TMDB/ClipCafe
+    const movieClips = movieReels.map((m) => ({
+      id: String(m.id),
+      mediaType: 'clip', // distinct type
+      title: m.title || 'Movie Clip',
+      docId: null,
+      videoUrl: m.videoUrl,
+      posterUrl: m.poster_path
+        ? `https://image.tmdb.org/t/p/w500${m.poster_path}`
+        : null,
+      userId: 'movieflix',
+      username: 'MovieFlix',
+      userAvatar: null,
+      likes: Math.floor(Math.random() * 500) + 50, // fake stats
+      commentsCount: 0,
+      description: m.overview || 'Featured Clip',
+      createdAt: new Date().toISOString(),
+      isLiked: false,
+      likerAvatars: [],
+      music: 'Movie Soundtrack',
+      headers: (m as any).headers,
+    }));
+
+    // Interleave logic
+    const combined = [];
+    const maxLength = Math.max(videoReels.length, movieClips.length);
+    for (let i = 0; i < maxLength; i++) {
+      if (i < videoReels.length) combined.push(videoReels[i]);
+      if (i < movieClips.length) combined.push(movieClips[i]);
+    }
+
+    return [...liveReels, ...combined];
+  }, [boostedLiveStreams, filteredReviews, movieReels]);
 
   const openFeedReels = useCallback(
     (startId?: string) => {
@@ -362,16 +657,18 @@ const SocialFeed = () => {
         return;
       }
       const queueKey = putNavPayload('feedReels', reelsQueue);
-      router.push({
-        pathname: '/reels/feed',
-        params: {
-          queueKey,
-          id: startId ?? reelsQueue[0].id,
-          title: 'Reels',
-        },
-      } as any);
+      deferNav(() => {
+        router.push({
+          pathname: '/reels/feed',
+          params: {
+            queueKey,
+            id: startId ?? reelsQueue[0].id,
+            title: 'Reels',
+          },
+        } as any);
+      });
     },
-    [reelsQueue, router]
+    [deferNav, reelsQueue, router]
   );
 
   const adPatternStartRef = useRef(Math.floor(Math.random() * 3));
@@ -386,7 +683,7 @@ const SocialFeed = () => {
         title: 'Trending',
         movies: trending,
         onItemPress: (m) =>
-          router.push(`/details/${m.id}?mediaType=${m.media_type || 'movie'}`),
+          deferNav(() => router.push(`/details/${m.id}?mediaType=${m.media_type || 'movie'}`)),
       });
     }
 
@@ -397,7 +694,7 @@ const SocialFeed = () => {
         title: 'Movie Reels',
         movies: movieReels,
         onItemPress: (m) =>
-          router.push(`/details/${m.id}?mediaType=${m.media_type || 'movie'}`),
+          deferNav(() => router.push(`/details/${m.id}?mediaType=${m.media_type || 'movie'}`)),
       });
     }
 
@@ -428,7 +725,7 @@ const SocialFeed = () => {
     }
 
     return items;
-  }, [filteredReviews, trending, movieReels, prioritizedPromos, router, currentPlan]);
+  }, [filteredReviews, trending, movieReels, prioritizedPromos, router, currentPlan, deferNav]);
 
   /* ------------------------------ Refresh ------------------------------ */
 
@@ -449,22 +746,25 @@ const SocialFeed = () => {
       {currentPlan === 'free' && (
         <View style={styles.upgradeBanner}>
           <LinearGradient
-            colors={['rgba(229,9,20,0.9)', 'rgba(185,7,16,0.9)']}
+            colors={['rgba(229,9,20,0.85)', 'rgba(185,7,16,0.85)']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={styles.upgradeBannerGradient}
           >
             <View style={styles.upgradeBannerContent}>
-              <Ionicons name="star" size={20} color="#fff" />
+              <View style={styles.upgradeBannerIcon}>
+                <Ionicons name="diamond" size={22} color="#fff" />
+              </View>
               <View style={styles.upgradeBannerText}>
-                <Text style={styles.upgradeBannerTitle}>Upgrade to Plus</Text>
+                <Text style={styles.upgradeBannerTitle}>Go Premium</Text>
                 <Text style={styles.upgradeBannerSubtitle}>
-                  Unlock unlimited posts, premium features & more
+                  Unlock unlimited posts & features
                 </Text>
               </View>
               <TouchableOpacity
                 style={styles.upgradeBannerButton}
-                onPress={() => router.push('/premium?source=social')}
+                onPress={() => deferNav(() => router.push('/premium?source=social'))}
+                activeOpacity={0.9}
               >
                 <Text style={styles.upgradeBannerButtonText}>Upgrade</Text>
               </TouchableOpacity>
@@ -473,86 +773,163 @@ const SocialFeed = () => {
         </View>
       )}
 
-      <View style={{ paddingHorizontal: 12, paddingBottom: 10 }}>
-        <View style={styles.modeSwitcher}>
-          {(
-            [
-              { key: 'timeline' as const, label: 'Timeline' },
-              { key: 'reels' as const, label: 'Reels' },
-            ]
-          ).map((mode) => (
-            <TouchableOpacity
-              key={mode.key}
-              onPress={() => {
-                if (mode.key === 'reels') {
-                  openFeedReels();
-                  return;
-                }
-                setFeedMode('timeline');
-              }}
-              style={[styles.modeBtn, feedMode === mode.key && styles.modeBtnActive]}
-            >
-              <Text
-                style={{
-                  color: feedMode === mode.key ? '#fff' : '#aaa',
-                  fontWeight: '700',
-                }}
-              >
-                {mode.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+      <View style={styles.feedHeaderContent}>
+        {/* Mode Switcher - Redesigned */}
+        <View style={styles.modeSwitcherWrap}>
+          <View style={styles.modeSwitcher}>
+            {([
+              { key: 'timeline' as const, label: 'Timeline', icon: 'list' as const },
+              { key: 'collage' as const, label: 'Grid', icon: 'grid' as const },
+              { key: 'reels' as const, label: 'Reels', icon: 'play-circle' as const },
+            ]).map((mode) => {
+              const isActive = (feedMode as string) === mode.key && mode.key !== 'reels';
+              return (
+                <TouchableOpacity
+                  key={mode.key}
+                  onPress={() => {
+                    if (mode.key === 'reels') {
+                      openFeedReels();
+                      return;
+                    }
+                    setFeedMode(mode.key);
+                  }}
+                  style={[styles.modeBtn, isActive && styles.modeBtnActive]}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons
+                    name={mode.icon}
+                    size={16}
+                    color={isActive ? '#fff' : 'rgba(255,255,255,0.6)'}
+                  />
+                  <Text style={[styles.modeBtnText, isActive && styles.modeBtnTextActive]}>
+                    {mode.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         </View>
 
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.filterRowWrap}
-          contentContainerStyle={styles.filterRow}
-        >
-          {['All', 'TopRated', 'New', 'ForYou'].map((key) => {
-            const labelMap: Record<string, string> = {
-              All: 'All',
-              TopRated: 'Top Rated',
-              New: 'New',
-              ForYou: 'For You',
-            };
-            const isActive = activeFilter === (key as any);
-            return (
-              <TouchableOpacity
-                key={key}
-                style={[styles.filterChip, isActive && styles.filterChipActive]}
-                onPress={() => setActiveFilter(key as any)}
-              >
-                <Text style={[styles.filterChipText, isActive && styles.filterChipTextActive]}>
-                  {labelMap[key]}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
 
+        {/* Stories Row */}
         <StoriesRow showAddStory={currentPlan !== 'free'} />
 
+        {/* Quick Actions - Redesigned */}
         <View style={styles.quickActionsRow}>
-          <View style={styles.quickAction}>
-            <Ionicons name="sparkles-outline" size={18} color="#fff" />
+          <TouchableOpacity style={styles.quickAction} activeOpacity={0.8}>
+            <LinearGradient
+              colors={['rgba(125,216,255,0.2)', 'rgba(125,216,255,0.05)']}
+              style={styles.quickActionIcon}
+            >
+              <Ionicons name="sparkles" size={18} color="#7dd8ff" />
+            </LinearGradient>
             <Text style={styles.quickActionText}>Fresh</Text>
-          </View>
-          <View style={styles.quickAction}>
-            <Ionicons name="flash-outline" size={18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.quickAction}
+            activeOpacity={0.8}
+            onPress={() => openFeedReels()}
+          >
+            <LinearGradient
+              colors={['rgba(229,9,20,0.2)', 'rgba(229,9,20,0.05)']}
+              style={styles.quickActionIcon}
+            >
+              <Ionicons name="play" size={18} color="#e50914" />
+            </LinearGradient>
             <Text style={styles.quickActionText}>Reels</Text>
-          </View>
-          <View style={styles.quickAction}>
-            <Ionicons name="tv-outline" size={18} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.quickAction}
+            activeOpacity={0.8}
+            onPress={() => setActiveTab('Live')}
+          >
+            <LinearGradient
+              colors={['rgba(255,107,53,0.2)', 'rgba(255,107,53,0.05)']}
+              style={styles.quickActionIcon}
+            >
+              <Ionicons name="radio" size={18} color="#ff6b35" />
+            </LinearGradient>
             <Text style={styles.quickActionText}>Live</Text>
-          </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.quickAction}
+            activeOpacity={0.8}
+            onPress={() => setActiveTab('Movie Match')}
+          >
+            <LinearGradient
+              colors={['rgba(255,215,0,0.2)', 'rgba(255,215,0,0.05)']}
+              style={styles.quickActionIcon}
+            >
+              <Ionicons name="heart" size={18} color="#ffd700" />
+            </LinearGradient>
+            <Text style={styles.quickActionText}>Match</Text>
+          </TouchableOpacity>
         </View>
 
         {currentPlan !== 'free' && <PostMovieReview />}
       </View>
     </View>
   );
+
+  // Floating particles animation
+  const particles = useRef(
+    Array.from({ length: 8 }, (_, i) => ({
+      x: new Animated.Value(Math.random() * 100),
+      y: new Animated.Value(Math.random() * 100),
+      opacity: new Animated.Value(0),
+      scale: new Animated.Value(0.5 + Math.random() * 0.5),
+    }))
+  ).current;
+
+  // FAB animation
+  const fabScaleAnim = useRef(new Animated.Value(1)).current;
+  const fabRotateAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Animate floating particles
+    particles.forEach((particle, i) => {
+      const animateParticle = () => {
+        particle.y.setValue(110);
+        particle.opacity.setValue(0);
+        particle.x.setValue(10 + Math.random() * 80);
+
+        Animated.parallel([
+          Animated.timing(particle.y, {
+            toValue: -10,
+            duration: 6000 + Math.random() * 4000,
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.timing(particle.opacity, { toValue: 0.6, duration: 1000, useNativeDriver: true }),
+            Animated.timing(particle.opacity, { toValue: 0, duration: 5000, useNativeDriver: true }),
+          ]),
+        ]).start(() => animateParticle());
+      };
+
+      setTimeout(animateParticle, i * 800);
+    });
+
+    // FAB breathing animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(fabScaleAnim, { toValue: 1.08, duration: 1500, useNativeDriver: true }),
+        Animated.timing(fabScaleAnim, { toValue: 1, duration: 1500, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+
+  const handleFabPress = () => {
+    Animated.sequence([
+      Animated.parallel([
+        Animated.spring(fabScaleAnim, { toValue: 0.85, tension: 200, friction: 10, useNativeDriver: true }),
+        Animated.timing(fabRotateAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
+      ]),
+      Animated.spring(fabScaleAnim, { toValue: 1, tension: 100, friction: 8, useNativeDriver: true }),
+    ]).start(() => {
+      fabRotateAnim.setValue(0);
+      deferNav(() => router.push('/social-feed/go-live'));
+    });
+  };
 
   /* -------------------------------------------------------------------------- */
 
@@ -561,10 +938,32 @@ const SocialFeed = () => {
       <ScreenWrapper>
         <StatusBar barStyle="light-content" />
 
+        {/* Animated gradient background */}
         <LinearGradient
-          colors={[accentColor, '#120914', '#05060f']}
+          colors={[accentColor + '40', '#120914', '#05060f']}
+          locations={[0, 0.3, 1]}
           style={StyleSheet.absoluteFillObject}
         />
+
+        {/* Floating particles */}
+        {particles.map((particle, i) => (
+          <Animated.View
+            key={i}
+            pointerEvents="none"
+            style={[
+              styles.floatingParticle,
+              {
+                backgroundColor: i % 3 === 0 ? accentColor : i % 3 === 1 ? '#7dd8ff' : '#ffd700',
+                opacity: particle.opacity,
+                transform: [
+                  { translateX: particle.x.interpolate({ inputRange: [0, 100], outputRange: [0, screenWidth] }) },
+                  { translateY: particle.y.interpolate({ inputRange: [0, 100], outputRange: [0, 800] }) },
+                  { scale: particle.scale },
+                ],
+              },
+            ]}
+          />
+        ))}
 
         <HeaderComponent />
 
@@ -573,7 +972,7 @@ const SocialFeed = () => {
             active={activeTab}
             onChangeTab={(tab) => {
               if (currentPlan === 'free' && (tab === 'Live' || tab === 'Movie Match')) {
-                router.push('/premium');
+                deferNav(() => router.push('/premium'));
                 return;
               }
               setActiveTab(tab);
@@ -588,148 +987,282 @@ const SocialFeed = () => {
             <MovieMatchView />
           ) : activeTab === 'Live' ? (
             <View style={{ flex: 1, paddingHorizontal: 12, paddingBottom: listBottomPadding }}>
-            <View style={styles.liveHeaderRow}>
-              <Text style={styles.liveTitle}>Live now</Text>
-              <TouchableOpacity
-                style={[styles.liveButton, { backgroundColor: accentColor }]}
-                onPress={() => router.push('/social-feed/go-live')}
-              >
-                <Ionicons name="videocam" size={18} color="#fff" />
-                <Text style={styles.liveButtonText}>Go Live</Text>
-              </TouchableOpacity>
-            </View>
-
-            {liveLoading ? (
-              <View style={styles.liveEmpty}>
-                <ActivityIndicator size="large" color="#fff" />
-              </View>
-            ) : liveStreams.length === 0 ? (
-              <View style={styles.liveEmpty}>
-                <Ionicons name="radio-outline" size={44} color="rgba(255,255,255,0.6)" />
-                <Text style={styles.liveEmptyTitle}>No live streams right now</Text>
-                <Text style={styles.liveEmptyText}>Start one and invite your friends.</Text>
-              </View>
-            ) : (
-              <FlatList
-                data={liveStreams}
-                keyExtractor={(item) => String(item.id)}
-                showsVerticalScrollIndicator={false}
-                ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-                contentContainerStyle={{ paddingBottom: 40 }}
-                renderItem={({ item }) => (
+              <View style={styles.liveHeaderRow}>
+                <Text style={styles.liveTitle}>Live now</Text>
+                <View style={styles.liveHeaderActions}>
                   <TouchableOpacity
-                    style={styles.liveCard}
-                    activeOpacity={0.9}
-                    onPress={() => router.push(`/social-feed/live/${item.id}`)}
+                    style={styles.liveExploreButton}
+                    onPress={() => deferNav(() => router.push('/social-feed/live'))}
                   >
-                    <LinearGradient
-                      colors={['rgba(229,9,20,0.18)', 'rgba(10,12,24,0.7)']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={StyleSheet.absoluteFillObject}
-                    />
-                    <View style={styles.liveCardCopy}>
-                      <Text style={styles.liveCardTitle} numberOfLines={1} ellipsizeMode="tail">
-                        {item.title || 'Live on MovieFlix'}
-                      </Text>
-                      <Text style={styles.liveCardSubtitle} numberOfLines={1} ellipsizeMode="tail">
-                        {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
-                      </Text>
-                    </View>
-                    <View style={styles.liveChip}>
-                      <View style={styles.liveDot} />
-                      <Text style={styles.liveChipText}>LIVE</Text>
-                    </View>
+                    <Ionicons name="compass-outline" size={18} color="#fff" />
+                    <Text style={styles.liveExploreText}>Explore</Text>
                   </TouchableOpacity>
-                )}
-              />
-            )}
-          </View>
-          ) : (
-            <Animated.FlatList<FeedItem | undefined>
-              style={{ flex: 1 }}
-              data={loading ? Array.from({ length: 3 }) : feedItems}
-              keyExtractor={(item, i) =>
-                item && typeof item === 'object' && 'id' in item
-                  ? String((item as any).id)
-                  : String(i)
-              }
-              ListHeaderComponent={FeedTimelineHeader}
-              ItemSeparatorComponent={() => <View style={styles.feedGap} />}
-              renderItem={({ item, index }: { item?: FeedItem | null; index: number }) => {
-                if (!item || loading) return <FeedCardPlaceholder />;
+                  <TouchableOpacity
+                    style={[styles.liveButton, { backgroundColor: accentColor }]}
+                    onPress={() => deferNav(() => router.push('/social-feed/go-live'))}
+                  >
+                    <Ionicons name="videocam" size={18} color="#fff" />
+                    <Text style={styles.liveButtonText}>Go Live</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
 
-                if ('type' in (item as any) && (item as any).type === 'movie-list') {
-                  const movieList = item as Extract<FeedItem, { type: 'movie-list' }>;
-                  return (
-                    <MovieList
-                      title={movieList.title}
-                      movies={movieList.movies}
-                      onItemPress={movieList.onItemPress}
-                    />
-                  );
-                }
-
-                if ('type' in (item as any) && (item as any).type === 'promo-ad') {
-                  const ad = item as Extract<FeedItem, { type: 'promo-ad' }>;
-                  return (
-                    <PromoAdCard
-                      product={ad.product}
-                      onPress={() => router.push((`/marketplace/${ad.product.id}`) as any)}
-                      onMessage={() => handlePromoMessage(ad.product)}
-                    />
-                  );
-                }
-
-                if ('type' in (item as any) && (item as any).type === 'native-ad') {
-                  const ad = item as Extract<FeedItem, { type: 'native-ad' }>;
-                  if (!ad.product?.id) return null;
-                  return (
-                    <NativeAdCard
-                      product={ad.product as any}
-                      onPress={() => router.push((`/marketplace/${ad.product.id}`) as any)}
-                    />
-                  );
-                }
-
-                return (
-                  <FeedCard
-                    item={item as any}
-                    onLike={handleLike}
-                    onComment={handleComment}
-                    onWatch={handleWatch}
-                    onShare={handleShare}
-                    onBookmark={handleBookmark}
-                    onDelete={(it) => deleteReview((it as any).id)}
-                    currentPlan={currentPlan}
-                    enableStreaks
-                  />
-                );
-              }}
-              refreshControl={
-                <RefreshControl
-                  refreshing={refreshing}
-                  onRefresh={onRefresh}
-                  tintColor="#fff"
+              {liveLoading ? (
+                <View style={styles.liveEmpty}>
+                  <ActivityIndicator size="large" color="#fff" />
+                </View>
+              ) : liveStreams.length === 0 ? (
+                <View style={styles.liveEmpty}>
+                  <Ionicons name="radio-outline" size={44} color="rgba(255,255,255,0.6)" />
+                  <Text style={styles.liveEmptyTitle}>No live streams right now</Text>
+                  <Text style={styles.liveEmptyText}>Start one and invite your friends.</Text>
+                </View>
+              ) : (
+                <FlatList
+                  data={liveStreams}
+                  keyExtractor={(item) => String(item.id)}
+                  showsVerticalScrollIndicator={false}
+                  ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+                  contentContainerStyle={{ paddingBottom: 40 }}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.liveCard}
+                      activeOpacity={0.9}
+                      onPress={() => deferNav(() => router.push(`/social-feed/live/${item.id}`))}
+                    >
+                      <LinearGradient
+                        colors={['rgba(229,9,20,0.18)', 'rgba(10,12,24,0.7)']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={StyleSheet.absoluteFillObject}
+                      />
+                      <View style={styles.liveCardCopy}>
+                        <Text style={styles.liveCardTitle} numberOfLines={1} ellipsizeMode="tail">
+                          {item.title || 'Live on MovieFlix'}
+                        </Text>
+                        <Text style={styles.liveCardSubtitle} numberOfLines={1} ellipsizeMode="tail">
+                          {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
+                        </Text>
+                      </View>
+                      <View style={styles.liveChip}>
+                        <View style={styles.liveDot} />
+                        <Text style={styles.liveChipText}>LIVE</Text>
+                      </View>
+                    </TouchableOpacity>
+                  )}
                 />
-              }
-              contentContainerStyle={{
-                paddingTop: 0,
-                paddingBottom: listBottomPadding,
-                paddingHorizontal: 10,
-              }}
-              showsVerticalScrollIndicator={false}
-            />
+              )}
+            </View>
+          ) : (
+            feedMode === 'collage' ? (
+              <FlashList
+                data={loading ? Array.from({ length: 12 }) : filteredReviews}
+                keyExtractor={(item: any, i: number) => (loading ? `placeholder-${i}` : String((item as any).id))}
+                numColumns={collageColumns}
+                estimatedItemSize={collageTileWidth * 1.1}
+                ListHeaderComponent={FeedTimelineHeader}
+                renderItem={({ item, index }: { item: any, index: number }) => {
+                  const col = index % collageColumns;
+                  const marginRight = col === collageColumns - 1 ? 0 : collageGap;
+
+                  return (
+                    <View style={{ width: collageTileWidth, marginRight, marginBottom: 12 }}>
+                      {loading ? (
+                        <FeedCollageTilePlaceholder columnWidth={collageTileWidth} index={index} />
+                      ) : (
+                        <FeedCollageTile
+                          item={item as any}
+                          columnWidth={collageTileWidth}
+                          onPress={() => {
+                            setCollageModalIndex(index);
+                            setCollageModalOpen(true);
+                          }}
+                        />
+                      )}
+                    </View>
+                  );
+                }}
+                refreshControl={
+                  <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
+                }
+                contentContainerStyle={{
+                  paddingTop: 0,
+                  paddingBottom: listBottomPadding,
+                  paddingHorizontal: collageSidePadding,
+                }}
+                showsVerticalScrollIndicator={false}
+              />
+            ) : (
+              <Animated.FlatList<FeedItem | undefined>
+                style={{ flex: 1 }}
+                data={loading ? Array.from({ length: 3 }) : feedItems}
+                keyExtractor={(item, i) =>
+                  item && typeof item === 'object' && 'id' in item
+                    ? String((item as any).id)
+                    : String(i)
+                }
+                ListHeaderComponent={FeedTimelineHeader}
+                ItemSeparatorComponent={() => <View style={styles.feedGap} />}
+                renderItem={({ item, index }: { item?: FeedItem | null; index: number }) => {
+                  if (!item || loading) return <FeedCardPlaceholder />;
+
+                  if ('type' in (item as any) && (item as any).type === 'movie-list') {
+                    const movieList = item as Extract<FeedItem, { type: 'movie-list' }>;
+                    return (
+                      <MovieList
+                        title={movieList.title}
+                        movies={movieList.movies}
+                        onItemPress={movieList.onItemPress}
+                      />
+                    );
+                  }
+
+                  if ('type' in (item as any) && (item as any).type === 'promo-ad') {
+                    const ad = item as Extract<FeedItem, { type: 'promo-ad' }>;
+                    return (
+                      <PromoAdCard
+                        product={ad.product}
+                        onPress={() => deferNav(() => router.push((`/marketplace/${ad.product.id}`) as any))}
+                        onMessage={() => handlePromoMessage(ad.product)}
+                      />
+                    );
+                  }
+
+                  if ('type' in (item as any) && (item as any).type === 'native-ad') {
+                    const ad = item as Extract<FeedItem, { type: 'native-ad' }>;
+                    if (!ad.product?.id) return null;
+                    return (
+                      <NativeAdCard
+                        product={ad.product as any}
+                        onPress={() => deferNav(() => router.push((`/marketplace/${ad.product.id}`) as any))}
+                      />
+                    );
+                  }
+
+                  return (
+                    <FeedCard
+                      item={item as any}
+                      onLike={handleLike}
+                      onComment={handleComment}
+                      onWatch={handleWatch}
+                      onShare={handleShare}
+                      onBookmark={handleBookmark}
+                      onDelete={(it) => deleteReview((it as any).id)}
+                      currentPlan={currentPlan}
+                      enableStreaks
+                    />
+                  );
+                }}
+                refreshControl={
+                  <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
+                }
+                contentContainerStyle={{
+                  paddingTop: 0,
+                  paddingBottom: listBottomPadding,
+                  paddingHorizontal: 10,
+                }}
+                showsVerticalScrollIndicator={false}
+              />
+            )
           )}
         </View>
 
+        <Modal
+          visible={collageModalOpen}
+          animationType="slide"
+          transparent={false}
+          onRequestClose={() => setCollageModalOpen(false)}
+        >
+          <View style={[styles.collageModalWrap, { paddingTop: insets.top }]}>
+            <View style={styles.collageModalTopBar}>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+                onPress={() => setCollageModalOpen(false)}
+                style={styles.collageModalClose}
+              >
+                <Ionicons name="close" size={22} color="#fff" />
+              </TouchableOpacity>
+
+              <Text style={styles.collageModalTitle} numberOfLines={1}>
+                {filteredReviews.length ? `Post ${collageModalIndex + 1} of ${filteredReviews.length}` : 'Post'}
+              </Text>
+              <View style={{ width: 44 }} />
+            </View>
+
+            <FlatList
+              data={filteredReviews}
+              keyExtractor={(it) => String((it as any).id)}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={Math.min(Math.max(collageModalIndex, 0), Math.max(0, filteredReviews.length - 1))}
+              getItemLayout={(_, idx) => ({ length: screenWidth, offset: screenWidth * idx, index: idx })}
+              onMomentumScrollEnd={(e) => {
+                const next = Math.round(e.nativeEvent.contentOffset.x / Math.max(1, screenWidth));
+                setCollageModalIndex(next);
+              }}
+              renderItem={({ item, index }) => (
+                <View style={{ width: screenWidth, paddingHorizontal: 12, alignItems: 'center' }}>
+                  <View style={{ width: Math.min(screenWidth, 560) }}>
+                    <FeedCard
+                      item={item as any}
+                      onLike={handleLike}
+                      onComment={handleComment}
+                      onWatch={handleWatch}
+                      onShare={handleShare}
+                      onBookmark={handleBookmark}
+                      onDelete={(it) => deleteReview((it as any).id)}
+                      currentPlan={currentPlan}
+                      enableStreaks
+                      active={index === collageModalIndex}
+                    />
+                  </View>
+                </View>
+              )}
+            />
+
+            <View style={styles.collageModalHintRow}>
+              <Ionicons name="swap-horizontal" size={16} color="rgba(255,255,255,0.65)" />
+              <Text style={styles.collageModalHintText}>Swipe to browse</Text>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Stunning animated FAB */}
         {currentPlan !== 'free' && (
-          <TouchableOpacity
-            style={[styles.fab, { backgroundColor: accentColor, bottom: insets.bottom + 96 }]}
-            onPress={() => router.push('/social-feed/go-live')}
+          <Animated.View
+            style={[
+              styles.fabContainer,
+              {
+                bottom: insets.bottom + 100,
+                transform: [
+                  { scale: fabScaleAnim },
+                  { rotate: fabRotateAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '135deg'] }) },
+                ],
+              },
+            ]}
           >
-            <Ionicons name="add" size={28} color="#fff" />
-          </TouchableOpacity>
+            {/* Glow effect */}
+            <View style={[styles.fabGlow, { backgroundColor: accentColor }]} />
+
+            <TouchableOpacity
+              style={styles.fab}
+              onPress={handleFabPress}
+              activeOpacity={1}
+            >
+              <LinearGradient
+                colors={[accentColor, '#ff6b35']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.fabGradient}
+              >
+                <Ionicons name="add" size={28} color="#fff" />
+              </LinearGradient>
+              {/* Shine effect */}
+              <View style={styles.fabShine} />
+            </TouchableOpacity>
+          </Animated.View>
         )}
       </ScreenWrapper>
     </View>
@@ -746,53 +1279,120 @@ type PromoCardProps = {
   onMessage: () => void;
 };
 
-const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => (
-  <TouchableOpacity style={styles.promoCard} activeOpacity={0.92} onPress={onPress}>
-    <LinearGradient
-      colors={['rgba(229,9,20,0.15)', 'rgba(10,12,24,0.65)']}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 1, y: 1 }}
-      style={styles.promoGlow}
-    />
-    <Image source={{ uri: product.imageUrl }} style={styles.promoImage} />
-    <View style={styles.promoCopy}>
-      <Text style={styles.promoBadge}>Sponsored</Text>
-      <Text style={styles.promoTitle} numberOfLines={2} ellipsizeMode="tail">
-        {product.name}
-      </Text>
-      <Text numberOfLines={2} style={styles.promoDescription}>
-        {product.description}
-      </Text>
-      <View style={styles.promoFooter}>
-        <Text style={styles.promoPrice}>${Number(product.price).toFixed(2)}</Text>
-        <View style={styles.promoSellerRow}>
-          {product.sellerAvatar ? (
-            <Image source={{ uri: product.sellerAvatar }} style={styles.promoSellerAvatar} />
+const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
+  const cardScale = useRef(new Animated.Value(1)).current;
+
+  const handlePressIn = () => {
+    Animated.spring(cardScale, { toValue: 0.98, tension: 100, friction: 10, useNativeDriver: true }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(cardScale, { toValue: 1, tension: 80, friction: 8, useNativeDriver: true }).start();
+  };
+
+  return (
+    <Animated.View style={{ transform: [{ scale: cardScale }] }}>
+      <TouchableOpacity
+        style={styles.promoCard}
+        activeOpacity={1}
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+      >
+        {/* Glass background */}
+        <View style={styles.promoGlassWrap}>
+          {Platform.OS === 'ios' ? (
+            <BlurView intensity={20} tint="dark" style={StyleSheet.absoluteFillObject} />
           ) : (
-            <View style={styles.promoSellerFallback}>
-              <Text style={styles.promoSellerInitial}>
-                {(product.sellerName || 'Seller').charAt(0).toUpperCase()}
+            <View style={styles.promoAndroidGlass} />
+          )}
+        </View>
+
+        {/* Accent glow */}
+        <LinearGradient
+          colors={['rgba(229,9,20,0.2)', 'transparent']}
+          style={styles.promoAccentGlow}
+        />
+
+        {/* Image with overlay */}
+        <View style={styles.promoImageWrap}>
+          <Image source={{ uri: product.imageUrl }} style={styles.promoImage} />
+          <LinearGradient
+            colors={['transparent', 'rgba(0,0,0,0.8)']}
+            style={styles.promoImageOverlay}
+          />
+          {/* Sponsored badge */}
+          <View style={styles.promoBadgeWrap}>
+            <LinearGradient
+              colors={['rgba(229,9,20,0.9)', 'rgba(255,107,53,0.9)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.promoBadge}
+            >
+              <Ionicons name="megaphone" size={10} color="#fff" />
+              <Text style={styles.promoBadgeText}>AD</Text>
+            </LinearGradient>
+          </View>
+        </View>
+
+        {/* Content */}
+        <View style={styles.promoCopy}>
+          <Text style={styles.promoTitle} numberOfLines={2}>
+            {product.name}
+          </Text>
+          <Text numberOfLines={2} style={styles.promoDescription}>
+            {product.description}
+          </Text>
+
+          {/* Footer */}
+          <View style={styles.promoFooter}>
+            {/* Price tag */}
+            <View style={styles.promoPriceTag}>
+              <Text style={styles.promoPriceCurrency}>$</Text>
+              <Text style={styles.promoPrice}>{Number(product.price).toFixed(2)}</Text>
+            </View>
+
+            {/* Seller info */}
+            <View style={styles.promoSellerRow}>
+              <View style={styles.promoSellerAvatarWrap}>
+                {product.sellerAvatar ? (
+                  <Image source={{ uri: product.sellerAvatar }} style={styles.promoSellerAvatar} />
+                ) : (
+                  <LinearGradient
+                    colors={['#e50914', '#ff6b35']}
+                    style={styles.promoSellerFallback}
+                  >
+                    <Text style={styles.promoSellerInitial}>
+                      {(product.sellerName || 'S').charAt(0).toUpperCase()}
+                    </Text>
+                  </LinearGradient>
+                )}
+              </View>
+              <Text style={styles.promoSellerName} numberOfLines={1}>
+                {product.sellerName || 'Seller'}
               </Text>
             </View>
-          )}
-          <Text style={styles.promoSellerName} numberOfLines={1} ellipsizeMode="tail">
-            {product.sellerName || 'Marketplace seller'}
-          </Text>
+
+            {/* Chat button */}
+            <TouchableOpacity
+              style={styles.promoChatBtn}
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                onMessage();
+              }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="chatbubble" size={14} color="#fff" />
+            </TouchableOpacity>
+          </View>
         </View>
-        <TouchableOpacity
-          style={styles.promoChatBtn}
-          onPress={(e) => {
-            e?.stopPropagation?.();
-            onMessage();
-          }}
-        >
-          <Ionicons name="chatbubble-outline" size={16} color="#fff" />
-          <Text style={styles.promoChatText}>Chat</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  </TouchableOpacity>
-);
+
+        {/* Glass border */}
+        <View style={styles.promoGlassBorder} />
+      </TouchableOpacity>
+    </Animated.View>
+  );
+};
 
 const buildPromoPipeline = (products: MarketplaceProduct[]) => {
   const now = Date.now();
@@ -838,64 +1438,164 @@ const styles = StyleSheet.create({
     gap: 12,
   },
 
+  feedHeaderContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+  },
+
+  modeSwitcherWrap: {
+    marginBottom: 12,
+  },
+
   modeSwitcher: {
     flexDirection: 'row',
-    gap: 8,
-    flexWrap: 'wrap',
-    rowGap: 8,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 14,
+    padding: 4,
+    gap: 4,
   },
 
   modeBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 14,
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
   },
 
   modeBtnActive: {
-    backgroundColor: 'rgba(229,9,20,0.8)',
+    backgroundColor: 'rgba(229,9,20,0.9)',
+  },
+
+  modeBtnText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  modeBtnTextActive: {
+    color: '#fff',
+    fontWeight: '700',
   },
 
   filterRowWrap: {
-    marginBottom: 10,
+    marginBottom: 12,
   },
   filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
     gap: 8,
   },
   filterChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   filterChipActive: {
-    backgroundColor: '#e50914',
-    borderColor: '#e50914',
+    backgroundColor: 'rgba(229,9,20,0.9)',
   },
   filterChipText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 12,
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
     fontWeight: '600',
   },
   filterChipTextActive: {
     color: '#fff',
+    fontWeight: '700',
   },
 
-  fab: {
+  floatingParticle: {
     position: 'absolute',
-    right: 18,
-    bottom: 120,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    zIndex: 0,
+  },
+  fabContainer: {
+    position: 'absolute',
+    right: 20,
     width: 60,
     height: 60,
-    borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 6,
+  },
+  fabGlow: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    opacity: 0.3,
+  },
+  fab: {
+    width: 56,
+    height: 56,
+    borderRadius: 18,
+    overflow: 'hidden',
+    elevation: 8,
+    shadowColor: '#e50914',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+  },
+  fabGradient: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fabShine: {
+    position: 'absolute',
+    top: 4,
+    left: 8,
+    width: 20,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+
+  collageModalWrap: {
+    flex: 1,
+    backgroundColor: '#0a0c18',
+  },
+  collageModalTopBar: {
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  collageModalClose: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  collageModalTitle: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 14,
+  },
+  collageModalHintRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  collageModalHintText: {
+    color: 'rgba(255,255,255,0.65)',
+    fontWeight: '700',
+    fontSize: 12,
   },
 
   /* Reels */
@@ -953,6 +1653,27 @@ const styles = StyleSheet.create({
   liveButtonText: {
     color: '#fff',
     fontWeight: '800',
+    fontSize: 12,
+  },
+  liveHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  liveExploreButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  liveExploreText: {
+    color: '#fff',
+    fontWeight: '900',
     fontSize: 12,
   },
   liveEmpty: {
@@ -1028,102 +1749,147 @@ const styles = StyleSheet.create({
 
   quickActionsRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-start',
-    flexWrap: 'wrap',
-    rowGap: 10,
-    columnGap: 14,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginBottom: 12,
-    marginTop: 4,
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 14,
+    marginTop: 6,
   },
   quickAction: {
-    flexDirection: 'row',
+    flex: 1,
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  quickActionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   quickActionText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
+    color: 'rgba(255,255,255,0.8)',
+    fontWeight: '600',
+    fontSize: 11,
   },
 
-  // Header styles
+  // Header styles - Liquid Glass iOS 26 style
   headerWrap: {
-    marginHorizontal: 12,
-    marginTop: 8,
-    marginBottom: 6,
-    borderRadius: 18,
-    overflow: 'hidden',
+    marginHorizontal: 14,
+    marginTop: 10,
+    marginBottom: 8,
   },
-  headerGlow: {
+  liquidGlassContainer: {
+    borderRadius: 24,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  blurLayer: {
     ...StyleSheet.absoluteFillObject,
-    opacity: 0.7,
+  },
+  androidGlassLayer: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(20,20,30,0.75)',
+  },
+  liquidShine: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 150,
+    zIndex: 1,
+  },
+  accentGlow: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
+  },
+  glassBorderTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  glassBorderBottom: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(0,0,0,0.2)',
   },
   headerBar: {
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    paddingVertical: 18,
+    paddingHorizontal: 18,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.14,
-    shadowRadius: 20,
+    zIndex: 2,
   },
   headerBarCompact: {
     flexDirection: 'column',
     alignItems: 'stretch',
-    rowGap: 10,
+    rowGap: 14,
   },
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 14,
     flex: 1,
     minWidth: 0,
     flexShrink: 1,
   },
-  accentDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#e50914',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.6,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+  accentOrb: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  accentOrbGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  accentOrbShine: {
+    position: 'absolute',
+    top: 2,
+    left: 4,
+    width: 18,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.35)',
+  },
+  titleContent: {
+    flex: 1,
+    minWidth: 0,
   },
   headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 0.6,
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    marginBottom: 2,
   },
   headerGreeting: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: 14,
-    fontWeight: '600',
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 3,
   },
   headerText: {
     color: '#FFFFFF',
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: '800',
-    letterSpacing: 0.3,
+    letterSpacing: -0.5,
   },
   headerTextCompact: {
-    fontSize: 18,
+    fontSize: 20,
   },
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 10,
     flexShrink: 0,
   },
   headerIconsCompact: {
@@ -1132,234 +1898,278 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   iconBtn: {
-    marginLeft: 8,
-    borderRadius: 12,
+    borderRadius: 14,
     overflow: 'hidden',
+  },
+  glassIconBg: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.1)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.28,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    borderColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  iconBg: {
-    padding: 10,
-    borderRadius: 12,
+  profileGlassIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    overflow: 'hidden',
   },
-  iconBgCompact: {
-    padding: 8,
+  profileIconGradient: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   iconBadgeWrap: {
     position: 'relative',
   },
   unreadBadge: {
     position: 'absolute',
-    top: 2,
-    right: 2,
-    minWidth: 16,
-    height: 16,
-    paddingHorizontal: 5,
-    borderRadius: 999,
+    top: -5,
+    right: -5,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
     backgroundColor: '#e50914',
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.55)',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(20,20,30,0.8)',
   },
   unreadBadgeText: {
     color: '#fff',
-    fontSize: 10,
-    fontWeight: '900',
-    includeFontPadding: false,
-    textAlignVertical: 'center',
-  },
-  iconMargin: {
-    marginRight: 4,
+    fontSize: 9,
+    fontWeight: '800',
   },
   headerMetaRow: {
     flexDirection: 'row',
-    gap: 10,
-    flexWrap: 'wrap',
-    rowGap: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingBottom: 16,
+    paddingTop: 4,
+    gap: 8,
+    zIndex: 2,
   },
-  metaPill: {
+  glassStatCard: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+    paddingVertical: 10,
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    maxWidth: '100%',
-    flexShrink: 1,
+    borderColor: 'rgba(255,255,255,0.04)',
   },
-  metaPillSoft: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+  statIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  metaPillOutline: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  metaText: {
+  statValue: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
-    flexShrink: 1,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  statLabel: {
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 10,
+    fontWeight: '600',
   },
   upgradeBanner: {
-    marginHorizontal: 12,
-    marginBottom: 12,
-    borderRadius: 16,
+    marginHorizontal: 14,
+    marginBottom: 14,
+    borderRadius: 18,
     overflow: 'hidden',
   },
   upgradeBannerGradient: {
-    padding: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
   },
   upgradeBannerContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexWrap: 'wrap',
-    rowGap: 10,
+    gap: 12,
+  },
+  upgradeBannerIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   upgradeBannerText: {
     flex: 1,
-    marginLeft: 12,
     minWidth: 0,
   },
   upgradeBannerTitle: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
   },
   upgradeBannerSubtitle: {
-    color: 'rgba(255,255,255,0.8)',
+    color: 'rgba(255,255,255,0.75)',
     fontSize: 12,
     marginTop: 2,
   },
   upgradeBannerButton: {
     backgroundColor: '#fff',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 12,
   },
   upgradeBannerButtonText: {
     color: '#e50914',
-    fontWeight: '700',
+    fontWeight: '800',
     fontSize: 13,
   },
 
-  /* Promo Ad Card */
+  /* Promo Ad Card - Glass redesign */
   promoCard: {
-    backgroundColor: 'rgba(10,12,24,0.8)',
-    borderRadius: 16,
+    borderRadius: 20,
     marginHorizontal: 12,
     marginVertical: 8,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    position: 'relative',
   },
-  promoGlow: {
+  promoGlassWrap: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  promoAndroidGlass: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(20,20,30,0.85)',
+  },
+  promoAccentGlow: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    bottom: 0,
+    height: 120,
+  },
+  promoImageWrap: {
+    height: 160,
+    position: 'relative',
   },
   promoImage: {
     width: '100%',
-    height: 200,
+    height: '100%',
     resizeMode: 'cover',
   },
-  promoCopy: {
-    padding: 16,
+  promoImageOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  promoBadgeWrap: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
   },
   promoBadge: {
-    backgroundColor: '#e50914',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  promoBadgeText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    alignSelf: 'flex-start',
-    marginBottom: 8,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  promoCopy: {
+    padding: 14,
   },
   promoTitle: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     marginBottom: 4,
   },
   promoDescription: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-    lineHeight: 20,
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+    lineHeight: 18,
     marginBottom: 12,
   },
   promoFooter: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-start',
-    flexWrap: 'wrap',
-    rowGap: 10,
-    columnGap: 12,
+    gap: 12,
+  },
+  promoPriceTag: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  promoPriceCurrency: {
+    color: '#e50914',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
   },
   promoPrice: {
     color: '#e50914',
     fontSize: 18,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   promoSellerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-    marginHorizontal: 12,
+    gap: 8,
     minWidth: 0,
   },
+  promoSellerAvatarWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
   promoSellerAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    marginRight: 8,
+    width: '100%',
+    height: '100%',
   },
   promoSellerFallback: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
   },
   promoSellerInitial: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '700',
   },
   promoSellerName: {
-    color: 'rgba(255,255,255,0.9)',
-    fontSize: 14,
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
     fontWeight: '600',
     flex: 1,
-    minWidth: 0,
   },
   promoChatBtn: {
-    backgroundColor: '#e50914',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    flexDirection: 'row',
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center',
-    gap: 4,
-    marginLeft: 'auto',
+    justifyContent: 'center',
   },
-  promoChatText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+  promoGlassBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
 });
 

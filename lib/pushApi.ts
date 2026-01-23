@@ -11,6 +11,12 @@ type NotifyPayload =
       callId: string;
     }
   | {
+      // Send a push for an already-created Firestore `notifications/{id}` document.
+      // The backend will load the document and push it to the target user.
+      kind: 'notification';
+      notificationId: string;
+    }
+  | {
       kind: 'story';
       storyId: string;
     }

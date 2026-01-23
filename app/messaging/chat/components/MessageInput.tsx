@@ -1,11 +1,15 @@
+import { darkenColor, lightenColor } from '@/lib/colorUtils';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
+import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useRef, useState } from 'react';
-import SafeEmojiPicker from './SafeEmojiPicker';
+import { LinearGradient } from 'expo-linear-gradient';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
+  Image,
+  InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -16,10 +20,15 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   Vibration,
-  View
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAccent } from '../../../components/AccentContext';
+import ChatMoviePicker, { MovieData } from './ChatMoviePicker';
+import ChatMusicPicker, { MusicData } from './ChatMusicPicker';
+import SafeEmojiPicker, { preloadEmojiData } from './SafeEmojiPicker';
 
 interface MessageInputProps {
   onSendMessage: (message: string) => void;
@@ -27,9 +36,12 @@ interface MessageInputProps {
   disabled?: boolean;
   onPickMedia?: (uri: string, type: 'image' | 'video') => void;
   onPickAudio?: (uri: string) => void;
+  onPickMusic?: (music: MusicData) => void;
+  onPickMovie?: (movie: MovieData) => void;
   replyLabel?: string;
   isEditing?: boolean;
   disabledPlaceholder?: string;
+  onCloseContext?: () => void;
 }
 
 const MessageInput = ({
@@ -38,11 +50,17 @@ const MessageInput = ({
   disabled,
   onPickMedia,
   onPickAudio,
+  onPickMusic,
+  onPickMovie,
   replyLabel,
   isEditing,
   disabledPlaceholder,
+  onCloseContext,
 }: MessageInputProps) => {
   const insets = useSafeAreaInsets();
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+
   const [message, setMessage] = useState('');
   const [showEmojis, setShowEmojis] = useState(false);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
@@ -51,16 +69,66 @@ const MessageInput = ({
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [recordedUri, setRecordedUri] = useState<string | null>(null);
+  const [isFocused, setIsFocused] = useState(false);
+  const [clipboardImage, setClipboardImage] = useState<string | null>(null);
+  const [showMusicPicker, setShowMusicPicker] = useState(false);
+  const [showMoviePicker, setShowMoviePicker] = useState(false);
   const typingTimerRef = React.useRef<number | null>(null);
   const isTypingRef = React.useRef(false);
   const recordingTimerRef = React.useRef<number | null>(null);
-  const waveAnimations = useRef(Array.from({ length: 5 }, () => new Animated.Value(1))).current;
+  const waveAnimations = useRef(Array.from({ length: 7 }, () => new Animated.Value(1))).current;
   const isRecordingRef = useRef(false);
   const isRecordingPausedRef = useRef(false);
   const waveLoopActiveRef = useRef(false);
   const inputRef = useRef<TextInput>(null);
+  const focusAnim = useRef(new Animated.Value(0)).current;
 
   const hasText = message.trim().length > 0;
+
+  const checkClipboard = useCallback(async () => {
+    if (disabled) return;
+    try {
+      const hasImage = await Clipboard.hasImageAsync();
+      if (hasImage) {
+        const content = await Clipboard.getImageAsync({ format: 'png' });
+        if (content?.data) {
+          setClipboardImage(content.data);
+        }
+      } else {
+        setClipboardImage(null);
+      }
+    } catch {
+      // ignore
+    }
+  }, [disabled]);
+
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
+      void preloadEmojiData();
+    });
+    return () => (task as any)?.cancel?.();
+  }, []);
+
+  useEffect(() => {
+    if (isFocused) {
+      void checkClipboard();
+    }
+  }, [isFocused, checkClipboard]);
+
+  // Focus the input when tapping anywhere on the container
+  const handleContainerPress = useCallback(() => {
+    if (disabled) return;
+    inputRef.current?.focus();
+  }, [disabled]);
+
+  const animateFocus = (focused: boolean) => {
+    Animated.spring(focusAnim, {
+      toValue: focused ? 1 : 0,
+      speed: 20,
+      bounciness: 8,
+      useNativeDriver: false,
+    }).start();
+  };
 
   const startDurationTimer = () => {
     if (recordingTimerRef.current) return;
@@ -99,6 +167,13 @@ const MessageInput = ({
     Keyboard.dismiss();
   };
 
+  const handlePasteImage = () => {
+    if (clipboardImage && onPickMedia) {
+      onPickMedia(clipboardImage, 'image');
+      setClipboardImage(null);
+    }
+  };
+
   const handleChange = (text: string) => {
     setMessage(text);
     const hasTextNow = !!text.trim();
@@ -112,7 +187,6 @@ const MessageInput = ({
       clearTimeout(typingTimerRef.current);
     }
 
-    // debounce stop typing after 1200ms of inactivity
     typingTimerRef.current = (setTimeout(() => {
       isTypingRef.current = false;
       typingTimerRef.current = null;
@@ -120,7 +194,6 @@ const MessageInput = ({
     }, 1200) as unknown) as number;
   };
 
-  // Audio recording functions
   const startRecording = async () => {
     try {
       const { status } = await Audio.requestPermissionsAsync();
@@ -147,14 +220,8 @@ const MessageInput = ({
       setRecordingDuration(0);
       setRecordedUri(null);
       setIsRecordingPaused(false);
-
-      // Start wave animations
       startWaveAnimations();
-
-      // Start duration timer
       startDurationTimer();
-
-      // Haptic feedback
       Vibration.vibrate(50);
 
     } catch (err) {
@@ -231,13 +298,13 @@ const MessageInput = ({
     const animateWave = (index: number) => {
       Animated.sequence([
         Animated.timing(waveAnimations[index], {
-          toValue: 1.5 + Math.random() * 0.5,
-          duration: 300 + Math.random() * 200,
+          toValue: 1.5 + Math.random() * 0.8,
+          duration: 250 + Math.random() * 150,
           useNativeDriver: true,
         }),
         Animated.timing(waveAnimations[index], {
           toValue: 1,
-          duration: 300 + Math.random() * 200,
+          duration: 250 + Math.random() * 150,
           useNativeDriver: true,
         }),
       ]).start(() => {
@@ -248,7 +315,7 @@ const MessageInput = ({
     };
 
     waveAnimations.forEach((_, index) => {
-      setTimeout(() => animateWave(index), index * 100);
+      setTimeout(() => animateWave(index), index * 80);
     });
   };
 
@@ -278,6 +345,7 @@ const MessageInput = ({
 
   const handleEmojiPress = () => {
     if (disabled) return;
+    void preloadEmojiData({ immediate: true });
     inputRef.current?.blur();
     if (showEmojis) {
       setShowEmojis(false);
@@ -316,8 +384,6 @@ const MessageInput = ({
         const type = asset.type === 'video' ? 'video' : 'image';
         if (onPickMedia) {
           onPickMedia(asset.uri, type);
-        } else {
-          console.log('Picked media', asset.uri, type);
         }
       }
     } catch (e) {
@@ -327,7 +393,9 @@ const MessageInput = ({
 
   const pickAudio = async () => {
     if (disabled) return;
-    Alert.alert('Coming soon', 'Audio attachments are not available yet in this build.');
+    // Open music picker instead
+    setShowMusicPicker(true);
+    setShowAttachSheet(false);
   };
 
   const handlePlus = () => {
@@ -354,71 +422,179 @@ const MessageInput = ({
     };
   }, []);
 
+  const borderColor = focusAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['rgba(255,255,255,0.1)', accent],
+  });
+
+  const attachmentOptions = [
+    { icon: 'image-outline', label: 'Photo', color: '#34C759', onPress: pickMedia },
+    { icon: 'videocam-outline', label: 'Video', color: '#FF6B6B', onPress: pickMedia },
+    { icon: 'musical-notes', label: 'Music', color: '#5AC8FA', onPress: () => { setShowMusicPicker(true); setShowAttachSheet(false); } },
+    { icon: 'film', label: 'Movie', color: '#FF9500', onPress: () => { setShowMoviePicker(true); setShowAttachSheet(false); } },
+    { icon: 'document-outline', label: 'File', color: '#AF52DE', onPress: pickMedia },
+    { icon: 'person-outline', label: 'Contact', color: '#007AFF', onPress: () => Alert.alert('Coming soon') },
+  ];
+
   return (
     <View style={styles.outer}>
-      {replyLabel && (
-        <View style={styles.replyBar}>
-          <Text style={styles.replyLabel} numberOfLines={1}>
-            Replying to: {replyLabel}
-          </Text>
+      {/* Reply/Edit bar */}
+      {(replyLabel || isEditing) && (
+        <View style={styles.contextBar}>
+          <LinearGradient
+            colors={['rgba(60,65,80,0.95)', 'rgba(45,50,65,0.95)']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.contextBarGradient}
+          >
+            <View style={[styles.contextStripe, { backgroundColor: accent }]} />
+            <View style={styles.contextContent}>
+              <Ionicons
+                name={isEditing ? 'create-outline' : 'arrow-undo'}
+                size={16}
+                color={accent}
+              />
+              <Text style={styles.contextLabel} numberOfLines={1}>
+                {isEditing ? 'Editing message' : `Replying to: ${replyLabel}`}
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.contextClose} onPress={onCloseContext}>
+              <Ionicons name="close" size={18} color="rgba(255,255,255,0.6)" />
+            </TouchableOpacity>
+          </LinearGradient>
         </View>
       )}
-      {isEditing && !replyLabel && (
-        <View style={styles.replyBar}>
-          <Text style={styles.replyLabel}>Editing message</Text>
+
+      {/* Clipboard Image Preview */}
+      {clipboardImage && (
+        <View style={styles.clipboardPreview}>
+          <View style={styles.clipboardContent}>
+            <Image
+              source={{ uri: clipboardImage }}
+              style={styles.clipboardThumb}
+              resizeMode="cover"
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.clipboardTitle}>Image in clipboard</Text>
+              <Text style={styles.clipboardSubtitle}>Tap to attach</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.clipboardSendBtn, { backgroundColor: accent }]}
+              onPress={handlePasteImage}
+            >
+              <Ionicons name="arrow-up" size={18} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.clipboardClose}
+              onPress={() => setClipboardImage(null)}
+            >
+              <Ionicons name="close" size={16} color="rgba(255,255,255,0.6)" />
+            </TouchableOpacity>
+          </View>
         </View>
       )}
-      <View style={[styles.container, disabled && styles.disabledContainer]}>
-        <TouchableOpacity
-          style={styles.iconButton}
-          accessibilityLabel="Emoji"
-          disabled={disabled}
-          onPress={handleEmojiPress}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="happy-outline" size={24} color={disabled ? '#9e9e9e' : '#f5f5f5'} />
-        </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.plusButton}
-          accessibilityLabel="Add"
-          disabled={disabled}
-          onPress={handlePlus}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Ionicons name="add-circle" size={28} color={disabled ? '#9e9e9e' : '#4D8DFF'} />
-        </TouchableOpacity>
+      {/* Main input container */}
+      <TouchableWithoutFeedback onPress={handleContainerPress}>
+        <Animated.View style={[styles.container, disabled && styles.disabledContainer, { borderColor }]}>
+          <LinearGradient
+            colors={['rgba(35,40,55,0.98)', 'rgba(28,32,45,0.98)']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={styles.containerGradient}
+          >
+            {/* Cloud decorations */}
+            <View style={styles.cloudBump1} />
+            <View style={styles.cloudBump2} />
 
-        <TextInput
-          ref={inputRef}
-          style={styles.input}
-          placeholder={
-            disabled ? disabledPlaceholder || 'Accept the request to chat' : 'Message...'
-          }
-          placeholderTextColor="rgba(255,255,255,0.6)"
-          value={message}
-          onChangeText={handleChange}
-          onFocus={() => {
-            setShowEmojis(false);
-            setShowAttachSheet(false);
-          }}
-          multiline
-          returnKeyType="send"
-          onSubmitEditing={handleSend}
-          blurOnSubmit={false}
-          editable={!disabled}
-        />
+            <View style={styles.inputRow}>
+              <View style={styles.leftActions}>
+                {/* Emoji button */}
+                <Pressable
+                  style={[styles.roundButton, showEmojis && styles.roundButtonActive]}
+                  disabled={disabled}
+                  onPress={handleEmojiPress}
+                  android_ripple={{ color: 'rgba(255,255,255,0.12)', borderless: true, radius: 20 }}
+                >
+                  <Ionicons
+                    name={showEmojis ? 'happy' : 'happy-outline'}
+                    size={22}
+                    color={showEmojis ? '#fff' : disabled ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.8)'}
+                  />
+                </Pressable>
 
-        <TouchableOpacity
-          style={[styles.sendButton, disabled && styles.disabledSendButton]}
-          onPress={handleRightPress}
-          accessibilityLabel={hasText ? 'Send' : recordedUri ? 'Send audio' : 'Voice'}
-          disabled={disabled}
-        >
-          <Ionicons name={hasText || recordedUri ? 'send' : 'mic'} size={20} color="white" />
-        </TouchableOpacity>
-      </View>
+                {/* Attachment button */}
+                <Pressable
+                  style={[styles.roundButton, showAttachSheet && styles.roundButtonActive]}
+                  disabled={disabled}
+                  onPress={handlePlus}
+                  android_ripple={{ color: 'rgba(255,255,255,0.12)', borderless: true, radius: 20 }}
+                >
+                  <Ionicons
+                    name="add"
+                    size={22}
+                    color={showAttachSheet ? '#fff' : disabled ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.8)'}
+                  />
+                </Pressable>
+              </View>
 
+              <View style={styles.leftDivider} />
+              <View style={styles.inputWrapper}>
+                <TextInput
+                  ref={inputRef}
+                  style={styles.input}
+                  placeholder={disabled ? disabledPlaceholder || 'Accept request to chat' : 'Type a message...'}
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                  value={message}
+                  onChangeText={handleChange}
+                  onFocus={() => {
+                    setIsFocused(true);
+                    animateFocus(true);
+                    setShowEmojis(false);
+                    setShowAttachSheet(false);
+                  }}
+                  onBlur={() => {
+                    setIsFocused(false);
+                    animateFocus(false);
+                  }}
+                  multiline
+                  returnKeyType="send"
+                  onSubmitEditing={handleSend}
+                  blurOnSubmit={false}
+                  editable={!disabled}
+                />
+              </View>
+
+              {/* Send/Mic button */}
+              <Pressable
+                style={[styles.sendButton, disabled && styles.disabledSendButton]}
+                onPress={handleRightPress}
+                disabled={disabled}
+                android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: true, radius: 22 }}
+              >
+                <LinearGradient
+                  colors={hasText || recordedUri
+                    ? [lightenColor(accent, 0.1), accent, darkenColor(accent, 0.15)]
+                    : ['rgba(255,255,255,0.15)', 'rgba(255,255,255,0.08)']
+                  }
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.sendButtonGradient}
+                >
+                  <Ionicons
+                    name={hasText || recordedUri ? 'send' : 'mic'}
+                    size={20}
+                    color="#fff"
+                    style={hasText || recordedUri ? { marginLeft: 2 } : undefined}
+                  />
+                </LinearGradient>
+              </Pressable>
+            </View>
+          </LinearGradient>
+        </Animated.View>
+      </TouchableWithoutFeedback>
+
+      {/* Emoji picker modal */}
       {showEmojis && !disabled && (
         <Modal
           visible={showEmojis}
@@ -427,20 +603,9 @@ const MessageInput = ({
           onRequestClose={() => setShowEmojis(false)}
         >
           <View style={styles.emojiModalRoot}>
-            <Pressable
-              style={styles.emojiModalBackdrop}
-              onPress={() => setShowEmojis(false)}
-            />
-            <KeyboardAvoidingView
-              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-              style={styles.emojiModalAvoid}
-            >
-              <View
-                style={[
-                  styles.emojiModalSheet,
-                  { paddingBottom: Math.max(12, insets.bottom) },
-                ]}
-              >
+            <Pressable style={styles.emojiModalBackdrop} onPress={() => setShowEmojis(false)} />
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.emojiModalAvoid}>
+              <View style={[styles.emojiModalSheet, { paddingBottom: Math.max(12, insets.bottom) }]}>
                 <View style={styles.emojiModalHandle} />
                 <SafeEmojiPicker onEmojiSelected={appendEmoji} columns={9} showSearchBar />
                 <View style={styles.emojiModalActions}>
@@ -454,7 +619,6 @@ const MessageInput = ({
                     <Ionicons name="create-outline" size={18} color="#fff" />
                     <Text style={styles.emojiModalActionText}>Type message</Text>
                   </TouchableOpacity>
-
                   <TouchableOpacity
                     onPress={() => setShowEmojis(false)}
                     style={[styles.emojiModalActionBtn, styles.emojiModalCloseBtn]}
@@ -469,47 +633,49 @@ const MessageInput = ({
         </Modal>
       )}
 
+      {/* Attachment sheet */}
       {showAttachSheet && !disabled && (
         <View style={styles.attachSheet}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.attachScrollContent}
+          <LinearGradient
+            colors={['rgba(45,50,65,0.98)', 'rgba(35,40,55,0.98)']}
+            style={styles.attachSheetGradient}
           >
-            <TouchableOpacity style={styles.attachItem} onPress={pickMedia}>
-              <View style={styles.attachIconCircle}>
-                <Ionicons name="image-outline" size={22} color="#fff" />
+            <View style={styles.attachHandle} />
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.attachScrollContent}
+            >
+              <View style={styles.attachGrid}>
+                {attachmentOptions.map((option, index) => (
+                  <TouchableOpacity
+                    key={index}
+                    style={styles.attachItem}
+                    onPress={option.onPress}
+                    activeOpacity={0.7}
+                  >
+                    <LinearGradient
+                      colors={[lightenColor(option.color, 0.1), option.color]}
+                      style={styles.attachIconCircle}
+                    >
+                      <Ionicons name={option.icon as any} size={24} color="#fff" />
+                    </LinearGradient>
+                    <Text style={styles.attachLabel}>{option.label}</Text>
+                  </TouchableOpacity>
+                ))}
               </View>
-              <Text style={styles.attachLabel}>Photos</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.attachItem} onPress={pickMedia}>
-              <View style={styles.attachIconCircle}>
-                <Ionicons name="videocam-outline" size={22} color="#fff" />
-              </View>
-              <Text style={styles.attachLabel}>Videos</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.attachItem} onPress={pickAudio}>
-              <View style={styles.attachIconCircle}>
-                <Ionicons name="mic-outline" size={22} color="#fff" />
-              </View>
-              <Text style={styles.attachLabel}>Audio</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.attachItem} onPress={pickMedia}>
-              <View style={styles.attachIconCircle}>
-                <Ionicons name="document-outline" size={22} color="#fff" />
-              </View>
-              <Text style={styles.attachLabel}>Files</Text>
-            </TouchableOpacity>
-          </ScrollView>
+            </ScrollView>
+          </LinearGradient>
         </View>
       )}
 
+      {/* Recording overlay */}
       {(isRecording || recordedUri) && (
         <View style={styles.recordingOverlay}>
-          <View style={styles.recordingContainer}>
+          <LinearGradient
+            colors={['rgba(20,22,30,0.98)', 'rgba(15,17,25,0.98)']}
+            style={styles.recordingContainer}
+          >
+            {/* Waveform */}
             <View style={styles.waveContainer}>
               {waveAnimations.map((anim, index) => (
                 <Animated.View
@@ -518,162 +684,241 @@ const MessageInput = ({
                     styles.waveBar,
                     {
                       transform: [{ scaleY: anim }],
-                      backgroundColor: recordedUri ? '#4D8DFF' : '#ff4b4b',
+                      backgroundColor: recordedUri ? accent : '#ff4b4b',
                     },
                   ]}
                 />
               ))}
             </View>
+
+            {/* Recording info */}
             <View style={styles.recordingInfo}>
-              <Ionicons name="mic" size={24} color={recordedUri ? '#4D8DFF' : '#ff4b4b'} />
+              <View style={[styles.recordingDot, { backgroundColor: recordedUri ? accent : '#ff4b4b' }]} />
               <Text style={styles.recordingText}>
-                {recordedUri ? 'Ready to send' : isRecordingPaused ? 'Paused' : 'Recording...'} {recordingDuration}s
+                {recordedUri ? 'Ready to send' : isRecordingPaused ? 'Paused' : 'Recording'}
+              </Text>
+              <Text style={styles.recordingTime}>
+                {Math.floor(recordingDuration / 60)}:{String(recordingDuration % 60).padStart(2, '0')}
               </Text>
             </View>
 
-            {!recordedUri ? (
-              <View style={styles.recordingActionsRow}>
-                <TouchableOpacity style={styles.recordingPill} onPress={isRecordingPaused ? resumeRecording : pauseRecording}>
-                  <Ionicons name={isRecordingPaused ? 'play' : 'pause'} size={18} color="#fff" />
-                  <Text style={styles.recordingPillText}>{isRecordingPaused ? 'Resume' : 'Pause'}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.recordingPill, styles.stopPill]} onPress={stopRecording}>
-                  <Ionicons name="stop" size={18} color="#fff" />
-                  <Text style={styles.recordingPillText}>Stop</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.recordingActionsRow}>
-                <TouchableOpacity
-                  style={[styles.recordingPill, styles.deletePill]}
-                  onPress={() => {
-                    setRecordedUri(null);
-                    setRecordingDuration(0);
-                    setIsRecording(false);
-                    setIsRecordingPaused(false);
-                    stopWaveAnimations();
-                  }}
-                >
-                  <Ionicons name="trash" size={18} color="#fff" />
-                  <Text style={styles.recordingPillText}>Delete</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.recordingPill, styles.sendPill]}
-                  onPress={() => {
-                    if (recordedUri) {
-                      onPickAudio?.(recordedUri);
+            {/* Actions */}
+            <View style={styles.recordingActionsRow}>
+              {!recordedUri ? (
+                <>
+                  <TouchableOpacity
+                    style={styles.recordingActionBtn}
+                    onPress={isRecordingPaused ? resumeRecording : pauseRecording}
+                  >
+                    <Ionicons name={isRecordingPaused ? 'play' : 'pause'} size={20} color="#fff" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.recordingActionBtn, styles.stopBtn]}
+                    onPress={stopRecording}
+                  >
+                    <Ionicons name="stop" size={20} color="#fff" />
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <TouchableOpacity
+                    style={[styles.recordingActionBtn, styles.deleteBtn]}
+                    onPress={() => {
                       setRecordedUri(null);
                       setRecordingDuration(0);
                       setIsRecording(false);
                       setIsRecordingPaused(false);
                       stopWaveAnimations();
-                    }
-                  }}
-                >
-                  <Ionicons name="send" size={18} color="#fff" />
-                  <Text style={styles.recordingPillText}>Send</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
+                    }}
+                  >
+                    <Ionicons name="trash-outline" size={20} color="#fff" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.recordingActionBtn, styles.sendRecordingBtn]}
+                    onPress={() => {
+                      if (recordedUri) {
+                        onPickAudio?.(recordedUri);
+                        setRecordedUri(null);
+                        setRecordingDuration(0);
+                        setIsRecording(false);
+                        setIsRecordingPaused(false);
+                        stopWaveAnimations();
+                      }
+                    }}
+                  >
+                    <LinearGradient
+                      colors={[lightenColor(accent, 0.1), accent]}
+                      style={styles.sendRecordingGradient}
+                    >
+                      <Ionicons name="send" size={18} color="#fff" style={{ marginLeft: 2 }} />
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </LinearGradient>
         </View>
       )}
+
+      {/* Music Picker */}
+      <ChatMusicPicker
+        visible={showMusicPicker}
+        onClose={() => setShowMusicPicker(false)}
+        onSelect={(music: MusicData) => {
+          onPickMusic?.(music);
+          setShowMusicPicker(false);
+        }}
+      />
+
+      {/* Movie Picker */}
+      <ChatMoviePicker
+        visible={showMoviePicker}
+        onClose={() => setShowMoviePicker(false)}
+        onSelect={(movie: MovieData) => {
+          onPickMovie?.(movie);
+          setShowMoviePicker(false);
+        }}
+      />
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   outer: {
-    backgroundColor: 'transparent',
     marginHorizontal: 12,
     marginBottom: 8,
-    marginTop: 8,
+    marginTop: 6,
   },
-  replyBar: {
-    backgroundColor: 'rgba(42, 42, 42, 0.95)',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
+  contextBar: {
     marginBottom: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 16,
+    overflow: 'hidden',
   },
-  replyLabel: {
-    color: '#f5f5f5',
-    fontSize: 14,
+  contextBarGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingRight: 12,
+    paddingLeft: 16,
+  },
+  contextStripe: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 3,
+  },
+  contextContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  contextLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
+  },
+  contextClose: {
+    padding: 4,
   },
   container: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: 'rgba(26, 26, 26, 0.95)',
-    borderRadius: 24,
-    minHeight: 56,
+    borderRadius: 28,
+    overflow: 'hidden',
+    borderWidth: 1.5,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  containerGradient: {
+    position: 'relative',
+  },
+  cloudBump1: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(40,45,60,0.98)',
+    top: -6,
+    left: '25%',
+  },
+  cloudBump2: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(38,43,58,0.98)',
+    top: -4,
+    right: '30%',
   },
   disabledContainer: {
     opacity: 0.5,
   },
-  iconButton: {
-    width: 32,
-    height: 32,
-    justifyContent: 'center',
+  inputRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginRight: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    minHeight: 56,
+    gap: 10,
   },
-  plusButton: {
-    width: 32,
-    height: 32,
+  leftActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  leftDivider: {
+    width: 10,
+  },
+  roundButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  roundButtonActive: {
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  inputWrapper: {
+    flex: 1,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginHorizontal: 6,
   },
   input: {
-    flex: 1,
-    color: '#f5f5f5',
+    color: '#fff',
     fontSize: 16,
     maxHeight: 120,
-    minHeight: 20,
-    paddingVertical: 4,
-    marginHorizontal: 8,
+    minHeight: 24,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    fontWeight: '400',
   },
   sendButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#4D8DFF',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    overflow: 'hidden',
+  },
+  sendButtonGradient: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 8,
   },
   disabledSendButton: {
-    backgroundColor: '#333',
-  },
-  emojiKeyboard: {
-    backgroundColor: 'rgba(42, 42, 42, 0.95)',
-    borderRadius: 16,
-    marginTop: 8,
-    height: 320,
-    width: '100%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    opacity: 0.4,
   },
   emojiModalRoot: {
     flex: 1,
@@ -681,7 +926,7 @@ const styles = StyleSheet.create({
   },
   emojiModalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
   emojiModalAvoid: {
     flex: 1,
@@ -690,34 +935,29 @@ const styles = StyleSheet.create({
   emojiModalSheet: {
     marginHorizontal: 12,
     marginBottom: 10,
-    height: 380,
-    maxHeight: '70%',
-    backgroundColor: 'rgba(42, 42, 42, 0.98)',
-    borderRadius: 16,
+    height: 400,
+    maxHeight: '72%',
+    backgroundColor: 'rgba(35,40,55,0.98)',
+    borderRadius: 24,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 6,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   emojiModalHandle: {
     alignSelf: 'center',
-    width: 48,
-    height: 5,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    marginTop: 10,
-    marginBottom: 6,
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    marginTop: 12,
+    marginBottom: 8,
   },
   emojiModalActions: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: 10,
-    paddingHorizontal: 12,
-    paddingTop: 8,
+    paddingHorizontal: 16,
+    paddingTop: 10,
   },
   emojiModalActionBtn: {
     flex: 1,
@@ -725,127 +965,190 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    paddingVertical: 10,
-    borderRadius: 999,
+    paddingVertical: 12,
+    borderRadius: 14,
     backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
   },
   emojiModalCloseBtn: {
-    backgroundColor: 'rgba(255,75,75,0.18)',
-    borderColor: 'rgba(255,75,75,0.5)',
+    backgroundColor: 'rgba(255,75,75,0.15)',
   },
   emojiModalActionText: {
     color: '#fff',
-    fontWeight: '700',
-    fontSize: 13,
+    fontWeight: '600',
+    fontSize: 14,
   },
   attachSheet: {
-    backgroundColor: 'rgba(42, 42, 42, 0.95)',
-    borderRadius: 16,
-    marginTop: 8,
-    paddingVertical: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 4,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    marginTop: 10,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  attachSheetGradient: {
+    paddingTop: 8,
+    paddingBottom: 16,
+    maxHeight: 260,
+  },
+  attachHandle: {
+    alignSelf: 'center',
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    marginBottom: 12,
   },
   attachScrollContent: {
     paddingHorizontal: 16,
-    alignItems: 'center',
+    paddingBottom: 12,
+  },
+  attachGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    rowGap: 16,
+    columnGap: 12,
   },
   attachItem: {
     alignItems: 'center',
-    marginRight: 24,
+    width: '30%',
+    minWidth: 88,
   },
   attachIconCircle: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#4D8DFF',
+    width: 54,
+    height: 54,
+    borderRadius: 18,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 8,
   },
   attachLabel: {
-    color: '#f5f5f5',
+    color: 'rgba(255,255,255,0.8)',
     fontSize: 12,
+    fontWeight: '500',
     textAlign: 'center',
   },
+  // Removed clipboard preview styles
   recordingOverlay: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 10,
-    alignItems: 'center',
+    bottom: 0,
+    borderRadius: 28,
+    overflow: 'hidden',
   },
   recordingContainer: {
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    borderRadius: 16,
-    padding: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
     alignItems: 'center',
-    minWidth: 260,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(255,75,75,0.3)',
+    borderRadius: 28,
   },
   waveContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    height: 60,
-    marginBottom: 16,
+    height: 50,
+    marginBottom: 12,
+    gap: 4,
   },
   waveBar: {
     width: 4,
-    height: 40,
-    marginHorizontal: 2,
+    height: 30,
     borderRadius: 2,
   },
   recordingInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 14,
+    gap: 8,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   recordingText: {
-    color: '#f5f5f5',
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  recordingTime: {
+    color: '#fff',
     fontSize: 16,
-    marginLeft: 8,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   recordingActionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
   },
-  recordingPill: {
+  recordingActionBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stopBtn: {
+    backgroundColor: 'rgba(255,75,75,0.25)',
+  },
+  deleteBtn: {
+    backgroundColor: 'rgba(255,75,75,0.2)',
+  },
+  sendRecordingBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    overflow: 'hidden',
+    padding: 0,
+    backgroundColor: 'transparent',
+  },
+  sendRecordingGradient: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  clipboardPreview: {
+    marginHorizontal: 12,
+    marginBottom: 8,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#1f222e',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  clipboardContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    padding: 10,
+    gap: 12,
   },
-  recordingPillText: {
+  clipboardThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  clipboardTitle: {
     color: '#fff',
-    fontWeight: '700',
     fontSize: 13,
+    fontWeight: '600',
   },
-  stopPill: {
-    backgroundColor: 'rgba(255,75,75,0.18)',
-    borderColor: 'rgba(255,75,75,0.5)',
+  clipboardSubtitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
   },
-  deletePill: {
-    backgroundColor: 'rgba(255,75,75,0.2)',
-    borderColor: 'rgba(255,75,75,0.6)',
+  clipboardSendBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  sendPill: {
-    backgroundColor: '#4D8DFF',
-    borderColor: '#4D8DFF',
+  clipboardClose: {
+    padding: 6,
   },
 });
 

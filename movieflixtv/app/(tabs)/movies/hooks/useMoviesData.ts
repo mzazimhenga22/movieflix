@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { InteractionManager } from 'react-native';
+import { InteractionManager, Platform } from 'react-native';
+import NetInfo from '@react-native-community/netinfo';
 import { scrapeImdbTrailer } from '../../../../src/providers/scrapeImdbTrailer';
 import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../../constants/api';
 import { buildProfileScopedKey } from '../../../../lib/profileStorage';
@@ -14,6 +15,9 @@ type HomeFeedCachePayload = {
   netflix: Media[];
   amazon: Media[];
   hbo: Media[];
+  netflixTv?: Media[];
+  amazonTv?: Media[];
+  hboTv?: Media[];
   movieStoriesData: any;
   tvStoriesData: any;
   trendingData: any;
@@ -21,6 +25,10 @@ type HomeFeedCachePayload = {
   recommendedData: any;
   songsData: any;
   genresData: any;
+  tvOnTheAirData?: any;
+  tvRecommendedData?: any;
+  tvPopularData?: any;
+  tvGenresData?: any;
 };
 
 type HomeFeedCacheEnvelope = {
@@ -32,6 +40,9 @@ type HomeFeedDerivedState = {
   netflixSafe: Media[];
   amazonSafe: Media[];
   hboSafe: Media[];
+  netflixTvSafe: Media[];
+  amazonTvSafe: Media[];
+  hboTvSafe: Media[];
   combinedStories: any[];
   movieStoriesList: Media[];
   tvStoriesList: Media[];
@@ -41,6 +52,10 @@ type HomeFeedDerivedState = {
   movieReelsSafe: Media[];
   recommendedSafe: Media[];
   genresList: Genre[];
+  tvOnTheAirSafe: Media[];
+  tvRecommendedSafe: Media[];
+  tvPopularSafe: Media[];
+  tvGenresList: Genre[];
 };
 
 export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boolean, profileReady: boolean) => {
@@ -48,20 +63,43 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
   const [movieReels, setMovieReels] = useState<Media[]>([]);
   const [movieTrailers, setMovieTrailers] = useState<(Media & { trailerUrl: string })[]>([]);
   const [recommended, setRecommended] = useState<Media[]>([]);
+  const [recommendedTv, setRecommendedTv] = useState<Media[]>([]);
   const [songs, setSongs] = useState<Media[]>([]);
+  const [songsTv, setSongsTv] = useState<Media[]>([]);
   const [trendingMoviesOnly, setTrendingMoviesOnly] = useState<Media[]>([]);
   const [trendingTvOnly, setTrendingTvOnly] = useState<Media[]>([]);
   const [genres, setGenres] = useState<Genre[]>([]);
+  const [genresTv, setGenresTv] = useState<Genre[]>([]);
   const [featuredMovie, setFeaturedMovie] = useState<Media | null>(null);
   const [stories, setStories] = useState<any[]>([]);
   const [netflix, setNetflix] = useState<Media[]>([]);
   const [amazon, setAmazon] = useState<Media[]>([]);
   const [hbo, setHbo] = useState<Media[]>([]);
+  const [netflixTv, setNetflixTv] = useState<Media[]>([]);
+  const [amazonTv, setAmazonTv] = useState<Media[]>([]);
+  const [hboTv, setHboTv] = useState<Media[]>([]);
+  const [tvOnTheAir, setTvOnTheAir] = useState<Media[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [hasCachedContent, setHasCachedContent] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const [continueWatching, setContinueWatching] = useState<Media[]>([]);
   const [lastWatched, setLastWatched] = useState<Media | null>(null);
   const feedSignatureRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const sub = NetInfo.addEventListener((state) => {
+      const connected = Boolean(state.isConnected);
+      const reachable = state.isInternetReachable;
+      const online = connected && (reachable == null ? true : Boolean(reachable));
+      setIsOnline(online);
+      setOffline(!online);
+    });
+    return () => {
+      sub();
+    };
+  }, []);
 
   const homeFeedCacheScope = useMemo(
     () => `${activeProfileId ?? 'global'}${isKidsProfile ? ':kids' : ''}`,
@@ -173,7 +211,18 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
     async (providerId: number): Promise<Media[]> => {
       const url = `${API_BASE_URL}/discover/movie?api_key=${API_KEY}&with_watch_providers=${providerId}&watch_region=US&with_watch_monetization_types=flatrate`;
       const json = await fetchWithKids(url, 'discover');
-      return json?.results || [];
+      const results = (json?.results || []) as Media[];
+      return results.map((m) => ({ ...m, media_type: (m as any)?.media_type ?? 'movie' }));
+    },
+    [fetchWithKids],
+  );
+
+  const fetchProviderTv = useCallback(
+    async (providerId: number): Promise<Media[]> => {
+      const url = `${API_BASE_URL}/discover/tv?api_key=${API_KEY}&with_watch_providers=${providerId}&watch_region=US&with_watch_monetization_types=flatrate`;
+      const json = await fetchWithKids(url, 'tv');
+      const results = (json?.results || []) as Media[];
+      return results.map((m) => ({ ...m, media_type: (m as any)?.media_type ?? 'tv' }));
     },
     [fetchWithKids],
   );
@@ -224,17 +273,35 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       netflix: pickIds(derived.netflixSafe),
       amazon: pickIds(derived.amazonSafe),
       hbo: pickIds(derived.hboSafe),
+      netflixTv: pickIds(derived.netflixTvSafe),
+      amazonTv: pickIds(derived.amazonTvSafe),
+      hboTv: pickIds(derived.hboTvSafe),
       songs: pickIds(derived.songsSafe),
       reels: pickIds(derived.movieReelsSafe),
       recommended: pickIds(derived.recommendedSafe),
+      tvOnTheAir: pickIds(derived.tvOnTheAirSafe),
+      tvRecommended: pickIds(derived.tvRecommendedSafe),
+      tvPopular: pickIds(derived.tvPopularSafe),
       stories: pickIds(derived.combinedStories),
     });
   }, []);
 
   const deriveFeedState = useCallback(
     (payload: HomeFeedCachePayload): HomeFeedDerivedState => {
-      const movieStoriesList = filterForKids((payload.movieStoriesData?.results || []) as Media[]);
-      const tvStoriesList = filterForKids((payload.tvStoriesData?.results || []) as Media[]);
+      const tagMediaType = (items: Media[], type: 'movie' | 'tv'): Media[] =>
+        items.map((item) => ({
+          ...item,
+          media_type: (item as any)?.media_type ?? (item?.title ? 'movie' : item?.name ? 'tv' : type),
+        }));
+
+      const movieStoriesList = tagMediaType(
+        filterForKids((payload.movieStoriesData?.results || []) as Media[]),
+        'movie',
+      );
+      const tvStoriesList = tagMediaType(
+        filterForKids((payload.tvStoriesData?.results || []) as Media[]),
+        'tv',
+      );
       const combinedStories = [...movieStoriesList, ...tvStoriesList]
         .map((item: any) => {
           const image = item?.poster_path ? `${IMAGE_BASE_URL}${item.poster_path}` : '';
@@ -253,22 +320,42 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
         .filter((s: any) => Boolean(s?.image));
 
       const trendingRaw = (payload.trendingData?.results || []) as Media[];
-      const trendingResults = filterForKids(trendingRaw);
-      const netflixSafe = filterForKids(payload.netflix || []);
-      const amazonSafe = filterForKids(payload.amazon || []);
+      const trendingResults = tagMediaType(filterForKids(trendingRaw), 'movie');
+      const netflixSafe = tagMediaType(filterForKids(payload.netflix || []), 'movie');
+      const amazonSafe = tagMediaType(filterForKids(payload.amazon || []), 'movie');
+      const netflixTvSafe = tagMediaType(filterForKids(payload.netflixTv || []), 'tv');
+      const amazonTvSafe = tagMediaType(filterForKids(payload.amazonTv || []), 'tv');
       const songsSafe = filterForKids((payload.songsData?.results || []) as Media[]);
+      const songsTvSafe = tagMediaType(
+        filterForKids((payload.tvPopularData?.results || []) as Media[]),
+        'tv',
+      );
       const movieReelsSafe = filterForKids((payload.movieReelsData?.results || []) as Media[]);
       const recommendedSafe = filterForKids((payload.recommendedData?.results || []) as Media[]);
+      const tvOnTheAirSafe = tagMediaType(
+        filterForKids((payload.tvOnTheAirData?.results || []) as Media[]),
+        'tv',
+      );
+      const tvRecommendedSafe = tagMediaType(
+        filterForKids((payload.tvRecommendedData?.results || []) as Media[]),
+        'tv',
+      );
+      const tvPopularSafe = songsTvSafe;
       const hboSource = payload.hbo?.length
         ? payload.hbo
         : trendingRaw.filter((m) => m.media_type === 'tv');
-      const hboSafe = filterForKids(hboSource);
+      const hboSafe = tagMediaType(filterForKids(hboSource), 'movie');
+      const hboTvSafe = tagMediaType(filterForKids(payload.hboTv || []), 'tv');
       const genresList = (payload.genresData?.genres || []) as Genre[];
+      const tvGenresList = (payload.tvGenresData?.genres || []) as Genre[];
 
       return {
         netflixSafe,
         amazonSafe,
         hboSafe,
+        netflixTvSafe,
+        amazonTvSafe,
+        hboTvSafe,
         combinedStories,
         movieStoriesList,
         tvStoriesList,
@@ -278,6 +365,10 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
         movieReelsSafe,
         recommendedSafe,
         genresList,
+        tvOnTheAirSafe,
+        tvRecommendedSafe,
+        tvPopularSafe,
+        tvGenresList,
       };
     },
     [filterForKids]
@@ -364,15 +455,36 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       setNetflix(derived.netflixSafe);
       setAmazon(derived.amazonSafe);
       setHbo(derived.hboSafe);
+      setNetflixTv(derived.netflixTvSafe);
+      setAmazonTv(derived.amazonTvSafe);
+      setHboTv(derived.hboTvSafe);
       setStories(shuffleArray(derived.combinedStories));
       setTrending(derived.trendingResults);
       setFeaturedMovie(derived.trendingResults[0] || null);
       setTrendingMoviesOnly(derived.movieStoriesList);
       setTrendingTvOnly(derived.tvStoriesList);
       setSongs(derived.songsSafe);
+      setSongsTv(derived.tvPopularSafe);
       setMovieReels(derived.movieReelsSafe);
       setRecommended(derived.recommendedSafe);
+      setRecommendedTv(derived.tvRecommendedSafe);
       setGenres(derived.genresList);
+      setGenresTv(derived.tvGenresList);
+      setTvOnTheAir(derived.tvOnTheAirSafe);
+
+      const anyContent = Boolean(
+        derived.trendingResults?.length ||
+          derived.netflixSafe?.length ||
+          derived.amazonSafe?.length ||
+          derived.hboSafe?.length ||
+          derived.netflixTvSafe?.length ||
+          derived.amazonTvSafe?.length ||
+          derived.hboTvSafe?.length ||
+          derived.tvOnTheAirSafe?.length ||
+          derived.recommendedSafe?.length ||
+          derived.tvRecommendedSafe?.length,
+      );
+      if (anyContent) setHasCachedContent(true);
 
       const signature = buildFeedSignature(derived);
       feedSignatureRef.current = signature;
@@ -410,8 +522,14 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
 
   const fetchData = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!isOnline) {
+        setOffline(true);
+        if (!silent) setLoading(false);
+        return;
+      }
       if (!silent) setLoading(true);
       setError(null);
+      setOffline(false);
       try {
         if (!API_KEY) {
           throw new Error('Missing TMDB API key. Set EXPO_PUBLIC_TMDB_API_KEY in movieflixtv/.env.local');
@@ -421,37 +539,58 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
           netflixMovies,
           amazonMovies,
           hboMovies,
+          netflixTv,
+          amazonTv,
+          hboTv,
           movieStoriesData,
           tvStoriesData,
           trendingData,
           movieReelsData,
           recommendedData,
+          tvRecommendedData,
+          tvOnTheAirData,
           songsData,
+          tvPopularData,
           genresData,
+          tvGenresData,
         ] = await Promise.all([
           fetchProviderMovies(8),
           fetchProviderMovies(9),
           fetchProviderMovies(384),
+          fetchProviderTv(8),
+          fetchProviderTv(9),
+          fetchProviderTv(384),
           fetchWithKids(`${API_BASE_URL}/trending/movie/day?api_key=${API_KEY}`, 'movie'),
           fetchWithKids(`${API_BASE_URL}/trending/tv/day?api_key=${API_KEY}`, 'tv'),
           fetchWithKids(`${API_BASE_URL}/trending/all/day?api_key=${API_KEY}`, 'all'),
           fetchWithKids(`${API_BASE_URL}/movie/upcoming?api_key=${API_KEY}`, 'movie'),
           fetchWithKids(`${API_BASE_URL}/movie/top_rated?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/tv/top_rated?api_key=${API_KEY}`, 'tv'),
+          fetchWithKids(`${API_BASE_URL}/tv/on_the_air?api_key=${API_KEY}`, 'tv'),
           fetchWithKids(`${API_BASE_URL}/movie/popular?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/tv/popular?api_key=${API_KEY}`, 'tv'),
           fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`).then((r) => r.json()),
+          fetch(`${API_BASE_URL}/genre/tv/list?api_key=${API_KEY}`).then((r) => r.json()),
         ]);
 
         const payload: HomeFeedCachePayload = {
           netflix: netflixMovies || [],
           amazon: amazonMovies || [],
           hbo: hboMovies || [],
+          netflixTv: netflixTv || [],
+          amazonTv: amazonTv || [],
+          hboTv: hboTv || [],
           movieStoriesData,
           tvStoriesData,
           trendingData,
           movieReelsData,
           recommendedData,
+          tvRecommendedData,
           songsData,
+          tvOnTheAirData,
+          tvPopularData,
           genresData,
+          tvGenresData,
         };
 
         const derived = deriveFeedState(payload);
@@ -478,7 +617,10 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
         }
       } catch (error) {
         console.error('Error fetching data:', error);
-        setError(error instanceof Error ? error.message : 'Failed to load content. Please try again later.');
+        setOffline(true);
+        if (!hasCachedContent) {
+          setError(error instanceof Error ? error.message : 'Failed to load content. Please try again later.');
+        }
         if (!silent) setLoading(false);
       }
     },
@@ -488,31 +630,75 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       deriveFeedState,
       fetchProviderMovies,
       fetchWithKids,
+      fetchProviderTv,
+      hasCachedContent,
       homeFeedCacheKey,
+      isOnline,
     ]
   );
+
+  // Use refs to avoid re-triggering the effect when callbacks change
+  const fetchDataRef = useRef(fetchData);
+  const loadFromCacheRef = useRef(loadFromCache);
+  const isOnlineRef = useRef(isOnline);
+  
+  useEffect(() => {
+    fetchDataRef.current = fetchData;
+  }, [fetchData]);
+  
+  useEffect(() => {
+    loadFromCacheRef.current = loadFromCache;
+  }, [loadFromCache]);
+  
+  useEffect(() => {
+    isOnlineRef.current = isOnline;
+  }, [isOnline]);
 
   useEffect(() => {
     if (!profileReady) return;
     let cancelled = false;
     let interactionTask: { cancel?: () => void } | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleFetch = (fn: () => void) => {
+      // On web, `InteractionManager.runAfterInteractions` can be unreliable and never fire,
+      // which leaves the home feed in a perpetual loading state.
+      if (Platform.OS === 'web') {
+        timeoutId = setTimeout(fn, 0);
+        return;
+      }
+      try {
+        interactionTask = InteractionManager.runAfterInteractions(fn);
+      } catch {
+        timeoutId = setTimeout(fn, 0);
+      }
+    };
 
     const init = async () => {
-      const result = await loadFromCache();
+      const result = await loadFromCacheRef.current();
       if (cancelled) return;
 
+      if (!isOnlineRef.current) {
+        if (!result.applied) {
+          setError('You\'re offline. Connect to the internet to load movies for the first time.');
+        }
+        setLoading(false);
+        setOffline(true);
+        return;
+      }
+
       if (!result.applied) {
-        interactionTask = InteractionManager.runAfterInteractions(() => {
+        scheduleFetch(() => {
           if (cancelled) return;
-          void fetchData();
+          void fetchDataRef.current();
         });
         return;
       }
 
       if (!result.fresh) {
-        interactionTask = InteractionManager.runAfterInteractions(() => {
+        scheduleFetch(() => {
           if (cancelled) return;
-          void fetchData({ silent: true });
+          void fetchDataRef.current({ silent: true });
         });
       }
     };
@@ -526,18 +712,25 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       } catch {
         // ignore
       }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     };
-  }, [fetchData, loadFromCache, profileReady]);
+  }, [profileReady, homeFeedCacheKey]);
 
   return {
     trending,
     movieReels,
     movieTrailers,
     recommended,
+    recommendedTv,
     songs,
+    songsTv,
     trendingMoviesOnly,
     trendingTvOnly,
     genres,
+    genresTv,
     featuredMovie,
     setFeaturedMovie,
     stories,
@@ -545,8 +738,14 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
     netflix,
     amazon,
     hbo,
+    netflixTv,
+    amazonTv,
+    hboTv,
+    tvOnTheAir,
     loading,
     error,
+    offline,
+    hasCachedContent,
     continueWatching,
     lastWatched,
     filterForKids,

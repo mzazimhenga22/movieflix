@@ -68,14 +68,12 @@ export const ANIME_PRIORITY_SOURCE_IDS = ['animetsu', 'animeflv', 'zunime', 'mya
 
 export function buildSourceOrder(preferAnime: boolean): string[] {
   const priority = preferAnime ? ANIME_PRIORITY_SOURCE_IDS : GENERAL_PRIORITY_SOURCE_IDS;
-  const deprioritized = preferAnime ? GENERAL_PRIORITY_SOURCE_IDS : ANIME_PRIORITY_SOURCE_IDS;
+  const blockedAnime = preferAnime ? [] : ANIME_PRIORITY_SOURCE_IDS;
   const combined = [
     ...priority,
-    ...SOURCE_BASE_ORDER.filter(
-      (id) => !priority.includes(id) && !deprioritized.includes(id),
-    ),
-    ...deprioritized,
-    ...SOURCE_BASE_ORDER,
+    ...SOURCE_BASE_ORDER.filter((id) => !priority.includes(id) && !blockedAnime.includes(id)),
+    // When not preferring anime, skip anime sources entirely; when preferring, allow generals afterward
+    ...(preferAnime ? GENERAL_PRIORITY_SOURCE_IDS.filter((id) => !priority.includes(id)) : []),
   ];
   const seen = new Set<string>();
   return combined.filter((id) => {

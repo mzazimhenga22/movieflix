@@ -13,9 +13,11 @@ import {
   View,
 } from 'react-native';
 import useLiveStreams from '@/hooks/useLiveStreams';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 
 export default function LiveView() {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const [liveStreams, loaded] = useLiveStreams();
   const isLoading = !loaded;
 
@@ -30,7 +32,7 @@ export default function LiveView() {
           <Text style={styles.title}>Live Now</Text>
           <TouchableOpacity
             style={styles.goLiveButton}
-            onPress={() => router.push('/social-feed/go-live')}
+            onPress={() => deferNav(() => router.push('/social-feed/go-live'))}
           >
             <BlurView intensity={30} tint="dark" style={styles.goLiveBlur}>
               <Ionicons name="radio" size={20} color="#ff4b4b" />
@@ -62,7 +64,7 @@ export default function LiveView() {
           <TouchableOpacity
             key={stream.id}
             style={styles.streamCard}
-            onPress={() => router.push(`/social-feed/live/${stream.id}`)}
+            onPress={() => deferNav(() => router.push(`/social-feed/live/${stream.id}`))}
           >
             <View style={styles.thumbnailContainer}>
               <Image

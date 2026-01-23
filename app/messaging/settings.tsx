@@ -60,6 +60,13 @@ const MessagingSettingsScreen: React.FC = () => {
         <Text style={styles.sectionLabel}>Privacy</Text>
         <View style={styles.card}>
           <SettingRow
+            icon="moon-outline"
+            title="Hibernate (appear offline)"
+            description="Stay offline and hide online/last seen. While enabled you can't view others' online/last seen."
+            value={settings.hibernate}
+            onChange={(value) => updateSettings({ hibernate: value })}
+          />
+          <SettingRow
             icon="checkmark-done-outline"
             title="Read receipts"
             description="Let others see when you read"

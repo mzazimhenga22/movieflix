@@ -4,14 +4,17 @@ import { LinearGradient } from 'expo-linear-gradient';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    PixelRatio,
     Dimensions,
     Image,
     Platform,
     StyleSheet,
     Text,
     TouchableOpacity,
+    useWindowDimensions,
     View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { IMAGE_BASE_URL } from '../../constants/api';
 import { Media } from '../../types';
 import PulsePlaceholder from './PulsePlaceholder';
@@ -68,6 +71,13 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
   const [dynamicColors, setDynamicColors] = useState<string[]>([]);
   const colorUpdateInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastColorUpdate = useRef<number>(0);
+
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
+  const topBarTop = Math.max(10, (insets.top || 0) + 6);
+  const topBarHeight = isCompactLayout ? 44 : 40;
 
   useEffect(() => {
     if (trailer && trailerAutoPlay) {
@@ -180,7 +190,7 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
         />
       )}
 
-      <View style={styles.topBar}>
+      <View style={[styles.topBar, { top: topBarTop, height: topBarHeight }]}>
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={26} color="white" />
         </TouchableOpacity>
@@ -188,7 +198,11 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
         {isLoading ? (
           <PulsePlaceholder style={styles.titlePlaceholderSmall} />
         ) : (
-          <Text style={styles.topTitle} numberOfLines={1} ellipsizeMode="tail">
+          <Text
+            style={[styles.topTitle, isCompactLayout && styles.topTitleCompact]}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
             {movie?.title || movie?.name}
           </Text>
         )}
@@ -299,10 +313,8 @@ const styles = StyleSheet.create({
   },
   topBar: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 48 : 22,
     left: 0,
     right: 0,
-    height: 40,
     zIndex: 20,
     alignItems: 'center',
     justifyContent: 'center',
@@ -323,6 +335,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     zIndex: 25,
     textAlign: 'center',
+  },
+  topTitleCompact: {
+    fontSize: 16,
   },
   titlePlaceholderSmall: {
     width: 140,

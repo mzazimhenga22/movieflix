@@ -9,7 +9,7 @@ export interface Media {
   genre_ids?: number[];
   backdrop_path?: string;
   overview?: string;
-  media_type?: 'movie' | 'tv';
+  media_type?: 'movie' | 'tv' | 'music';
   imdb_id?: string | null;
   adult?: boolean;
   seasonNumber?: number;

@@ -18,31 +18,35 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
-import useIncomingCall from '@/hooks/useIncomingCall'
-import { createCallSession, declineCall, listenToCallHistory } from '@/lib/calls/callService'
+import { createCallSession, listenToCallHistory } from '@/lib/calls/callService'
 import type { CallSession, CallType } from '@/lib/calls/types'
 import { getProfileScopedKey } from '@/lib/profileStorage'
-import { updateStreakForContext } from '@/lib/streaks/streakManager'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { BlurView } from 'expo-blur'
 import { LinearGradient } from 'expo-linear-gradient'
 import type { User } from 'firebase/auth'
+import { collection, doc, getDocs, limit, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore'
+
+import { listenToLiveStreams } from '@/lib/live/liveService'
+import type { LiveStream } from '@/lib/live/types'
 
 import { useMessagingSettings } from '@/hooks/useMessagingSettings'
 import ScreenWrapper from '../../components/ScreenWrapper'
 import { Media } from '../../types'
 import { onStoriesUpdateForViewer } from '../components/social-feed/storiesController'
 import { useActiveProfile } from '../../hooks/use-active-profile'
+import { firestore } from '../../constants/firebase'
 import { useAccent } from '../components/AccentContext'
 import { accentGradient, darkenColor, withAlpha } from '../../lib/colorUtils'
 
 import FAB from './components/FAB'
-import IncomingCallCard from './components/IncomingCallCard'
 import MessageItem from './components/MessageItem'
 import NewChatSheet from './components/NewChatSheet'
 import NoMessages from './components/NoMessages'
 import StoryItem from './components/StoryItem'
 import MessagingErrorBoundary from './components/ErrorBoundary'
+import SnowOverlay from './components/SnowOverlay'
+import AmbientBackground from './components/AmbientBackground'
 import {
     Conversation,
     acceptMessageRequest,
@@ -50,13 +54,17 @@ import {
     createGroupConversation,
     deleteConversation,
     findOrCreateConversation,
+    getSuggestedPeople,
     getFollowing,
     getProfileById,
+    getProfilesByIds,
     GLOBAL_BROADCAST_CHANNEL_ID,
     markConversationRead,
     onAuthChange,
     onConversationsUpdate,
     onConversationUpdate,
+    loadOlderConversations,
+    onUserTyping,
     Profile,
     setConversationPinned,
 } from './controller'
@@ -66,6 +74,8 @@ const STORY_WINDOW_MS = 24 * 60 * 60 * 1000
 const VERIFIED_CHANNEL_IDS = new Set([GLOBAL_BROADCAST_CHANNEL_ID])
 
 type ConversationListItem = Conversation & { unread: number }
+
+type ChatRouteParams = { id: string | number } & Record<string, string | number | undefined>
 
 type Story = {
   id: string
@@ -110,12 +120,23 @@ const MessagingScreen = () => {
   const [user, setUser] = useState<User | null>(null)
   const [isAuthReady, setAuthReady] = useState(false)
 
+  const [snowing, setSnowing] = useState(false)
+
   const [stories, setStories] = useState<Story[]>([])
   const [following, setFollowing] = useState<Profile[]>([])
-  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [suggestedPeople, setSuggestedPeople] = useState<Profile[]>([])
+  const [liveConversations, setLiveConversations] = useState<Conversation[]>([])
+  const [olderConversations, setOlderConversations] = useState<Conversation[]>([])
   const [callHistory, setCallHistory] = useState<CallSession[]>([])
+  const [liveStreams, setLiveStreams] = useState<LiveStream[]>([])
+  const [liveLoading, setLiveLoading] = useState(false)
   const [broadcastConversation, setBroadcastConversation] = useState<Conversation | null>(null)
   const [profileCache, setProfileCache] = useState<Record<string, Profile>>({})
+  const profileCacheStorageKey = user?.uid ? `chat_profile_cache_${user.uid}` : null
+  const profileCachePersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const navigatingToRef = useRef<string | null>(null)
+  const [navigatingToId, setNavigatingToId] = useState<string | null>(null)
   const [isRequestSheetVisible, setRequestSheetVisible] = useState(false)
   const [requestActionId, setRequestActionId] = useState<string | null>(null)
   const [isConversationsLoading, setConversationsLoading] = useState(true)
@@ -123,6 +144,9 @@ const MessagingScreen = () => {
   const [searchQuery, setSearchQuery] = useState('')
   const [isSearchMode, setSearchMode] = useState(false)
   const [isSheetVisible, setSheetVisible] = useState(false)
+
+  const startChatInFlightRef = useRef(false)
+  const [startingChatUserId, setStartingChatUserId] = useState<string | null>(null)
 
   const [activeFilter, setActiveFilter] = useState<'All' | 'Unread'>('All')
   const [activeKind, setActiveKind] = useState<'Chats' | 'Groups' | 'Calls'>('Chats')
@@ -144,8 +168,35 @@ const MessagingScreen = () => {
   const [didBootstrapFollowingStreaks, setDidBootstrapFollowingStreaks] = useState(false)
 
   const [isStartingCall, setIsStartingCall] = useState(false)
+  const [isLoadingMoreConvos, setIsLoadingMoreConvos] = useState(false)
+  const [hasMoreConversations, setHasMoreConversations] = useState(true)
+  const [typingByConversation, setTypingByConversation] = useState<Record<string, boolean>>({})
   const activeProfile = useActiveProfile()
   const profileGreetingName = activeProfile?.name ?? 'streamer'
+  const activeProfilePhotoUrl =
+    typeof activeProfile?.photoURL === 'string' && activeProfile.photoURL.trim()
+      ? activeProfile.photoURL.trim()
+      : null
+
+  useEffect(() => {
+    // Sync selected profile name/avatar into Firestore user profile so chat lists/headers resolve correctly.
+    if (!user?.uid) return
+    const displayName =
+      typeof activeProfile?.name === 'string' && activeProfile.name.trim() ? activeProfile.name.trim() : null
+    const photoURL = activeProfilePhotoUrl
+    if (!displayName && !photoURL) return
+
+    void setDoc(
+      doc(firestore, 'users', user.uid),
+      {
+        ...(displayName ? { displayName } : {}),
+        ...(photoURL ? { photoURL } : {}),
+        activeProfileId: activeProfile?.id ?? null,
+        activeProfileUpdatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    ).catch(() => {})
+  }, [activeProfile?.id, activeProfile?.name, activeProfilePhotoUrl, user?.uid])
 
   // Local read tracking (used when read receipts are disabled and as a fast UI fallback).
   const localReadStorageKey = user?.uid ? `chat_local_lastReadAtBy_${user.uid}` : null
@@ -181,6 +232,44 @@ const MessagingScreen = () => {
     }
   }, [localReadStorageKey])
 
+  useEffect(() => {
+    if (!profileCacheStorageKey) {
+      setProfileCache({})
+      return
+    }
+
+    let alive = true
+    void AsyncStorage.getItem(profileCacheStorageKey)
+      .then((raw) => {
+        if (!alive) return
+        if (!raw) return
+        try {
+          const parsed = JSON.parse(raw) as Record<string, Profile>
+          if (parsed && typeof parsed === 'object') {
+            setProfileCache((prev) => ({ ...parsed, ...prev }))
+          }
+        } catch {
+          // ignore
+        }
+      })
+      .catch(() => {})
+
+    return () => {
+      alive = false
+    }
+  }, [profileCacheStorageKey])
+
+  useEffect(() => {
+    if (!profileCacheStorageKey) return
+    if (profileCachePersistTimer.current) clearTimeout(profileCachePersistTimer.current)
+    profileCachePersistTimer.current = setTimeout(() => {
+      void AsyncStorage.setItem(profileCacheStorageKey, JSON.stringify(profileCache)).catch(() => {})
+    }, 500)
+    return () => {
+      if (profileCachePersistTimer.current) clearTimeout(profileCachePersistTimer.current)
+    }
+  }, [profileCache, profileCacheStorageKey])
+
   const markLocalConversationRead = useCallback(
     (conversationId: string) => {
       if (!localReadStorageKey) return
@@ -195,7 +284,6 @@ const MessagingScreen = () => {
     [localReadStorageKey],
   )
 
-  const incomingCall = useIncomingCall(user?.uid)
   const { accentColor } = useAccent()
   const accent = accentColor || '#e50914'
   const accentDark = darkenColor(accent, 0.35)
@@ -209,11 +297,30 @@ const MessagingScreen = () => {
   const iconShadowStyle = { shadowColor: withAlpha(accent, 0.65) }
   const callIconStyle = { backgroundColor: withAlpha(accent, 0.2) }
 
+  useFocusEffect(
+    useCallback(() => {
+      setLiveLoading(true)
+      let didFirst = false
+      const unsub = listenToLiveStreams((streams) => {
+        setLiveStreams(streams)
+        if (!didFirst) {
+          didFirst = true
+          setLiveLoading(false)
+        }
+      })
+      return () => {
+        try {
+          unsub()
+        } catch {}
+      }
+    }, []),
+  )
+
   // ----------------------------
   // Stories rail normalization
   // ----------------------------
   const groupedStories = useMemo<StoryRailEntry[]>(() => {
-    const map = new Map<string, StoryRailEntry>()
+    const map: Record<string, StoryRailEntry> = {}
 
     for (const story of stories) {
       if (!story?.userId) continue
@@ -225,31 +332,31 @@ const MessagingScreen = () => {
 
       if (createdAtMs && Date.now() - createdAtMs > STORY_WINDOW_MS) continue
 
-      const existing = map.get(story.userId)
+      const existing = map[story.userId]
       if (!existing || (createdAtMs ?? 0) > (existing.latestCreatedAt ?? 0)) {
-        map.set(story.userId, {
+        map[story.userId] = {
           ...story,
           latestStoryId: story.id,
           latestCreatedAt: createdAtMs,
           hasStory: true,
           displayAvatar: story.userAvatar || story.avatar || story.photoURL || null,
-        })
+        }
       }
     }
 
-    return Array.from(map.values()).sort((a, b) => (b.latestCreatedAt ?? 0) - (a.latestCreatedAt ?? 0))
+    return Object.values(map).sort((a, b) => (b.latestCreatedAt ?? 0) - (a.latestCreatedAt ?? 0))
   }, [stories])
 
   const storyRailData = useMemo<StoryRailEntry[]>(() => {
     const entries: StoryRailEntry[] = []
 
     const myEntry = (user?.uid ? groupedStories.find((e) => e.userId === user.uid) : null) ?? null
-    const selfAvatar = user?.photoURL ?? myEntry?.displayAvatar ?? myEntry?.photoURL ?? null
+    const selfAvatar = activeProfilePhotoUrl ?? user?.photoURL ?? myEntry?.displayAvatar ?? myEntry?.photoURL ?? null
 
     entries.push({
       id: user?.uid ?? 'self-story',
       userId: user?.uid ?? 'self-story',
-      username: user?.displayName ?? 'My Story',
+      username: activeProfile?.name ?? user?.displayName ?? 'My Story',
       photoURL: myEntry?.photoURL ?? selfAvatar ?? undefined,
       userAvatar: selfAvatar,
       latestStoryId: myEntry?.latestStoryId ?? null,
@@ -271,10 +378,10 @@ const MessagingScreen = () => {
     }
 
     return entries
-  }, [groupedStories, user?.uid, user?.displayName, user?.photoURL])
+  }, [activeProfile?.name, activeProfilePhotoUrl, groupedStories, user?.uid, user?.displayName, user?.photoURL])
 
   const storyViewerStories = useMemo(() => {
-    const byUser = new Map<string, Story[]>()
+    const byUser: Record<string, Story[]> = {}
 
     for (const s of stories) {
       const userId = s?.userId ? String(s.userId) : ''
@@ -287,12 +394,11 @@ const MessagingScreen = () => {
 
       if (createdAtMs && Date.now() - createdAtMs > STORY_WINDOW_MS) continue
 
-      const list = byUser.get(userId) ?? []
-      list.push(s)
-      byUser.set(userId, list)
+      if (!byUser[userId]) byUser[userId] = []
+      byUser[userId].push(s)
     }
 
-    const groups = Array.from(byUser.entries()).map(([userId, list]) => {
+    const groups = Object.entries(byUser).map(([userId, list]) => {
       const sorted = [...list].sort((a, b) => {
         const ta = a.createdAt && typeof (a.createdAt as any)?.toMillis === 'function' ? (a.createdAt as any).toMillis() : 0
         const tb = b.createdAt && typeof (b.createdAt as any)?.toMillis === 'function' ? (b.createdAt as any).toMillis() : 0
@@ -356,15 +462,45 @@ const MessagingScreen = () => {
       .map(({ __latestCreatedAt, ...rest }: any) => rest)
   }, [stories])
 
+  const getUpdatedAtMs = useCallback((conversation: Conversation): number => {
+    const raw = (conversation as any)?.updatedAt
+    if (raw && typeof raw.toMillis === 'function') return raw.toMillis()
+    if (raw && typeof raw.seconds === 'number') return raw.seconds * 1000
+    if (typeof raw === 'number') return raw
+    return 0
+  }, [])
+
+  const allConversations = useMemo<Conversation[]>(() => {
+    const map: Record<string, Conversation> = {}
+    const liveList: Conversation[] = Array.isArray(liveConversations) ? liveConversations : []
+    const olderList: Conversation[] = Array.isArray(olderConversations) ? olderConversations : []
+
+    liveList.forEach((c: Conversation) => {
+      if (c?.id) map[c.id] = c
+    })
+
+    olderList.forEach((c: Conversation) => {
+      if (c?.id && !map[c.id]) map[c.id] = c
+    })
+
+    const arr = Object.values(map)
+    return arr.sort((a, b) => {
+      const aPinned = a.pinned ? 1 : 0
+      const bPinned = b.pinned ? 1 : 0
+      if (aPinned !== bPinned) return bPinned - aPinned
+      return getUpdatedAtMs(b) - getUpdatedAtMs(a)
+    })
+  }, [getUpdatedAtMs, liveConversations, olderConversations])
+
   const requestInbox = useMemo(() => {
     if (!user?.uid) return []
-    return conversations.filter(
+    return allConversations.filter(
       (conv) =>
         conv.status === 'pending' &&
         !conv.isGroup &&
         (conv.requestInitiatorId ?? null) !== user.uid,
     )
-  }, [conversations, user?.uid])
+  }, [allConversations, user?.uid])
 
   const pendingRequestCount = requestInbox.length
 
@@ -420,36 +556,51 @@ const MessagingScreen = () => {
   )
 
   useEffect(() => {
-    if (!requestInbox.length) return
-    const missingIds = requestInbox
-      .map((conv) => conv.requestInitiatorId)
-      .filter((id): id is string => !!id && !profileCache[id])
-    if (!missingIds.length) return
+    if (!user?.uid) return
 
-    let isMounted = true
-    const load = async () => {
-      try {
-        const next = await Promise.all(missingIds.slice(0, 8).map((id) => getProfileById(id)))
-        if (!isMounted) return
-        setProfileCache((prev) => {
-          const clone = { ...prev }
-          next.forEach((profile) => {
-            if (profile && !clone[profile.id]) {
-              clone[profile.id] = profile
-            }
-          })
-          return clone
-        })
-      } catch (err) {
-        console.warn('[messaging] failed loading request profiles', err)
+    const ids = new Set<string>()
+
+    for (const conv of requestInbox) {
+      const initiatorId = conv.requestInitiatorId
+      if (initiatorId) ids.add(String(initiatorId))
+
+      if (!initiatorId && Array.isArray(conv.members)) {
+        const fallbackId = conv.members.find((m) => m && m !== user.uid)
+        if (fallbackId) ids.add(String(fallbackId))
       }
     }
 
-    void load()
+    for (const conv of allConversations) {
+      if (conv.isGroup || conv.isBroadcast) continue
+      if (!Array.isArray(conv.members)) continue
+      const otherId = conv.members.find((m) => m && m !== user.uid)
+      if (otherId) ids.add(String(otherId))
+    }
+
+    const missingIds = Array.from(ids).filter((id) => id && !profileCache[id])
+    if (!missingIds.length) return
+
+    let isMounted = true
+    void (async () => {
+      try {
+        const profiles = await getProfilesByIds(missingIds.slice(0, 40))
+        if (!isMounted) return
+        setProfileCache((prev) => {
+          const next = { ...prev }
+          for (const profile of profiles) {
+            if (profile?.id) next[profile.id] = profile
+          }
+          return next
+        })
+      } catch (err) {
+        console.warn('[messaging] failed loading profiles', err)
+      }
+    })()
+
     return () => {
       isMounted = false
     }
-  }, [requestInbox, profileCache])
+  }, [user?.uid, requestInbox, allConversations, profileCache])
 
   useEffect(() => {
     if (requestInbox.length === 0) {
@@ -465,7 +616,8 @@ const MessagingScreen = () => {
       setUser(currentUser)
       setAuthReady(true)
       if (!currentUser) {
-        setConversations([])
+        setLiveConversations([])
+        setOlderConversations([])
         setConversationsLoading(true)
       }
     })
@@ -479,13 +631,18 @@ const MessagingScreen = () => {
     if (!isAuthReady || !user?.uid) return
 
     let alive = true
+    const initialLimit = 40
     const unsubConversations = onConversationsUpdate(
       (list) => {
-      if (!alive) return
-      setConversations(list)
-      setConversationsLoading(false)
+        if (!alive) return
+        const safe = Array.isArray(list) ? list : []
+        setLiveConversations(safe)
+        setConversationsLoading(false)
+        setHasMoreConversations(safe.length >= initialLimit)
+        // drop older duplicates if they re-appear in live window
+        setOlderConversations((prev) => prev.filter((c) => !safe.find((l) => l.id === c.id)))
       },
-      { uid: user.uid },
+      { uid: user.uid, limit: initialLimit },
     )
     const unsubStories = onStoriesUpdateForViewer(
       (list) => {
@@ -494,15 +651,33 @@ const MessagingScreen = () => {
       { viewerId: user.uid },
     )
     const unsubCallHistory = listenToCallHistory(user.uid, (calls) => {
-      if (alive) setCallHistory(calls)
+      if (alive) setCallHistory(Array.isArray(calls) ? calls : [])
     })
 
     ;(async () => {
       try {
         const list = await getFollowing()
-        if (alive) setFollowing(list)
+        if (!alive) return
+        setFollowing(list)
+        setProfileCache((prev) => {
+          const next = { ...prev }
+          list.forEach((profile) => {
+            if (profile?.id) next[profile.id] = profile
+          })
+          return next
+        })
       } catch (e) {
         if (alive) setFollowing([])
+      }
+    })()
+
+    ;(async () => {
+      try {
+        const list = await getSuggestedPeople()
+        if (!alive) return
+        setSuggestedPeople(list)
+      } catch {
+        if (alive) setSuggestedPeople([])
       }
     })()
 
@@ -527,11 +702,18 @@ const MessagingScreen = () => {
         if (!profile) return
 
         const conversationId = await findOrCreateConversation(profile)
+        setProfileCache((prev) => (prev[profile.id] ? prev : { ...prev, [profile.id]: profile }))
         setDidNavigateFromStreak(true)
 
         router.push({
           pathname: '/messaging/chat/[id]',
-          params: { id: conversationId, fromStreak: '1' },
+          params: {
+            id: conversationId,
+            fromStreak: '1',
+            otherUserId: profile.id,
+            title: profile.displayName || 'Chat',
+            ...(profile.photoURL ? { avatar: profile.photoURL } : {}),
+          },
         })
       } catch (err) {
         console.error('Failed to navigate from streak', err)
@@ -553,13 +735,7 @@ const MessagingScreen = () => {
       try {
         for (const person of following) {
           try {
-            const conversationId = await findOrCreateConversation(person)
-            await updateStreakForContext({
-              kind: 'chat',
-              conversationId,
-              partnerId: person.id,
-              partnerName: person.displayName ?? null,
-            })
+            await findOrCreateConversation(person)
           } catch (err) {
             console.error('Failed to start streak with', person.id, err)
           }
@@ -582,9 +758,69 @@ const MessagingScreen = () => {
       const load = async () => {
         try {
           const key = await getProfileScopedKey('watchHistory')
+          const mergedByKey: Record<string, Media> = {}
+
           const stored = await AsyncStorage.getItem(key)
+          if (stored) {
+            try {
+              const parsed = JSON.parse(stored) as Media[]
+              parsed.forEach((entry) => {
+                const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie')
+                const id = entry?.id ?? (entry as any)?.tmdbId ?? entry?.title ?? entry?.name
+                if (id == null) return
+                mergedByKey[`${mediaType}:${String(id)}`] = entry
+              })
+            } catch {}
+          }
+
+          if (user?.uid) {
+            try {
+              const profileId = activeProfile?.id ?? 'default'
+              const ref = collection(firestore, 'users', user.uid, 'watchHistory')
+              const q = query(ref, orderBy('updatedAtMs', 'desc'), limit(60))
+              const snap = await getDocs(q)
+              snap.docs.forEach((docSnap) => {
+                const data = docSnap.data() as any
+                if (data?.profileId && data.profileId !== profileId) return
+                if (data?.completed === true) return
+                const tmdbId = data?.tmdbId
+                if (!tmdbId) return
+                const mediaType = String(data?.mediaType || 'movie')
+                const entryKey = `${mediaType}:${String(tmdbId)}`
+
+                const existing = mergedByKey[entryKey]
+                const existingTs = existing?.watchProgress?.updatedAt ?? 0
+                const incomingTs = data?.watchProgress?.updatedAtMs ?? data?.updatedAtMs ?? 0
+                if (existing && existingTs >= incomingTs) return
+
+                mergedByKey[entryKey] = {
+                  id: tmdbId,
+                  title: data?.title ?? undefined,
+                  name: data?.title ?? undefined,
+                  media_type: mediaType,
+                  poster_path: data?.posterPath ?? undefined,
+                  backdrop_path: data?.backdropPath ?? undefined,
+                  genre_ids: Array.isArray(data?.genreIds) ? data.genreIds : undefined,
+                  seasonNumber: typeof data?.seasonNumber === 'number' ? data.seasonNumber : undefined,
+                  episodeNumber: typeof data?.episodeNumber === 'number' ? data.episodeNumber : undefined,
+                  seasonTitle: typeof data?.seasonTitle === 'string' ? data.seasonTitle : undefined,
+                  watchProgress: {
+                    positionMillis: data?.watchProgress?.positionMillis ?? 0,
+                    durationMillis: data?.watchProgress?.durationMillis ?? 0,
+                    progress: data?.watchProgress?.progress ?? 0,
+                    updatedAt: incomingTs || Date.now(),
+                  },
+                } as Media
+              })
+            } catch {}
+          }
+
           if (!alive) return
-          setContinueWatching(stored ? (JSON.parse(stored) as Media[]) : [])
+          const merged = Object.values(mergedByKey)
+            .filter((entry) => (entry.watchProgress?.progress ?? 0) < 0.985)
+            .sort((a, b) => (b.watchProgress?.updatedAt ?? 0) - (a.watchProgress?.updatedAt ?? 0))
+            .slice(0, 40)
+          setContinueWatching(merged)
         } catch (err) {
           if (alive) setContinueWatching([])
         }
@@ -596,7 +832,7 @@ const MessagingScreen = () => {
       return () => {
         alive = false
       }
-    }, [isAuthReady]),
+    }, [isAuthReady, user?.uid, activeProfile?.id]),
   )
 
   // ----------------------------
@@ -648,12 +884,41 @@ const MessagingScreen = () => {
     }
   }, [])
 
+  // Typing subscriptions for recent conversations (non-groups).
+  useEffect(() => {
+    const subs: Array<() => void> = []
+    const nextTyping: Record<string, boolean> = {}
+
+    liveConversations
+      .filter((c) => !c.isGroup && !c.isBroadcast)
+      .slice(0, 30)
+      .forEach((conv) => {
+        const members: string[] = Array.isArray(conv.members) ? (conv.members as any) : []
+        const otherId = user?.uid ? members.find((m) => m && m !== user.uid) : null
+        if (!otherId) return
+        try {
+          const unsub = onUserTyping(conv.id, otherId, (typing) => {
+            setTypingByConversation((prev) => ({ ...prev, [conv.id]: typing }))
+          })
+          subs.push(unsub)
+        } catch {
+          // ignore
+        }
+        nextTyping[conv.id] = typingByConversation[conv.id] ?? false
+      })
+
+    // cleanup
+    return () => subs.forEach((fn) => {
+      try { fn() } catch {}
+    })
+  }, [liveConversations, user?.uid])
+
   // ----------------------------
   // Unread computation aligned with controller.ts (lastReadAtBy)
   // ----------------------------
   const enhancedConversations: ConversationListItem[] = useMemo(() => {
     const uid = user?.uid
-    return conversations.map((c) => {
+    return allConversations.map((c) => {
       if (!uid) return { ...c, unread: 0 }
 
       const hasLastMessage = Boolean(c.lastMessage)
@@ -682,7 +947,7 @@ const MessagingScreen = () => {
 
       return { ...c, unread }
     })
-  }, [conversations, localReadAtByConversation, user?.uid])
+  }, [allConversations, localReadAtByConversation, user?.uid])
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -709,6 +974,9 @@ const MessagingScreen = () => {
           ? enhancedConversations.filter((m) => m.isGroup)
           : enhancedConversations.filter((m) => !m.isGroup)
 
+      // Hide empty threads (no last message) unless pending request
+      base = base.filter((m) => m.status === 'pending' || m.lastMessage || m.lastMessageSenderId)
+
       base = base.filter((m) => {
         if (!user?.uid) return true
         if (m.status !== 'pending') return true
@@ -733,20 +1001,86 @@ const MessagingScreen = () => {
     }
   }, [enhancedConversations, callHistory, searchQuery, activeFilter, activeKind, user?.uid])
 
+  const handleLoadMoreConversations = useCallback(async () => {
+    if (!user?.uid) return
+    if (isLoadingMoreConvos || !hasMoreConversations) return
+    const oldest = allConversations[allConversations.length - 1]
+    const cursor = oldest?.updatedAt
+    if (!cursor) {
+      setHasMoreConversations(false)
+      return
+    }
+    setIsLoadingMoreConvos(true)
+    try {
+      const older = await loadOlderConversations(user.uid, cursor, 40)
+      if (!older.length) {
+        setHasMoreConversations(false)
+      }
+      setOlderConversations((prev) => {
+        const map: Record<string, Conversation> = {}
+        older.forEach((c) => { if (c?.id) map[c.id] = c })
+        prev.forEach((c) => { if (c?.id && !map[c.id]) map[c.id] = c })
+        return Object.values(map)
+      })
+    } catch (err) {
+      console.warn('[messaging] loadMoreConversations failed', err)
+    } finally {
+      setIsLoadingMoreConvos(false)
+    }
+  }, [user?.uid, isLoadingMoreConvos, hasMoreConversations, allConversations, loadOlderConversations])
+
   // ----------------------------
   // Handlers
   // ----------------------------
-  const handleMessagePress = useCallback(
-    (id: string) => {
-      void (async () => {
-        try {
-          markLocalConversationRead(id)
-          await markConversationRead(id, settings.readReceipts)
-        } catch {}
-        router.push({ pathname: '/messaging/chat/[id]', params: { id } })
-      })()
+  const buildChatRouteParams = useCallback(
+    (conversation: Conversation): ChatRouteParams => {
+      const params: ChatRouteParams = { id: conversation.id }
+
+      const titleFromConversation =
+        conversation.name || (conversation as any)?.title || (conversation as any)?.displayName || ''
+
+      if (conversation.isGroup || conversation.isBroadcast) {
+        if (titleFromConversation) params.title = titleFromConversation
+        return params
+      }
+
+      const uid = user?.uid
+      const members = Array.isArray(conversation.members) ? conversation.members : []
+      const otherId = uid ? members.find((m) => m && m !== uid) : null
+      if (!otherId) return params
+
+      params.otherUserId = String(otherId)
+      const cached = profileCache[String(otherId)]
+      if (cached?.displayName) params.title = cached.displayName
+      if (cached?.photoURL) params.avatar = cached.photoURL
+      return params
     },
-    [markLocalConversationRead, router, settings.readReceipts],
+    [profileCache, user?.uid],
+  )
+
+  const handleConversationPress = useCallback(
+    (conversation: Conversation) => {
+      const id = conversation?.id
+      if (!id) return
+      if (navigatingToRef.current === id) return
+
+      navigatingToRef.current = id
+      setNavigatingToId(id)
+
+      router.push({ pathname: '/messaging/chat/[id]', params: buildChatRouteParams(conversation) })
+
+      // Do not block navigation on network writes.
+      try {
+        markLocalConversationRead(id)
+        void markConversationRead(id, settings.readReceipts)
+      } catch {}
+
+      setTimeout(() => {
+        if (navigatingToRef.current === id) navigatingToRef.current = null
+        setNavigatingToId((prev) => (prev === id ? null : prev))
+      }, 900)
+    },
+    [buildChatRouteParams, markLocalConversationRead, router, settings.readReceipts],
   )
 
   const handleMessageLongPress = useCallback(
@@ -804,12 +1138,28 @@ const MessagingScreen = () => {
 
   const handleStartChat = useCallback(
     async (person: Profile) => {
+      if (!person?.id) return
+      if (startChatInFlightRef.current) return
       try {
+        startChatInFlightRef.current = true
+        setStartingChatUserId(person.id)
         const conversationId = await findOrCreateConversation(person)
+        setProfileCache((prev) => (prev[person.id] ? prev : { ...prev, [person.id]: person }))
         setSheetVisible(false)
-        router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } })
+        const params: ChatRouteParams = {
+          id: conversationId,
+          otherUserId: person.id,
+          title: person.displayName || 'Chat',
+        }
+        if (person.photoURL) params.avatar = person.photoURL
+        router.push({ pathname: '/messaging/chat/[id]', params })
       } catch (error) {
         console.error('Error starting chat: ', error)
+      } finally {
+        setTimeout(() => {
+          startChatInFlightRef.current = false
+          setStartingChatUserId(null)
+        }, 700)
       }
     },
     [router],
@@ -821,7 +1171,8 @@ const MessagingScreen = () => {
         const memberIds = members.map((m) => m.id)
         const conversationId = await createGroupConversation({ name, memberIds })
         setSheetVisible(false)
-        router.push({ pathname: '/messaging/chat/[id]', params: { id: conversationId } })
+        const params: ChatRouteParams = { id: conversationId, title: name || 'Group' }
+        router.push({ pathname: '/messaging/chat/[id]', params })
       } catch (error) {
         console.error('Error creating group chat: ', error)
       }
@@ -899,20 +1250,6 @@ const MessagingScreen = () => {
     [user?.uid, user?.displayName, router, isStartingCall],
   )
 
-  const handleAcceptIncomingCall = useCallback(() => {
-    if (!incomingCall?.id) return
-    router.push({ pathname: '/calls/[id]', params: { id: incomingCall.id } })
-  }, [incomingCall?.id, router])
-
-  const handleDeclineIncomingCall = useCallback(async () => {
-    if (!incomingCall?.id || !user?.uid) return
-    try {
-      await declineCall(incomingCall.id, user.uid, user.displayName ?? null)
-    } catch (err) {
-      console.warn('Failed to decline call', err)
-    }
-  }, [incomingCall?.id, user?.uid, user?.displayName])
-
   const openSheet = useCallback(() => setSheetVisible(true), [])
   const navigateTo = useCallback((path: any) => router.push(path), [router])
 
@@ -958,6 +1295,8 @@ const MessagingScreen = () => {
       />
 
       <View style={styles.container}>
+        <AmbientBackground intensity={0.7} />
+        <SnowOverlay enabled={snowing} />
         {/* Header (glassy hero) */}
         <View style={styles.headerWrap}>
           {isSearchMode ? (
@@ -1011,6 +1350,25 @@ const MessagingScreen = () => {
                 </TouchableOpacity>
 
                 <View style={styles.headerIcons}>
+                  <TouchableOpacity
+                    style={[styles.iconBtn, iconShadowStyle]}
+                    onPress={() => setSnowing((prev) => !prev)}
+                  >
+                    <LinearGradient
+                      colors={iconGradientColors}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.iconBg}
+                    >
+                      <Ionicons
+                        name="snow"
+                        size={22}
+                        color={snowing ? '#ffffff' : 'rgba(255,255,255,0.92)'}
+                        style={styles.iconMargin}
+                      />
+                    </LinearGradient>
+                  </TouchableOpacity>
+
                   <TouchableOpacity style={[styles.iconBtn, iconShadowStyle]} onPress={handleOpenSearch}>
                     <LinearGradient
                       colors={iconGradientColors}
@@ -1054,7 +1412,7 @@ const MessagingScreen = () => {
               </View>
 
               <View style={styles.quickRow}>
-                <TouchableOpacity style={styles.quickTile} onPress={() => navigateTo('/messaging/new')}>
+                <TouchableOpacity style={styles.quickTile} onPress={openSheet}>
                   <Ionicons name="create-outline" size={18} color="#fff" />
                   <Text style={styles.quickTileText}>New chat</Text>
                 </TouchableOpacity>
@@ -1070,17 +1428,13 @@ const MessagingScreen = () => {
             </>
           )}
         </View>
-
-        {incomingCall && (
-          <IncomingCallCard
-            call={incomingCall}
-            onAccept={handleAcceptIncomingCall}
-            onDecline={handleDeclineIncomingCall}
-          />
-        )}
-
         {filteredItems.length === 0 && searchQuery.trim() === '' && activeKind !== 'Calls' ? (
-          <NoMessages suggestedPeople={following} onStartChat={handleStartChat} headerHeight={headerHeight} />
+          <NoMessages
+            suggestedPeople={following}
+            onStartChat={handleStartChat}
+            startingUserId={startingChatUserId}
+            headerHeight={headerHeight}
+          />
         ) : (
           <View style={styles.listContainer}>
             {activeKind === 'Calls' ? (
@@ -1152,21 +1506,38 @@ const MessagingScreen = () => {
             ) : (
               <Animated.FlatList
                 data={filteredItems as ConversationListItem[]}
-                renderItem={({ item }) => (
-                  <MessageItem
-                    item={item}
-                    onPress={() => handleMessagePress(item.id)}
-                    currentUser={user}
-                    onLongPress={handleMessageLongPress}
-                    onStartCall={handleStartCall}
-                    callDisabled={isStartingCall}
-                    isVerified={isConversationVerified(item)}
-                  />
-                )}
+                renderItem={({ item }) => {
+                  const otherId =
+                    !item.isGroup &&
+                    !item.isBroadcast &&
+                    user?.uid &&
+                    Array.isArray(item.members)
+                      ? item.members.find((m) => m && m !== user.uid)
+                      : null
+                  const otherProfile = otherId ? profileCache[String(otherId)] ?? null : null
+                  const isTyping = typingByConversation[item.id] === true
+
+                  return (
+                    <MessageItem
+                      item={item}
+                      onPress={handleConversationPress}
+                      currentUser={user}
+                      otherProfile={otherProfile}
+                      isTyping={isTyping}
+                      pressDisabled={!!navigatingToId}
+                      onLongPress={handleMessageLongPress}
+                      onStartCall={handleStartCall}
+                      callDisabled={isStartingCall}
+                      isVerified={isConversationVerified(item)}
+                    />
+                  )
+                }}
                 keyExtractor={(item) => item.id}
                 onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
                   useNativeDriver: false,
                 })}
+                onEndReached={handleLoadMoreConversations}
+                onEndReachedThreshold={0.5}
                 ListHeaderComponent={
                   <View style={styles.listHeaderWrap}>
                     {isConversationsLoading && (
@@ -1208,7 +1579,8 @@ const MessagingScreen = () => {
                     {broadcastConversation && (
                       <TouchableOpacity
                         activeOpacity={0.9}
-                        onPress={() => handleMessagePress(GLOBAL_BROADCAST_CHANNEL_ID)}
+                        onPress={() => handleConversationPress(broadcastConversation)}
+                        disabled={!!navigatingToId}
                       >
                         <LinearGradient
                           colors={[withAlpha(accent, 0.2), withAlpha(accent, 0.06)]}
@@ -1278,6 +1650,63 @@ const MessagingScreen = () => {
                       </TouchableOpacity>
                     )}
 
+                    <View style={styles.liveRailContainer}>
+                      <View style={styles.liveRailHeaderRow}>
+                        <Text style={styles.liveRailTitle}>Live now</Text>
+                        <Text style={styles.liveRailHint}>Swipe to connect</Text>
+                      </View>
+
+                      <FlatList
+                        data={liveStreams}
+                        keyExtractor={(item) => String(item.id)}
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.liveRailListContent}
+                        ListEmptyComponent={
+                          liveLoading ? (
+                            <View style={styles.liveRailEmpty}>
+                              <ActivityIndicator color="#fff" />
+                              <Text style={styles.liveRailEmptyText}>Loading…</Text>
+                            </View>
+                          ) : (
+                            <View style={styles.liveRailEmpty}>
+                              <Text style={styles.liveRailEmptyText}>No lives right now</Text>
+                            </View>
+                          )
+                        }
+                        renderItem={({ item }) => (
+                          <TouchableOpacity
+                            activeOpacity={0.9}
+                            onPress={() =>
+                              router.push({
+                                pathname: '/social-feed/live/[id]',
+                                params: { id: String(item.id) },
+                              } as any)
+                            }
+                          >
+                            <LinearGradient
+                              colors={[withAlpha(accent, 0.22), withAlpha('#000', 0.65)]}
+                              start={{ x: 0, y: 0 }}
+                              end={{ x: 1, y: 1 }}
+                              style={styles.liveRailCard}
+                            >
+                              <View style={styles.liveRailBadge}>
+                                <View style={styles.liveRailDot} />
+                                <Text style={styles.liveRailBadgeText}>LIVE</Text>
+                              </View>
+
+                              <Text style={styles.liveRailCardTitle} numberOfLines={1}>
+                                {item.title || 'Live'}
+                              </Text>
+                              <Text style={styles.liveRailCardMeta} numberOfLines={1}>
+                                {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
+                              </Text>
+                            </LinearGradient>
+                          </TouchableOpacity>
+                        )}
+                      />
+                    </View>
+
                     <View style={styles.storiesContainer}>
                       <View style={styles.storiesHeaderRow}>
                         <Text style={styles.storiesTitle}>Stories</Text>
@@ -1295,6 +1724,14 @@ const MessagingScreen = () => {
                     </View>
                   </View>
                 }
+                ListFooterComponent={
+                  isLoadingMoreConvos ? (
+                    <View style={styles.fetchingBanner}>
+                      <ActivityIndicator color="#fff" size="small" />
+                      <Text style={styles.fetchingText}>Loading older conversations…</Text>
+                    </View>
+                  ) : null
+                }
                 contentContainerStyle={{
                   paddingTop: headerHeight,
                   paddingBottom: Platform.OS === 'ios' ? insets.bottom + 120 : insets.bottom + 100,
@@ -1305,7 +1742,7 @@ const MessagingScreen = () => {
           </View>
         )}
 
-        {conversations.length > 0 && <FAB onPress={openSheet} />}
+        {allConversations.length > 0 && <FAB onPress={openSheet} />}
 
         {spotlightConversation && spotlightRect && (
           <View style={styles.spotlightOverlay} pointerEvents="box-none">
@@ -1317,9 +1754,18 @@ const MessagingScreen = () => {
               <MessageItem
                 item={spotlightConversation}
                 currentUser={user}
-                onPress={() => {
+                otherProfile={(() => {
+                  const uid = user?.uid
+                  const members = Array.isArray(spotlightConversation.members)
+                    ? spotlightConversation.members
+                    : []
+                  const otherId = uid ? members.find((m) => m && m !== uid) : null
+                  return otherId ? profileCache[String(otherId)] ?? null : null
+                })()}
+                pressDisabled={!!navigatingToId}
+                onPress={(conv) => {
                   handleCloseSpotlight()
-                  handleMessagePress(spotlightConversation.id)
+                  handleConversationPress(conv)
                 }}
                 onLongPress={() => {}}
                 onStartCall={handleStartCall}
@@ -1334,7 +1780,7 @@ const MessagingScreen = () => {
                   style={styles.spotlightPill}
                   onPress={() => {
                     handleCloseSpotlight()
-                    handleMessagePress(spotlightConversation.id)
+                    handleConversationPress(spotlightConversation)
                   }}
                 >
                   <Text style={styles.spotlightPillText}>Open</Text>
@@ -1381,8 +1827,10 @@ const MessagingScreen = () => {
           isVisible={isSheetVisible}
           onClose={() => setSheetVisible(false)}
           following={following}
+          suggestedPeople={suggestedPeople}
           onStartChat={handleStartChat}
           onCreateGroup={handleCreateGroup}
+          startingUserId={startingChatUserId}
         />
 
         <Modal
@@ -1432,8 +1880,9 @@ const MessagingScreen = () => {
                         activeOpacity={0.9}
                         onPress={() => {
                           setRequestSheetVisible(false)
-                          handleMessagePress(item.id)
+                          handleConversationPress(item)
                         }}
+                        disabled={!!navigatingToId}
                       >
                         <Text style={styles.requestName} numberOfLines={1}>
                           {name}
@@ -1882,6 +2331,94 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '700',
     fontSize: 13,
+  },
+
+  liveRailContainer: {
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    backgroundColor: 'transparent',
+    marginBottom: 8,
+  },
+  liveRailHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingHorizontal: 2,
+  },
+  liveRailTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#fff',
+    marginLeft: 2,
+    letterSpacing: 0.2,
+  },
+  liveRailHint: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.5)',
+    marginRight: 6,
+  },
+  liveRailListContent: {
+    paddingLeft: 4,
+    paddingRight: 6,
+  },
+  liveRailCard: {
+    width: 180,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    overflow: 'hidden',
+  },
+  liveRailBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+    marginBottom: 10,
+  },
+  liveRailDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#e50914',
+  },
+  liveRailBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+  liveRailCardTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  liveRailCardMeta: {
+    marginTop: 6,
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  liveRailEmpty: {
+    height: 56,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 10,
+  },
+  liveRailEmptyText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontWeight: '700',
   },
 
   storiesContainer: {

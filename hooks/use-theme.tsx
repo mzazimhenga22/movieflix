@@ -1,7 +1,7 @@
 // hooks/use-theme.tsx
-import React, { createContext, useState, useContext, useEffect, useMemo, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { ThemeProvider, DarkTheme, Theme } from '@react-navigation/native';
+import { DarkTheme, Theme, ThemeProvider } from '@react-navigation/native';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 // keys
 const THEME_ACCENT_KEY = 'theme_accent';
@@ -15,7 +15,7 @@ type ThemeContextType = {
 
 const ThemeContext = createContext<ThemeContextType>({
   theme: DarkTheme,
-  changeTheme: async () => {},
+  changeTheme: async () => { },
 });
 
 export const useThemeContext = () => useContext(ThemeContext);

@@ -6,8 +6,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 
 import ScreenWrapper from '@/components/ScreenWrapper';
-import { Ionicons } from '@expo/vector-icons';
+import { getFlixySettings, setFlixySettings, type FlixySettings } from '@/lib/flixySettings';
 import { getProfileScopedKey, getStoredActiveProfile } from '@/lib/profileStorage';
+import { Ionicons } from '@expo/vector-icons';
 
 type MovieSettings = {
   proxyStreams: boolean;
@@ -64,7 +65,12 @@ const SettingsScreen: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [movieSettings, setMovieSettings] = useState<MovieSettings>(DEFAULT_MOVIE_SETTINGS);
   const [socialSettings, setSocialSettings] = useState<SocialSettings>(DEFAULT_SOCIAL_SETTINGS);
-  const [open, setOpen] = useState<{ movies: boolean; social: boolean }>({ movies: true, social: false });
+  const [flixySettings, setFlixySettingsState] = useState<FlixySettings>({
+    assistantEnabled: true,
+    voiceEnabled: true,
+    autoShowTips: true,
+  });
+  const [open, setOpen] = useState<{ movies: boolean; social: boolean; flixy: boolean }>({ movies: true, social: false, flixy: false });
 
   const movieRows = useMemo(
     () => [
@@ -118,6 +124,30 @@ const SettingsScreen: React.FC = () => {
     [],
   );
 
+  const flixyRows = useMemo(
+    () => [
+      {
+        key: 'assistantEnabled' as const,
+        title: 'Show Flixy assistant',
+        subtitle: 'Display Flixy helper on screens with tips and suggestions.',
+        icon: 'sparkles',
+      },
+      {
+        key: 'voiceEnabled' as const,
+        title: 'Voice activation',
+        subtitle: 'Enable "Hey Flixy" voice commands.',
+        icon: 'mic',
+      },
+      {
+        key: 'autoShowTips' as const,
+        title: 'Auto-show tips',
+        subtitle: 'Flixy automatically shows tips as you navigate.',
+        icon: 'bulb',
+      },
+    ],
+    [],
+  );
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
@@ -155,6 +185,10 @@ const SettingsScreen: React.FC = () => {
 
       setMovieSettings(nextMovie);
       setSocialSettings(nextSocial);
+
+      // Load Flixy settings
+      const flixy = await getFlixySettings();
+      setFlixySettingsState(flixy);
     } finally {
       setLoading(false);
     }
@@ -209,6 +243,33 @@ const SettingsScreen: React.FC = () => {
     } catch (err) {
       console.warn('Failed to reset social settings', err);
       Alert.alert('Error', 'Failed to reset social settings.');
+    }
+  }, []);
+
+  const setFlixyOne = useCallback(async <K extends keyof FlixySettings>(key: K, value: FlixySettings[K]) => {
+    setFlixySettingsState((prev) => ({ ...prev, [key]: value }));
+    try {
+      await setFlixySettings({ [key]: value });
+    } catch (err) {
+      console.warn('Failed to persist Flixy setting', key, err);
+    }
+  }, []);
+
+  const resetFlixyDefaults = useCallback(async () => {
+    try {
+      await setFlixySettings({
+        assistantEnabled: true,
+        voiceEnabled: true,
+        autoShowTips: true,
+      });
+      setFlixySettingsState({
+        assistantEnabled: true,
+        voiceEnabled: true,
+        autoShowTips: true,
+      });
+    } catch (err) {
+      console.warn('Failed to reset Flixy settings', err);
+      Alert.alert('Error', 'Failed to reset Flixy settings.');
     }
   }, []);
 
@@ -329,6 +390,42 @@ const SettingsScreen: React.FC = () => {
                 );
               })}
             </SectionCard>
+
+            {/* Flixy Assistant Settings */}
+            <SectionCard
+              title="Flixy Assistant"
+              subtitle="Your movie companion settings"
+              isOpen={open.flixy}
+              onToggle={() => setOpen((prev) => ({ ...prev, flixy: !prev.flixy }))}
+              onReset={() => void resetFlixyDefaults()}
+            >
+              {flixyRows.map((row) => {
+                const value = Boolean(flixySettings[row.key]);
+                return (
+                  <View key={row.key} style={styles.row}>
+                    <View style={styles.rowText}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Ionicons name={row.icon as any} size={16} color="#e50914" />
+                        <Text style={styles.rowTitle}>{row.title}</Text>
+                      </View>
+                      <Text style={styles.rowSubtitle}>{row.subtitle}</Text>
+                    </View>
+                    <Switch
+                      value={value}
+                      onValueChange={(next) => void setFlixyOne(row.key, next as any)}
+                      trackColor={{ false: 'rgba(255,255,255,0.2)', true: 'rgba(229,9,20,0.55)' }}
+                      thumbColor={value ? '#e50914' : '#ffffff'}
+                    />
+                  </View>
+                );
+              })}
+              <View style={styles.flixyNote}>
+                <Ionicons name="information-circle" size={16} color="rgba(255,255,255,0.5)" />
+                <Text style={styles.flixyNoteText}>
+                  Note: The app walkthrough is always shown for first-time users regardless of this setting.
+                </Text>
+              </View>
+            </SectionCard>
           </>
         )}
       </ScrollView>
@@ -396,6 +493,21 @@ const styles = StyleSheet.create({
   rowText: { flex: 1, minWidth: 0 },
   rowTitle: { color: '#fff', fontSize: 15, fontWeight: '700' },
   rowSubtitle: { color: 'rgba(255,255,255,0.65)', fontSize: 12, marginTop: 4 },
+  flixyNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 12,
+    marginTop: 4,
+  },
+  flixyNoteText: {
+    flex: 1,
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    lineHeight: 18,
+  },
 });
 
 export default SettingsScreen;

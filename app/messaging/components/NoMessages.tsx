@@ -1,17 +1,20 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, FlatList } from 'react-native';
 import { BlurView } from 'expo-blur';
 import SuggestedPerson from './SuggestedPerson';
 import { useRouter } from 'expo-router';
-import { Profile } from '../messagesController';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Profile } from '../controller';
 
 interface Props {
   suggestedPeople: Profile[];
   onStartChat: (person: Profile) => void;
+  startingUserId?: string | null;
   headerHeight: number;
 }
 
-const NoMessages = ({ suggestedPeople, onStartChat, headerHeight }: Props) => {
+const NoMessages = ({ suggestedPeople, onStartChat, startingUserId, headerHeight }: Props) => {
   const router = useRouter();
 
   const handleProfilePress = (userId: string) => {
@@ -21,20 +24,38 @@ const NoMessages = ({ suggestedPeople, onStartChat, headerHeight }: Props) => {
   return (
     <View style={[styles.noMessagesContainer, { paddingTop: headerHeight + 20 }]}>
       <BlurView intensity={60} tint="dark" style={styles.card}>
-        <Text style={styles.noMessagesTitle}>No messages yet</Text>
-        <Text style={styles.noMessagesSubtitle}>
-          Start with people you follow or those popular in Movieflix
-        </Text>
+        <LinearGradient
+          colors={['rgba(229,9,20,0.22)', 'rgba(255,255,255,0.04)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.cardGlow}
+        />
+
+        <View style={styles.headerRow}>
+          <View style={styles.headerIcon}>
+            <Ionicons name="chatbubbles-outline" size={18} color="#fff" />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.noMessagesTitle}>No messages yet</Text>
+            <Text style={styles.noMessagesSubtitle}>
+              Start a chat with someone you follow.
+            </Text>
+          </View>
+        </View>
 
         <FlatList
           data={suggestedPeople}
           renderItem={({ item }) => (
-            <TouchableOpacity onPress={() => handleProfilePress(item.id)}>
-              <SuggestedPerson item={item} onStartChat={onStartChat} />
-            </TouchableOpacity>
+            <SuggestedPerson
+              item={item}
+              onPressProfile={() => handleProfilePress(item.id)}
+              onStartChat={onStartChat}
+              busy={startingUserId === item.id}
+              disabled={!!startingUserId}
+            />
           )}
           keyExtractor={i => i.id}
-          contentContainerStyle={{ paddingTop: 18, paddingHorizontal: 12 }}
+          contentContainerStyle={{ paddingTop: 14, paddingHorizontal: 12, paddingBottom: 10 }}
           showsVerticalScrollIndicator={false}
         />
       </BlurView>
@@ -51,6 +72,7 @@ const styles = StyleSheet.create({
     width: '92%',
     borderRadius: 20,
     paddingVertical: 18,
+    paddingHorizontal: 6,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -58,6 +80,27 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 8 },
+    overflow: 'hidden',
+  },
+  cardGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.9,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+  },
+  headerIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   noMessagesTitle: {
     fontSize: 22,
@@ -66,10 +109,8 @@ const styles = StyleSheet.create({
   },
   noMessagesSubtitle: {
     fontSize: 14,
-    color: '#bdbdbd',
-    marginTop: 8,
-    textAlign: 'center',
-    paddingHorizontal: 30,
+    color: 'rgba(255,255,255,0.72)',
+    marginTop: 6,
   },
 });
 

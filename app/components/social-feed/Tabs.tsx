@@ -1,15 +1,14 @@
+import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useRef } from 'react';
 import {
   Animated,
+  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
-  ViewStyle,
-  TextStyle,
-  AccessibilityRole,
-  Platform,
 } from 'react-native';
 
 type Tab = 'Feed' | 'Recommended' | 'Live' | 'Movie Match';
@@ -19,212 +18,196 @@ interface Props {
   onChangeTab: (tab: Tab) => void;
 }
 
-const tabs: Tab[] = ['Feed', 'Recommended', 'Live', 'Movie Match'];
+const tabConfig: { key: Tab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { key: 'Feed', label: 'Feed', icon: 'home' },
+  { key: 'Recommended', label: 'For You', icon: 'sparkles' },
+  { key: 'Live', label: 'Live', icon: 'radio' },
+  { key: 'Movie Match', label: 'Match', icon: 'heart' },
+];
 
 export default function FeedTabs({ active, onChangeTab }: Props) {
-  // value 0..1 used to animate active indicator
-  const anim = useRef(new Animated.Value(0)).current;
+  const indicatorAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnims = useRef(tabConfig.map(() => new Animated.Value(1))).current;
 
   useEffect(() => {
-    anim.setValue(0);
-    Animated.timing(anim, {
-      toValue: 1,
-      duration: 260,
+    const activeIndex = tabConfig.findIndex((t) => t.key === active);
+    Animated.spring(indicatorAnim, {
+      toValue: activeIndex,
+      tension: 80,
+      friction: 12,
       useNativeDriver: true,
     }).start();
-  }, [active, anim]);
+
+    // Scale animation for active tab
+    scaleAnims.forEach((anim, i) => {
+      Animated.spring(anim, {
+        toValue: i === activeIndex ? 1.05 : 1,
+        tension: 100,
+        friction: 10,
+        useNativeDriver: true,
+      }).start();
+    });
+  }, [active]);
+
+  const tabWidth = 80;
+  const containerPadding = 6;
 
   return (
     <View style={styles.wrapper}>
-      <View style={styles.container} accessibilityRole="tablist">
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.scrollInner}
+      {/* Liquid glass container */}
+      <View style={styles.glassContainer}>
+        {Platform.OS === 'ios' ? (
+          <BlurView intensity={25} tint="dark" style={styles.blurFill} />
+        ) : (
+          <View style={styles.androidGlass} />
+        )}
+
+        {/* Animated indicator */}
+        <Animated.View
+          style={[
+            styles.indicator,
+            {
+              width: tabWidth,
+              transform: [
+                {
+                  translateX: indicatorAnim.interpolate({
+                    inputRange: tabConfig.map((_, i) => i),
+                    outputRange: tabConfig.map((_, i) => containerPadding + i * tabWidth),
+                  }),
+                },
+              ],
+            },
+          ]}
         >
-          {tabs.map((tab) => {
-            const isActive = tab === active;
-            const accessibleRole: AccessibilityRole = 'tab';
+          <LinearGradient
+            colors={['rgba(229,9,20,0.9)', 'rgba(255,107,53,0.8)']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.indicatorGradient}
+          />
+          {/* Shine effect */}
+          <View style={styles.indicatorShine} />
+        </Animated.View>
+
+        {/* Tab buttons */}
+        <View style={styles.tabsRow}>
+          {tabConfig.map((tab, index) => {
+            const isActive = tab.key === active;
 
             return (
               <Pressable
-                key={tab}
-                onPress={() => onChangeTab(tab)}
-                style={({ pressed }) => [
-                  styles.tabBtn,
-                  isActive && styles.tabBtnActive,
-                  pressed && styles.tabPressed,
-                ]}
-                accessibilityRole={accessibleRole}
+                key={tab.key}
+                onPress={() => onChangeTab(tab.key)}
+                style={[styles.tabBtn, { width: tabWidth }]}
+                accessibilityRole="tab"
                 accessibilityState={{ selected: isActive }}
-                accessibilityLabel={`${tab} tab`}
+                accessibilityLabel={`${tab.label} tab`}
               >
-                <Text
-                  style={[styles.tabText, isActive && styles.tabTextActive]}
-                  numberOfLines={1}
-                  ellipsizeMode="tail"
-                  maxFontSizeMultiplier={1.2}
-                >
-                  {tab}
-                </Text>
-
-                {/* Animated glassy indicator */}
                 <Animated.View
-                  pointerEvents="none"
                   style={[
-                    styles.activeIndicator,
-                    isActive
-                      ? {
-                          opacity: anim,
-                          transform: [
-                            {
-                              scaleX: anim.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: [0.85, 1],
-                              }),
-                            },
-                            {
-                              translateY: anim.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: [6, 0],
-                              }),
-                            },
-                          ],
-                        }
-                      : { opacity: 0.0, transform: [{ scale: 0.85 }, { translateY: 6 }] },
+                    styles.tabContent,
+                    { transform: [{ scale: scaleAnims[index] }] },
                   ]}
                 >
-                  {/* inner highlight to sell the glass look */}
-                  <View style={styles.indicatorInner} />
+                  <Ionicons
+                    name={tab.icon}
+                    size={18}
+                    color={isActive ? '#fff' : 'rgba(255,255,255,0.5)'}
+                  />
+                  <Text
+                    style={[styles.tabText, isActive && styles.tabTextActive]}
+                    numberOfLines={1}
+                  >
+                    {tab.label}
+                  </Text>
                 </Animated.View>
               </Pressable>
             );
           })}
-        </ScrollView>
+        </View>
+
+        {/* Glass border highlights */}
+        <View style={styles.borderTop} />
+        <View style={styles.borderBottom} />
       </View>
     </View>
   );
 }
 
-type Style = {
-  wrapper: ViewStyle;
-  container: ViewStyle;
-  scrollInner: ViewStyle;
-  tabBtn: ViewStyle;
-  tabBtnActive: ViewStyle;
-  tabPressed: ViewStyle;
-  tabText: TextStyle;
-  tabTextActive: TextStyle;
-  activeIndicator: ViewStyle;
-  indicatorInner: ViewStyle;
-};
-
-const styles = StyleSheet.create<Style>({
+const styles = StyleSheet.create({
   wrapper: {
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    // keep wrapper transparent so the glass blends with background
-    backgroundColor: 'transparent',
+    paddingVertical: 6,
   },
-  container: {
-    // subtle frosted panel using translucent fills + thin border
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 16,
-    padding: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-    // soft outer shadow for depth
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 10 },
-        shadowOpacity: 0.06,
-        shadowRadius: 24,
-      },
-      android: {
-        elevation: 2,
-      },
-      default: {},
-    }),
+  glassContainer: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    position: 'relative',
   },
-  scrollInner: {
+  blurFill: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  androidGlass: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(20,20,30,0.85)',
+  },
+  borderTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  borderBottom: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+  },
+  indicator: {
+    position: 'absolute',
+    top: 6,
+    bottom: 6,
+    borderRadius: 14,
+    overflow: 'hidden',
+    zIndex: 0,
+  },
+  indicatorGradient: {
+    flex: 1,
+  },
+  indicatorShine: {
+    position: 'absolute',
+    top: 2,
+    left: 8,
+    width: 24,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
+  tabsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    columnGap: 8,
-    paddingHorizontal: 2,
+    padding: 6,
+    zIndex: 1,
   },
   tabBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    minWidth: 92,
-    backgroundColor: 'transparent',
   },
-  tabBtnActive: {
-    // slightly stronger glass fill on active
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    // faint glow using a colored shadow to hint brand accent
-    ...Platform.select({
-      ios: {
-        shadowColor: 'rgba(255,61,61,0.12)',
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 1,
-        shadowRadius: 14,
-      },
-      android: {
-        elevation: 3,
-      },
-      default: {},
-    }),
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.04)',
-  },
-  tabPressed: {
-    opacity: 0.85,
-    transform: [{ scale: 0.995 }],
+  tabContent: {
+    alignItems: 'center',
+    gap: 2,
   },
   tabText: {
-    color: '#d7d7d7',
-    fontSize: 13,
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.1,
   },
   tabTextActive: {
-    color: '#7dd8ff', // warm accent color
-    fontSize: 14,
+    color: '#fff',
     fontWeight: '700',
-  },
-  activeIndicator: {
-    marginTop: 8,
-    width: 36,
-    height: 8,
-    borderRadius: 999,
-    // glassy base: translucent bright pill
-    backgroundColor: 'rgba(125,216,255,0.12)',
-    alignSelf: 'center',
-    // subtle outer glow
-    ...Platform.select({
-      ios: {
-        shadowColor: 'rgba(125,216,255,0.12)',
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 1,
-        shadowRadius: 12,
-      },
-      android: {
-        elevation: 1,
-      },
-      default: {},
-    }),
-    overflow: 'hidden',
-  },
-  indicatorInner: {
-    flex: 1,
-    margin: 1,
-    borderRadius: 999,
-    // inner highlight gradient mimic (lighter center)
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    opacity: 0.95,
   },
 });

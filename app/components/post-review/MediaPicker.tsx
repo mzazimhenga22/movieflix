@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   StyleSheet,
@@ -9,6 +9,7 @@ import {
   FlatList,
   Image,
   Platform,
+  InteractionManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -34,9 +35,22 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [recentMedia, setRecentMedia] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<'grid' | 'camera'>('grid');
+  const [facing, setFacing] = useState<'back' | 'front'>('back');
+  const [cameraReady, setCameraReady] = useState(false);
+
+  const cameraRef = useRef<any>(null);
+  const mountedRef = useRef(true);
+  const pickerInFlightRef = useRef(false);
 
   useEffect(() => {
     requestPermissions();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -81,8 +95,20 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
     }
   };
 
-  const pickFromGallery = async () => {
+  const pickFromGallery = useCallback(async () => {
+    if (pickerInFlightRef.current) return;
+    pickerInFlightRef.current = true;
     try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permission.status !== 'granted') {
+        Alert.alert('Permission required', 'Media access is needed to pick a photo or video.');
+        return;
+      }
+
+      // Avoid launching while navigation/gestures are still settling (Android can reject).
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => InteractionManager.runAfterInteractions(() => resolve()));
+
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
         allowsEditing: false,
@@ -90,39 +116,46 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
         allowsMultipleSelection: false,
       });
 
+      if (!mountedRef.current) return;
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const asset = result.assets[0];
         const mediaType = asset.type === 'video' ? 'video' : 'image';
         onMediaPicked(asset.uri, mediaType);
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to pick media from gallery');
+      Alert.alert('Error', 'Failed to open your media library.');
+    } finally {
+      pickerInFlightRef.current = false;
     }
-  };
+  }, [onMediaPicked]);
 
-  const pickFromCamera = async () => {
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission required', 'Camera access is needed to take a photo or video.');
+  const openCamera = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('Not supported', 'Camera is not available on web in this view.');
+      return;
+    }
+    if (!cameraPermission?.granted) {
+      const next = await requestCameraPermission();
+      if (next?.granted !== true) {
+        Alert.alert('Permission required', 'Camera access is needed to take a photo.');
         return;
       }
-
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.All,
-        allowsEditing: false,
-        quality: 1,
-      });
-
-      if (!result.canceled && result.assets.length > 0) {
-        const asset = result.assets[0];
-        const type: 'image' | 'video' = asset.type === 'video' ? 'video' : 'image';
-        onMediaPicked(asset.uri, type);
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Could not open the camera.');
     }
-  };
+    setCameraReady(false);
+    setMode('camera');
+  }, [cameraPermission?.granted, requestCameraPermission]);
+
+  const takePhoto = useCallback(async () => {
+    if (!cameraReady) return;
+    try {
+      const pic = await cameraRef.current?.takePictureAsync({ quality: 0.9 });
+      const uri = pic?.uri;
+      if (!uri || !mountedRef.current) return;
+      onMediaPicked(uri, 'image');
+    } catch {
+      Alert.alert('Error', 'Could not take a photo.');
+    }
+  }, [cameraReady, onMediaPicked]);
 
   const handleMediaSelect = (media: MediaItem) => {
     onMediaPicked(media.uri, media.type);
@@ -201,7 +234,14 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
 
   return (
     <View style={styles.container}>
-      {cameraPermission?.granted ? (
+      {mode === 'camera' ? (
+        <CameraView
+          ref={cameraRef}
+          style={StyleSheet.absoluteFillObject}
+          facing={facing}
+          onCameraReady={() => setCameraReady(true)}
+        />
+      ) : cameraPermission?.granted ? (
         <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
       ) : (
         <LinearGradient
@@ -238,21 +278,66 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
           style={styles.headerGlow}
         />
         <View style={styles.headerBar}>
-          <TouchableOpacity onPress={onClose} style={styles.iconBtn} accessibilityLabel="Close">
-            <Ionicons name="close" size={22} color="#fff" />
+          <TouchableOpacity
+            onPress={() => {
+              if (mode === 'camera') {
+                setMode('grid');
+                return;
+              }
+              onClose();
+            }}
+            style={styles.iconBtn}
+            accessibilityLabel={mode === 'camera' ? 'Back' : 'Close'}
+          >
+            <Ionicons name={mode === 'camera' ? 'chevron-back' : 'close'} size={22} color="#fff" />
           </TouchableOpacity>
           <View style={styles.headerTitleWrap}>
             <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
-              Create Post
+              {mode === 'camera' ? 'Camera' : 'Create Post'}
             </Text>
           </View>
-          <TouchableOpacity onPress={pickFromGallery} style={styles.iconBtn} accessibilityLabel="Open gallery">
-            <Ionicons name="images" size={20} color="#fff" />
-          </TouchableOpacity>
+          {mode === 'camera' ? (
+            <TouchableOpacity
+              onPress={() => setFacing((v) => (v === 'back' ? 'front' : 'back'))}
+              style={styles.iconBtn}
+              accessibilityLabel="Flip camera"
+            >
+              <Ionicons name="camera-reverse" size={20} color="#fff" />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity onPress={pickFromGallery} style={styles.iconBtn} accessibilityLabel="Open gallery">
+              <Ionicons name="images" size={20} color="#fff" />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
-      {loading ? (
+      {mode === 'camera' ? (
+        <View style={[styles.cameraBottomBar, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
+          <TouchableOpacity style={styles.cameraSideBtn} onPress={pickFromGallery} activeOpacity={0.9}>
+            <Ionicons name="images" size={22} color="#fff" />
+            <Text style={styles.cameraSideText}>Library</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.shutterOuter, !cameraReady && { opacity: 0.6 }]}
+            onPress={takePhoto}
+            activeOpacity={0.9}
+            disabled={!cameraReady}
+          >
+            <View style={styles.shutterInner} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cameraSideBtn}
+            onPress={() => setFacing((v) => (v === 'back' ? 'front' : 'back'))}
+            activeOpacity={0.9}
+          >
+            <Ionicons name="camera-reverse" size={22} color="#fff" />
+            <Text style={styles.cameraSideText}>Flip</Text>
+          </TouchableOpacity>
+        </View>
+      ) : loading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#fff" />
           <Text style={styles.loadingText}>Loading recent photos...</Text>
@@ -276,7 +361,7 @@ export default function MediaPicker({ onMediaPicked, onClose }: MediaPickerProps
           />
 
           <View style={[styles.bottomBar, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
-            <TouchableOpacity style={styles.bottomPill} onPress={pickFromCamera} activeOpacity={0.9}>
+            <TouchableOpacity style={styles.bottomPill} onPress={openCamera} activeOpacity={0.9}>
               <Ionicons name="camera" size={20} color="#fff" />
               <Text style={styles.bottomPillText}>Camera</Text>
             </TouchableOpacity>
@@ -572,5 +657,48 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     letterSpacing: 0.2,
+  },
+
+  cameraBottomBar: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 0,
+    paddingTop: 10,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+  },
+  cameraSideBtn: {
+    width: 86,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 16,
+    backgroundColor: 'rgba(5,6,15,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  cameraSideText: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  shutterOuter: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    borderWidth: 4,
+    borderColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  shutterInner: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#fff',
   },
 });

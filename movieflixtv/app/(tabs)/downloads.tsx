@@ -241,6 +241,8 @@ export default function DownloadsTv() {
                         </Text>
                         <View style={styles.activeControls}>
                           <TvFocusable
+                            isTVSelectable={true}
+                            accessibilityLabel={paused ? 'Resume' : 'Pause'}
                             onPress={() => {
                               if (paused) {
                                 setActiveDownloads((prev) =>
@@ -259,6 +261,8 @@ export default function DownloadsTv() {
                             <Ionicons name={paused ? 'play' : 'pause'} size={16} color="#fff" />
                           </TvFocusable>
                           <TvFocusable
+                            isTVSelectable={true}
+                            accessibilityLabel="Cancel"
                             onPress={() => {
                               setActiveDownloads((prev) => prev.filter((e) => e.sessionId !== item.sessionId));
                               void cancelDownload(item.sessionId);
@@ -299,8 +303,19 @@ export default function DownloadsTv() {
               </View>
             ) : downloads.length === 0 ? (
               <View style={styles.center}>
+                <Ionicons name="cloud-download-outline" size={48} color="rgba(255,255,255,0.4)" />
                 <Text style={styles.centerTitle}>No downloads yet</Text>
                 <Text style={styles.centerText}>Open a title and choose Download.</Text>
+                <TvFocusable
+                  onPress={() => router.push('/(tabs)/movies')}
+                  tvPreferredFocus
+                  isTVSelectable={true}
+                  accessibilityLabel="Browse Movies"
+                  style={({ focused }: any) => [styles.browseBtn, focused && styles.browseBtnFocused]}
+                >
+                  <Ionicons name="film-outline" size={18} color="#fff" />
+                  <Text style={styles.browseBtnText}>Browse Movies</Text>
+                </TvFocusable>
               </View>
             ) : (
               <FlatList
@@ -330,6 +345,8 @@ export default function DownloadsTv() {
                       <View style={styles.itemActions}>
                         <TvFocusable
                           onPress={() => void play(item)}
+                          isTVSelectable={true}
+                          accessibilityLabel="Play"
                           style={({ focused }: any) => [styles.actionBtn, focused ? styles.actionBtnFocused : null]}
                         >
                           <Ionicons name="play" size={16} color="#fff" />
@@ -337,6 +354,8 @@ export default function DownloadsTv() {
                         </TvFocusable>
                         <TvFocusable
                           onPress={() => confirmDelete(item)}
+                          isTVSelectable={true}
+                          accessibilityLabel="Remove"
                           style={({ focused }: any) => [
                             styles.actionBtn,
                             styles.actionBtnDanger,
@@ -360,11 +379,11 @@ export default function DownloadsTv() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  shell: { flex: 1, paddingLeft: 0, paddingRight: 34, paddingTop: 22, paddingBottom: 22, alignItems: 'center' },
-  panel: { flex: 1, width: '100%', maxWidth: 1520 },
-  panelInner: { flex: 1, padding: 18 },
-  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 18, paddingHorizontal: 6, paddingBottom: 14 },
+  container: { flex: 1, backgroundColor: '#030408' },
+  shell: { flex: 1, paddingLeft: 108, paddingRight: 40, paddingTop: 28, paddingBottom: 28, alignItems: 'center' },
+  panel: { flex: 1, width: '100%', maxWidth: 1560 },
+  panelInner: { flex: 1, padding: 22 },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 20, paddingHorizontal: 8, paddingBottom: 18 },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   titleStack: { minWidth: 0 },
   title: { color: '#fff', fontSize: 18, fontWeight: '900' },
@@ -416,9 +435,36 @@ const styles = StyleSheet.create({
   progressFill: { height: '100%', backgroundColor: '#e50914' },
   progressText: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: '800', marginTop: 6 },
 
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  centerTitle: { color: '#fff', fontSize: 26, fontWeight: '900', marginBottom: 8 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  centerTitle: { color: '#fff', fontSize: 26, fontWeight: '900', marginTop: 12 },
   centerText: { color: 'rgba(255,255,255,0.75)', fontSize: 16, fontWeight: '700' },
+  browseBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: 'rgba(229,9,20,0.8)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  browseBtnFocused: {
+    transform: [{ scale: 1.08 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  browseBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '900',
+  },
 
   grid: { paddingHorizontal: 6, paddingTop: 6, paddingBottom: 18 },
   gridRow: { gap: 14 },

@@ -45,8 +45,8 @@ serve(async (req: Request) => {
   const fileName = (Deno.env.get('APK_FILENAME') ?? 'MovieFlix-latest.apk').trim();
   if (explicit) return redirect(explicit, fileName);
 
-  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim();
-  if (githubRepo) {
+  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim() || 'mzazimhenga22/movieflix';
+  try {
     const token = (Deno.env.get('GITHUB_TOKEN') ?? '').trim() || null;
     const tag = (Deno.env.get('GITHUB_RELEASE_TAG') ?? '').trim() || null;
     const assetName = (Deno.env.get('APK_GITHUB_ASSET_NAME') ?? Deno.env.get('GITHUB_RELEASE_ASSET_NAME') ?? '').trim() || null;
@@ -62,11 +62,11 @@ serve(async (req: Request) => {
       cacheTtlMs,
     });
 
-    if (!asset?.browser_download_url) {
-      return jsonResponse({ error: 'No APK asset found on GitHub release' }, 502);
+    if (asset?.browser_download_url) {
+      return redirect(asset.browser_download_url, asset.name || fileName);
     }
-
-    return redirect(asset.browser_download_url, asset.name || fileName);
+  } catch (err) {
+    console.error('[download-apk] github release lookup failed', err);
   }
 
   // Otherwise, use Supabase Storage signed URL.

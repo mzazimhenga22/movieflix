@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, FlatList, StyleSheet, Image, SafeAreaView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, doc, getDoc, getDocs, orderBy, query, updateDoc, where, increment } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, orderBy, query, runTransaction, serverTimestamp, updateDoc, where, increment } from 'firebase/firestore';
 import { firestore } from '../../constants/firebase';
+import { useUser } from '../../hooks/use-user';
 import { findOrCreateConversation, findUserByUsername } from '../messaging/controller';
 
 type FeedPost = {
@@ -14,6 +15,7 @@ type FeedPost = {
   likes: number;
   commentsCount: number;
   liked: boolean;
+  likerIds?: string[];
 };
 
 type FeedAuthor = {
@@ -32,10 +34,13 @@ const EMOJIS = ["??", "??", "??", "??", "??"];
 const FeedScreen = () => {
   const { username } = useLocalSearchParams();
   const router = useRouter();
+  const { user: viewer } = useUser();
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [author, setAuthor] = useState<FeedAuthor | null>(null);
   const [reactions, setReactions] = useState<Record<string, PostReactions>>({});
+
+  const likeInFlightRef = useRef<Set<string>>(new Set());
 
   const userId = typeof username === 'string' ? username : Array.isArray(username) ? username[0] : undefined;
 
@@ -76,16 +81,20 @@ const FeedScreen = () => {
         );
         const snapshot = await getDocs(q);
 
+        const uid = viewer?.uid ? String(viewer.uid) : null;
         const items: FeedPost[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data() as any;
+          const likerIds = Array.isArray(data?.likerIds) ? data.likerIds.map(String) : [];
+          const liked = uid ? likerIds.includes(uid) : false;
           return {
             id: docSnap.id,
             userId,
             image: data.type === 'video' ? null : data.mediaUrl || null,
             caption: data.review || data.title || '',
-            likes: data.likes ?? 0,
+            likes: typeof data.likes === 'number' ? data.likes : likerIds.length,
+            likerIds,
             commentsCount: data.commentsCount ?? 0,
-            liked: false,
+            liked,
           };
         });
 
@@ -99,7 +108,7 @@ const FeedScreen = () => {
     };
 
     loadAuthorAndPosts();
-  }, [userId]);
+  }, [userId, viewer?.uid]);
 
     const handleSelectEmoji = (postId: string, emoji: string) => {
     setReactions(prev => {
@@ -121,27 +130,84 @@ const FeedScreen = () => {
   };
 
   const handleToggleLike = async (postId: string) => {
+    const uid = viewer?.uid ? String(viewer.uid) : null;
+    if (!uid) return;
+
+    if (likeInFlightRef.current.has(postId)) return;
+    likeInFlightRef.current.add(postId);
+
+    const current = posts.find((p) => p.id === postId);
+    if (!current) {
+      likeInFlightRef.current.delete(postId);
+      return;
+    }
+
+    const prevLiked = Boolean(current.liked);
+    const prevLikes = Number(current.likes ?? 0) || 0;
+    const prevLikerIds = Array.isArray(current.likerIds) ? current.likerIds : [];
+
+    const nextLiked = !prevLiked;
+    const delta = nextLiked ? 1 : -1;
+
+    // optimistic
     setPosts((prev) =>
-      prev.map((post) =>
-        post.id === postId
-          ? {
-              ...post,
-              liked: !post.liked,
-              likes: post.likes + (post.liked ? -1 : 1),
-            }
-          : post
-      )
+      prev.map((post) => {
+        if (post.id !== postId) return post;
+        const baseLikerIds = Array.isArray(post.likerIds) ? post.likerIds : [];
+        const nextLikerIds = nextLiked
+          ? Array.from(new Set([...baseLikerIds, uid]))
+          : baseLikerIds.filter((x) => x !== uid);
+        return {
+          ...post,
+          liked: nextLiked,
+          likes: Math.max(0, (Number(post.likes ?? 0) || 0) + delta),
+          likerIds: nextLikerIds,
+        };
+      })
     );
 
     try {
       const reviewRef = doc(firestore, 'reviews', postId);
-      const current = posts.find((p) => p.id === postId);
-      const goingToLike = current ? !current.liked : true;
-      await updateDoc(reviewRef, {
-        likes: increment(goingToLike ? 1 : -1),
+      const result = await runTransaction(firestore, async (tx) => {
+        const snap = await tx.get(reviewRef);
+        if (!snap.exists()) return null;
+        const data = snap.data() as any;
+
+        const likerIds = Array.isArray(data?.likerIds) ? data.likerIds.map(String) : [];
+        const currentlyLiked = likerIds.includes(uid);
+
+        if (currentlyLiked === nextLiked) {
+          const likesRaw = Number(data?.likes);
+          const safeLikes = Number.isFinite(likesRaw) ? likesRaw : likerIds.length;
+          return { liked: currentlyLiked, likes: Math.max(0, safeLikes), likerIds };
+        }
+
+        const nextLikerIds = nextLiked
+          ? Array.from(new Set([...likerIds, uid]))
+          : likerIds.filter((x) => x !== uid);
+        const likesRaw = Number(data?.likes);
+        const baseLikes = Number.isFinite(likesRaw) ? likesRaw : likerIds.length;
+        const nextLikes = Math.max(0, baseLikes + (nextLiked ? 1 : -1));
+
+        tx.update(reviewRef, {
+          likes: nextLikes,
+          likerIds: nextLikerIds,
+          updatedAt: serverTimestamp(),
+        });
+
+        return { liked: nextLiked, likes: nextLikes, likerIds: nextLikerIds };
       });
+
+      if (result) {
+        setPosts((prev) => prev.map((p) => (p.id === postId ? { ...p, ...result } : p)));
+      }
     } catch (err) {
       console.warn('Failed to update like count', err);
+      setPosts((prev) =>
+        prev.map((p) => (p.id === postId ? { ...p, liked: prevLiked, likes: prevLikes, likerIds: prevLikerIds } : p))
+      );
+    } finally {
+      likeInFlightRef.current.delete(postId);
     }
   };
 

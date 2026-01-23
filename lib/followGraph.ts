@@ -14,6 +14,7 @@ import {
 } from 'firebase/firestore';
 
 import { firestore } from '../constants/firebase';
+import { notifyPush } from './pushApi';
 
 export type SocialProfile = {
   id: string;
@@ -136,7 +137,7 @@ export const followUser = async (options: {
   });
 
   if (didFollow && options.notify) {
-    await addDoc(collection(firestore, 'notifications'), {
+    const ref = await addDoc(collection(firestore, 'notifications'), {
       type: 'follow',
       scope: 'social',
       channel: 'community',
@@ -148,6 +149,8 @@ export const followUser = async (options: {
       read: false,
       createdAt: serverTimestamp(),
     });
+
+    void notifyPush({ kind: 'notification', notificationId: ref.id });
   }
 
   return { didFollow };

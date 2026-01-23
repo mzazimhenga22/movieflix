@@ -13,7 +13,7 @@ export const scrapeImdbTrailer = async ({
 
   const headers = {
     'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     Accept: '*/*',
   };
 
@@ -26,10 +26,49 @@ export const scrapeImdbTrailer = async ({
     if (!titleRes.ok) return null;
     const titleHtml = await titleRes.text();
 
-    const videoIdMatch = titleHtml.match(/\/video\/(vi\d+)/);
-    if (!videoIdMatch) return null;
+    // Try multiple patterns to find video ID
+    let videoId = null;
+    const patterns = [
+      /\/video\/(vi\d+)/,
+      /\"video\":\s*\"(vi\d+)\"/,
+      /\"videoId\":\s*\"(vi\d+)\"/,
+      /data-video-id=\"(vi\d+)\"/,
+      /href=\"\/video\/(vi\d+)/
+    ];
 
-    const videoId = videoIdMatch[1];
+    for (const p of patterns) {
+      const m = titleHtml.match(p);
+      if (m) {
+        videoId = m[1];
+        break;
+      }
+    }
+
+    if (!videoId) {
+      // Fallback: Try /mediaindex (Video Gallery)
+      try {
+        const mediaRes = await fetch(`https://www.imdb.com/title/${imdb_id}/mediaindex`, {
+          headers,
+        });
+
+        if (mediaRes.ok) {
+          const mediaHtml = await mediaRes.text();
+          // Look for any video link
+          const m = mediaHtml.match(/\/video\/(vi\d+)/);
+          if (m) {
+            videoId = m[1];
+          } else {
+            // Try "related videos" pattern
+            const m2 = mediaHtml.match(/data-video-id=\"(vi\d+)\"/);
+            if (m2) videoId = m2[1];
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!videoId) return null;
 
     /** STEP 2 — Fetch embed page */
     const embedRes = await fetch(
@@ -72,13 +111,26 @@ export const scrapeImdbTrailer = async ({
       return null;
     }
 
-    /** STEP 4 — Prefer best format */
-    const preferred =
-      candidates.find((c) => c.type === 'hls') ||
-      candidates.find((c) => c.type === 'mp4') ||
-      candidates[0];
+    /** STEP 4 — Prefer best format & VALIDATE */
+    // Sort by preference first
+    const sorted = [
+      ...candidates.filter(c => c.type === 'hls'),
+      ...candidates.filter(c => c.type === 'mp4'),
+      ...candidates.filter(c => c.type !== 'hls' && c.type !== 'mp4')
+    ];
 
-    return preferred;
+    for (const candidate of sorted) {
+      try {
+        const check = await fetch(candidate.url, { method: 'HEAD', headers });
+        if (check.ok) {
+          return candidate;
+        }
+      } catch (e) {
+        console.warn('Trailer candidate check failed:', e);
+      }
+    }
+
+    return null;
   } catch (err) {
     console.error('IMDb trailer scrape failed:', err);
     return null;

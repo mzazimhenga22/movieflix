@@ -52,7 +52,13 @@ type PersistedJob = {
   qualityLabel?: string;
 
   destination?: string;
+  containerPath?: string;
   resumeData?: string | null;
+
+  bytesWritten?: number;
+  totalBytes?: number;
+  completedUnits?: number;
+  totalUnits?: number;
 };
 
 const QUEUE_KEY = 'downloadQueue';
@@ -65,6 +71,22 @@ const activeFileDownloads = new Map<string, FileSystem.DownloadResumable>();
 const cancelFlags = new Map<string, { mode: 'none' | 'pause' | 'cancel' }>();
 const activeJobs = new Set<string>();
 let pumping = false;
+
+const lastPersistBySession = new Map<string, { ts: number; progress: number }>();
+
+function shouldPersist(sessionId: string, progress?: number) {
+  const st = lastPersistBySession.get(sessionId) ?? { ts: 0, progress: -1 };
+  const now = Date.now();
+  const timeOk = now - st.ts > 12_000;
+  const ratioOk = typeof progress === 'number' ? Math.abs(progress - st.progress) >= 0.05 : false;
+  return timeOk || ratioOk;
+}
+
+async function persistProgressMaybe(sessionId: string, progress?: number) {
+  if (!shouldPersist(sessionId, progress)) return;
+  lastPersistBySession.set(sessionId, { ts: Date.now(), progress: typeof progress === 'number' ? progress : -1 });
+  await saveQueue();
+}
 
 async function getQueueStorageKey() {
   return getProfileScopedKey(QUEUE_KEY);
@@ -87,13 +109,103 @@ async function loadQueue() {
   });
 }
 
+async function reconcileCompletedJobs() {
+  const downloadsRoot = await ensureDownloadDir();
+
+  const stillQueued: PersistedJob[] = [];
+  for (const job of jobs) {
+    try {
+      if (job.downloadType === 'hls') {
+        const containerPath = job.containerPath ?? `${downloadsRoot}/${job.sessionId}`;
+        const playlistPath = job.destination ?? `${containerPath}/index.m3u8`;
+        const info = await FileSystem.getInfoAsync(playlistPath);
+        if (info.exists && !info.isDirectory) {
+          await persistDownloadRecord({
+            id: job.sessionId,
+            mediaId: job.mediaId,
+            title: job.title,
+            mediaType: job.mediaType,
+            subtitle: job.subtitle,
+            runtimeMinutes: job.runtimeMinutes,
+            releaseDate: job.releaseDate,
+            posterPath: job.posterPath,
+            backdropPath: job.backdropPath,
+            overview: job.overview,
+            seasonNumber: job.seasonNumber,
+            episodeNumber: job.episodeNumber,
+            sourceUrl: job.sourceUrl,
+            downloadType: 'hls',
+            localUri: playlistPath,
+            containerPath,
+            createdAt: job.createdAt,
+          } as any);
+          emit(job, 'completed', 1);
+          continue;
+        }
+      }
+
+      if (job.downloadType === 'file') {
+        const dest = job.destination;
+        if (dest && typeof job.totalBytes === 'number' && job.totalBytes > 0) {
+          const info = await FileSystem.getInfoAsync(dest);
+          const size = info.exists && !info.isDirectory ? Number(info.size ?? 0) : 0;
+          if (size >= job.totalBytes - 1024) {
+            await persistDownloadRecord({
+              id: job.sessionId,
+              mediaId: job.mediaId,
+              title: job.title,
+              mediaType: job.mediaType,
+              subtitle: job.subtitle,
+              runtimeMinutes: job.runtimeMinutes,
+              releaseDate: job.releaseDate,
+              posterPath: job.posterPath,
+              backdropPath: job.backdropPath,
+              overview: job.overview,
+              seasonNumber: job.seasonNumber,
+              episodeNumber: job.episodeNumber,
+              sourceUrl: job.sourceUrl,
+              downloadType: 'file',
+              localUri: dest,
+              containerPath: dest,
+              createdAt: job.createdAt,
+              bytesWritten: size,
+            } as any);
+            emit(job, 'completed', 1);
+            continue;
+          }
+        }
+      }
+    } catch {
+      // ignore and keep job
+    }
+
+    stillQueued.push(job);
+  }
+
+  if (stillQueued.length !== jobs.length) {
+    jobs = stillQueued;
+    await saveQueue();
+  }
+}
+
 function getAbortController(sessionId: string) {
   const state = cancelFlags.get(sessionId) ?? { mode: 'none' as const };
   cancelFlags.set(sessionId, state);
   return state;
 }
 
-function emit(job: PersistedJob, status: DownloadJobStatus, progress?: number, errorMessage?: string) {
+function emit(
+  job: PersistedJob,
+  status: DownloadJobStatus,
+  progress?: number,
+  errorMessage?: string,
+  progressExtras?: {
+    bytesWritten?: number;
+    totalBytes?: number;
+    completedUnits?: number;
+    totalUnits?: number;
+  },
+) {
   emitDownloadEvent({
     sessionId: job.sessionId,
     title: job.title,
@@ -115,6 +227,11 @@ function emit(job: PersistedJob, status: DownloadJobStatus, progress?: number, e
     progress,
     job.subtitle ?? null,
     errorMessage,
+    {
+      overview: job.overview ?? null,
+      posterPath: job.posterPath ?? null,
+      ...(progressExtras ?? null),
+    },
   );
 }
 
@@ -144,6 +261,12 @@ async function runJob(job: PersistedJob) {
   if (job.downloadType === 'hls') {
     const downloadsRoot = await ensureDownloadDir();
     const sessionName = job.sessionId;
+
+    const containerPath = job.containerPath ?? `${downloadsRoot}/${sessionName}`;
+    const playlistPath = job.destination ?? `${containerPath}/index.m3u8`;
+    updateJob(job.sessionId, { containerPath, destination: playlistPath });
+    await saveQueue();
+
     const res = await downloadHlsPlaylist({
       playlistUrl: job.sourceUrl,
       headers: job.headers,
@@ -157,14 +280,20 @@ async function runJob(job: PersistedJob) {
       onProgress: (completed, total) => {
         if (shouldAbort()) return;
         const progress = total > 0 ? completed / total : 0;
-        updateJob(job.sessionId, { progress });
-        emit(job, 'downloading', progress);
+        updateJob(job.sessionId, { progress, completedUnits: completed, totalUnits: total });
+        void persistProgressMaybe(job.sessionId, progress).catch(() => {});
+        emit(job, 'downloading', progress, undefined, {
+          completedUnits: completed,
+          totalUnits: total,
+        });
       },
     });
 
-    if (!res) throw new Error('HLS download failed');
+    // IMPORTANT: downloadHlsPlaylist returns null for any failure (including pause/cancel).
+    // Always check the abort mode first so pausing doesn't surface as an error and disappear from the UI.
     if (getAbortMode() === 'pause') throw new Error('Paused');
     if (getAbortMode() === 'cancel') throw new Error('Cancelled');
+    if (!res) throw new Error('HLS download failed');
 
     await persistDownloadRecord({
       id: job.sessionId,
@@ -203,8 +332,17 @@ async function runJob(job: PersistedJob) {
     if (shouldAbort()) return;
     if (progress.totalBytesExpectedToWrite > 0) {
       const ratio = progress.totalBytesWritten / progress.totalBytesExpectedToWrite;
-      updateJob(job.sessionId, { progress: ratio, destination });
-      emit(job, 'downloading', ratio);
+      updateJob(job.sessionId, {
+        progress: ratio,
+        destination,
+        bytesWritten: progress.totalBytesWritten,
+        totalBytes: progress.totalBytesExpectedToWrite,
+      });
+      void persistProgressMaybe(job.sessionId, ratio).catch(() => {});
+      emit(job, 'downloading', ratio, undefined, {
+        bytesWritten: progress.totalBytesWritten,
+        totalBytes: progress.totalBytesExpectedToWrite,
+      });
     }
   };
 
@@ -344,12 +482,19 @@ export async function initializeDownloadManager() {
   if (initialized) return;
   initialized = true;
   await loadQueue();
+  await reconcileCompletedJobs();
   for (const job of jobs) {
     if (job.status === 'queued' || job.status === 'paused') {
       emit(job, job.status, job.progress);
     }
   }
   void pumpQueue();
+}
+
+export async function tickDownloadQueue() {
+  await initializeDownloadManager();
+  void pumpQueue();
+  return jobs.some((j) => j.status === 'queued' || j.status === 'preparing' || j.status === 'downloading');
 }
 
 export async function enqueueDownload(params: QueueDownloadParams): Promise<string> {

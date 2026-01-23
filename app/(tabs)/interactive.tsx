@@ -14,6 +14,7 @@ import ScreenWrapper from '../../components/ScreenWrapper';
 import { getAccentFromPosterPath } from '../../constants/theme';
 import { useAccent } from '../components/AccentContext';
 import FeatureCard from '../components/interactive/FeatureCard';
+import { useActiveProfile } from '../../hooks/use-active-profile';
 
 const ACCENT = '#e50914';
 
@@ -21,12 +22,51 @@ const ACCENT = '#e50914';
     const router = useRouter();
     const { setAccentColor } = useAccent();
     const accentColor = getAccentFromPosterPath('/interactive/accent');
+    const activeProfile = useActiveProfile();
+    const isKidsProfile = Boolean(activeProfile?.isKids);
 
     useEffect(() => {
       if (accentColor) {
         setAccentColor(accentColor);
       }
     }, [accentColor, setAccentColor]);
+
+    if (isKidsProfile) {
+      return (
+        <ScreenWrapper>
+          <LinearGradient
+            colors={[accentColor, '#150a13', '#05060f']}
+            start={[0, 0]}
+            end={[1, 1]}
+            style={styles.gradient}
+          />
+          <LinearGradient
+            colors={['rgba(125,216,255,0.2)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.1, y: 0 }}
+            end={{ x: 0.9, y: 1 }}
+            style={styles.bgOrbPrimary}
+          />
+          <LinearGradient
+            colors={['rgba(229,9,20,0.18)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.8, y: 0 }}
+            end={{ x: 0.2, y: 1 }}
+            style={styles.bgOrbSecondary}
+          />
+
+          <View style={styles.kidsBlockWrap}>
+            <View style={styles.kidsBlockCard}>
+              <Text style={styles.kidsBlockTitle}>Not available on Kids profiles</Text>
+              <Text style={styles.kidsBlockBody}>
+                Interactive and social features are disabled on Kids profiles.
+              </Text>
+              <TouchableOpacity style={styles.kidsBlockButton} onPress={() => router.push('/select-profile')}>
+                <Text style={styles.kidsBlockButtonText}>Switch profile</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </ScreenWrapper>
+      );
+    }
 
   return (
     <ScreenWrapper>
@@ -501,6 +541,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 12,
+  },
+  kidsBlockWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  kidsBlockCard: {
+    width: '100%',
+    borderRadius: 18,
+    padding: 16,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+  },
+  kidsBlockTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  kidsBlockBody: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  kidsBlockButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: ACCENT,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  kidsBlockButtonText: {
+    color: '#fff',
+    fontWeight: '800',
   },
 });
 

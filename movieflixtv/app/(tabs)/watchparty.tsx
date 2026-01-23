@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 
 import type { Media } from '@/types';
+import { API_BASE_URL, API_KEY } from '../../constants/api';
 import { getProfileScopedKey } from '@/lib/profileStorage';
 import { createWatchParty, tryJoinWatchParty } from '@/lib/watchparty/controller';
 import { useUser } from '@/hooks/use-user';
@@ -77,29 +78,67 @@ export default function WatchPartyTv() {
     setAccentColor(accent);
   }, [accent, setAccentColor]);
 
-  const handleCreate = useCallback(async () => {
+  const [seasons, setSeasons] = useState<any[]>([]);
+  const [selectedSeason, setSelectedSeason] = useState<any | null>(null);
+  const [episodes, setEpisodes] = useState<any[]>([]);
+  const [selectedEpisode, setSelectedEpisode] = useState<any | null>(null);
+  const [loadingSeasons, setLoadingSeasons] = useState(false);
+  const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [showEpisodePicker, setShowEpisodePicker] = useState(false);
+
+  const fetchSeasons = async (tmdbId: number) => {
+    setLoadingSeasons(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/tv/${tmdbId}?api_key=${API_KEY}`);
+      const data = await response.json();
+      const filteredSeasons = (data.seasons || []).filter((s: any) => s.season_number > 0);
+      setSeasons(filteredSeasons);
+      if (filteredSeasons.length > 0) {
+        setSelectedSeason(filteredSeasons[0]);
+        await fetchEpisodes(tmdbId, filteredSeasons[0].season_number);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch seasons', err);
+      setSeasons([]);
+    } finally {
+      setLoadingSeasons(false);
+    }
+  };
+
+  const fetchEpisodes = async (tmdbId: number, seasonNumber: number) => {
+    setLoadingEpisodes(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/tv/${tmdbId}/season/${seasonNumber}?api_key=${API_KEY}`);
+      const data = await response.json();
+      setEpisodes(data.episodes || []);
+      setSelectedEpisode(data.episodes?.[0] ?? null);
+    } catch (err) {
+      console.warn('Failed to fetch episodes', err);
+      setEpisodes([]);
+    } finally {
+      setLoadingEpisodes(false);
+    }
+  };
+
+  const handleSeasonChange = async (season: any) => {
+    setSelectedSeason(season);
+    if (selected?.id) {
+      await fetchEpisodes(selected.id, season.season_number);
+    }
+  };
+
+  const startMovieParty = useCallback(async () => {
+    if (!selected) return;
     setNotice({ kind: 'info', title: 'Creating party…' });
     const uid =
       user?.uid ??
       (await authPromise
         .then((auth) => auth.currentUser?.uid ?? null)
         .catch(() => null));
+    
     if (!uid) {
       setNotice({ kind: 'error', title: 'Sign in required', message: 'Please sign in to start a watch party.' });
       router.push('/(auth)/login');
-      return;
-    }
-    if (!selected) {
-      setNotice({ kind: 'error', title: 'Pick a title', message: 'Select a movie from your list first.' });
-      return;
-    }
-
-    if (!isSubscribed) {
-      setNotice({
-        kind: 'error',
-        title: 'Upgrade required',
-        message: 'Free watch parties support up to 4 viewers. Upgrade to Premium for larger rooms.',
-      });
       return;
     }
 
@@ -155,7 +194,117 @@ export default function WatchPartyTv() {
     } finally {
       if (mountedRef.current) setBusy(false);
     }
-  }, [isSubscribed, router, scrape, selected, user?.uid]);
+  }, [router, scrape, selected, user?.uid]);
+
+  const startTvShowParty = useCallback(async () => {
+    if (!selected || !selectedSeason || !selectedEpisode) return;
+    setNotice({ kind: 'info', title: 'Creating party…' });
+    const uid =
+      user?.uid ??
+      (await authPromise
+        .then((auth) => auth.currentUser?.uid ?? null)
+        .catch(() => null));
+    
+    if (!uid) {
+      setNotice({ kind: 'error', title: 'Sign in required', message: 'Please sign in to start a watch party.' });
+      router.push('/(auth)/login');
+      return;
+    }
+
+    try {
+      setBusy(true);
+      const payload = {
+        type: 'show' as const,
+        title: selected.title || selected.name || 'TV Show',
+        tmdbId: selected.id ? String(selected.id) : '',
+        imdbId: (selected as any).imdb_id ?? undefined,
+        releaseYear: selected.first_air_date ? parseInt(selected.first_air_date) : new Date().getFullYear(),
+        season: {
+          number: selectedSeason.season_number,
+          tmdbId: selectedSeason.id?.toString() ?? '',
+          title: selectedSeason.name,
+          episodeCount: selectedSeason.episode_count,
+        },
+        episode: {
+          number: selectedEpisode.episode_number,
+          tmdbId: selectedEpisode.id?.toString() ?? '',
+        },
+      };
+
+      const playback = await scrape(payload);
+      if (!playback?.uri) throw new Error('No stream found');
+      const videoHeaders = playback.headers ? encodeURIComponent(JSON.stringify(playback.headers)) : undefined;
+
+      const episodeTitle = `S${selectedSeason.season_number}:E${selectedEpisode.episode_number} - ${selectedEpisode.name}`;
+      const party = await createWatchParty(
+        uid,
+        playback.uri,
+        `${selected.title || selected.name} - ${episodeTitle}`,
+        'tv',
+        playback.headers ?? null,
+        (playback as any)?.stream?.type ?? null,
+      );
+
+      setPartyCode(party.code);
+      setNotice({ kind: 'success', title: 'Watch Party created', message: `Share this code: ${party.code}` });
+
+      router.push({
+        pathname: '/video-player',
+        params: {
+          roomCode: party.code,
+          videoUrl: party.videoUrl,
+          videoHeaders,
+          title: selected.title || selected.name || 'Watch Party',
+          mediaType: 'tv',
+          tmdbId: selected.id ? String(selected.id) : undefined,
+          posterPath: selected.poster_path ?? undefined,
+          backdropPath: selected.backdrop_path ?? undefined,
+          overview: selected.overview ?? undefined,
+          releaseDate: selected.first_air_date || undefined,
+          genreIds: Array.isArray(selected.genre_ids) ? selected.genre_ids.join(',') : undefined,
+          voteAverage: typeof (selected as any).vote_average === 'number' ? String((selected as any).vote_average) : undefined,
+          seasonNumber: selectedSeason.season_number.toString(),
+          episodeNumber: selectedEpisode.episode_number.toString(),
+          seasonTmdbId: selectedSeason.id?.toString(),
+          episodeTmdbId: selectedEpisode.id?.toString(),
+          seasonTitle: selectedSeason.name,
+          seasonEpisodeCount: selectedSeason.episode_count?.toString(),
+        },
+      });
+    } catch (err: any) {
+      setNotice({
+        kind: 'error',
+        title: 'Create failed',
+        message: err?.message ? String(err.message) : 'Unable to create watch party.',
+      });
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
+  }, [router, scrape, selected, selectedSeason, selectedEpisode, user?.uid]);
+
+  const handleCreate = useCallback(async () => {
+    if (!selected) {
+      setNotice({ kind: 'error', title: 'Pick a title', message: 'Select a movie or show from your list first.' });
+      return;
+    }
+
+    if (!isSubscribed) {
+      setNotice({
+        kind: 'error',
+        title: 'Upgrade required',
+        message: 'Free watch parties support up to 4 viewers. Upgrade to Premium for larger rooms.',
+      });
+      return;
+    }
+
+    if (selected.media_type === 'tv') {
+      await fetchSeasons(selected.id);
+      setShowEpisodePicker(true);
+      return;
+    }
+
+    await startMovieParty();
+  }, [isSubscribed, selected, startMovieParty]);
 
   const handleJoin = useCallback(async () => {
     const code = joinCode.trim();
@@ -295,62 +444,145 @@ export default function WatchPartyTv() {
             <View style={styles.columns}>
               <View style={styles.left}>
                 <View style={styles.card}>
-            <Text style={styles.cardTitle}>Pick from My List</Text>
-            <Text style={styles.cardHint}>Add to “My List” on phone, then come back.</Text>
+            {showEpisodePicker ? (
+              <View style={styles.episodePicker}>
+                <View style={styles.pickerHeader}>
+                  <Text style={styles.cardTitle}>Select Episode</Text>
+                  <TvFocusable
+                    onPress={() => setShowEpisodePicker(false)}
+                    isTVSelectable={true}
+                    style={({ focused }: any) => [styles.closeBtn, focused ? styles.btnFocused : null]}
+                  >
+                    <Ionicons name="close" size={20} color="#fff" />
+                  </TvFocusable>
+                </View>
 
-            {myList.length === 0 ? (
-              <TvFocusable
-                onPress={() => router.push('/continue-on-phone?feature=profiles')}
-                focusable
-                style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}
-              >
-                <Ionicons name="phone-portrait-outline" size={18} color="#fff" />
-                <Text style={styles.btnText}>Continue on phone</Text>
-              </TvFocusable>
-            ) : (
-              <FlatList
-                data={myList}
-                keyExtractor={(it, idx) => String(it.id ?? idx)}
-                numColumns={3}
-                columnWrapperStyle={styles.gridRow}
-                contentContainerStyle={styles.grid}
-                renderItem={({ item }) => (
-                  <TvPosterCard
-                    item={item}
-                    width={160}
-                    showTitle={false}
-                    onPress={() => setSelected(item)}
+                <Text style={styles.pickerSubtitle}>{selected?.title || selected?.name}</Text>
+
+                {loadingSeasons ? (
+                  <ActivityIndicator color={accent} style={{ marginVertical: 20 }} />
+                ) : (
+                  <FlatList
+                    horizontal
+                    data={seasons}
+                    keyExtractor={(it) => String(it.id)}
+                    contentContainerStyle={styles.seasonList}
+                    renderItem={({ item }) => (
+                      <TvFocusable
+                        onPress={() => handleSeasonChange(item)}
+                        isTVSelectable={true}
+                        style={({ focused }: any) => [
+                          styles.seasonPill,
+                          selectedSeason?.id === item.id ? { backgroundColor: accent } : null,
+                          focused ? styles.btnFocused : null,
+                        ]}
+                      >
+                        <Text style={styles.seasonText}>{item.name}</Text>
+                      </TvFocusable>
+                    )}
                   />
                 )}
-              />
-            )}
 
-            {selected ? (
-              <View style={styles.selectedRow}>
-                <Text style={styles.selectedTitle} numberOfLines={1}>
-                  Selected: {selected.title || selected.name}
-                </Text>
-                {partyCode ? <Text style={styles.codeText}>Code: {partyCode}</Text> : null}
+                {loadingEpisodes ? (
+                  <ActivityIndicator color={accent} style={{ flex: 1 }} />
+                ) : (
+                  <FlatList
+                    data={episodes}
+                    keyExtractor={(it) => String(it.id)}
+                    contentContainerStyle={styles.episodeList}
+                    renderItem={({ item }) => (
+                      <TvFocusable
+                        onPress={() => setSelectedEpisode(item)}
+                        isTVSelectable={true}
+                        style={({ focused }: any) => [
+                          styles.episodeItem,
+                          selectedEpisode?.id === item.id ? { borderColor: accent, borderWidth: 2 } : null,
+                          focused ? styles.btnFocused : null,
+                        ]}
+                      >
+                        <Text style={styles.episodeText}>
+                          Ep {item.episode_number}: {item.name}
+                        </Text>
+                      </TvFocusable>
+                    )}
+                  />
+                )}
+
+                <TvFocusable
+                  onPress={() => void startTvShowParty()}
+                  disabled={busy || !selectedEpisode}
+                  isTVSelectable={true}
+                  style={({ focused }: any) => [
+                    styles.primaryBtn,
+                    (busy || !selectedEpisode) ? styles.btnDisabled : null,
+                    focused ? styles.btnFocused : null,
+                  ]}
+                >
+                  <Text style={styles.btnText}>Start Watch Party</Text>
+                </TvFocusable>
               </View>
-            ) : null}
+            ) : (
+              <>
+                <Text style={styles.cardTitle}>Pick from My List</Text>
+                <Text style={styles.cardHint}>Add to “My List” on phone, then come back.</Text>
 
-            <TvFocusable
-              onPress={() => void handleCreate()}
-              disabled={disabled}
-              focusable
-              style={({ focused }: any) => [
-                styles.primaryBtn,
-                disabled ? styles.btnDisabled : null,
-                focused ? styles.btnFocused : null,
-              ]}
-            >
-              {disabled ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Ionicons name="play" size={18} color="#fff" />
-              )}
-              <Text style={styles.btnText}>{disabled ? 'Working…' : 'Create Party'}</Text>
-            </TvFocusable>
+                {myList.length === 0 ? (
+                  <TvFocusable
+                    onPress={() => router.push('/continue-on-phone?feature=profiles')}
+                    isTVSelectable={true}
+                    accessibilityLabel="Continue on phone"
+                    style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}
+                  >
+                    <Ionicons name="phone-portrait-outline" size={18} color="#fff" />
+                    <Text style={styles.btnText}>Continue on phone</Text>
+                  </TvFocusable>
+                ) : (
+                  <FlatList
+                    data={myList}
+                    keyExtractor={(it, idx) => String(it.id ?? idx)}
+                    numColumns={3}
+                    columnWrapperStyle={styles.gridRow}
+                    contentContainerStyle={styles.grid}
+                    renderItem={({ item }) => (
+                      <TvPosterCard
+                        item={item}
+                        width={160}
+                        showTitle={false}
+                        onPress={() => setSelected(item)}
+                      />
+                    )}
+                  />
+                )}
+
+                {selected ? (
+                  <View style={styles.selectedRow}>
+                    <Text style={styles.selectedTitle} numberOfLines={1}>
+                      Selected: {selected.title || selected.name}
+                    </Text>
+                    {partyCode ? <Text style={styles.codeText}>Code: {partyCode}</Text> : null}
+                  </View>
+                ) : null}
+
+                <TvFocusable
+                  onPress={() => void handleCreate()}
+                  disabled={disabled}
+                  isTVSelectable={true}
+                  accessibilityLabel="Create Party"
+                  style={({ focused }: any) => [
+                    styles.primaryBtn,
+                    disabled ? styles.btnDisabled : null,
+                    focused ? styles.btnFocused : null,
+                  ]}
+                >
+                  {disabled ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Ionicons name="play" size={18} color="#fff" />
+                  )}
+                  <Text style={styles.btnText}>{disabled ? 'Working…' : 'Create Party'}</Text>
+                </TvFocusable>
+              </>
+            )}
                 </View>
               </View>
 
@@ -362,7 +594,8 @@ export default function WatchPartyTv() {
               <Text style={styles.codeValue}>{(joinCode + '______').slice(0, 6)}</Text>
               <TvFocusable
                 onPress={() => setJoinCode('')}
-                focusable
+                isTVSelectable={true}
+                accessibilityLabel="Clear code"
                 style={({ focused }: any) => [styles.clearSmall, focused ? styles.btnFocused : null]}
               >
                 <Text style={styles.btnText}>Clear</Text>
@@ -374,7 +607,8 @@ export default function WatchPartyTv() {
                 <TvFocusable
                   key={k}
                   onPress={() => handleJoinKey(k)}
-                  focusable
+                  isTVSelectable={true}
+                  accessibilityLabel={k}
                   style={({ focused }: any) => [
                     styles.padKey,
                     k === 'DEL' || k === 'CLEAR' ? styles.padKeyAlt : null,
@@ -388,7 +622,8 @@ export default function WatchPartyTv() {
             <TvFocusable
               onPress={() => void handleJoin()}
               disabled={disabled}
-              focusable
+              isTVSelectable={true}
+              accessibilityLabel="Join Party"
               style={({ focused }: any) => [
                 styles.secondaryBtn,
                 disabled ? styles.btnDisabled : null,
@@ -405,7 +640,8 @@ export default function WatchPartyTv() {
                 <Text style={styles.upsellText}>Upgrade in the phone app to host larger rooms.</Text>
                 <TvFocusable
                   onPress={() => router.push('/premium')}
-                  focusable
+                  isTVSelectable={true}
+                  accessibilityLabel="Open subscription info"
                   style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}
                 >
                   <Text style={styles.btnText}>Open subscription info</Text>
@@ -423,11 +659,11 @@ export default function WatchPartyTv() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  shell: { flex: 1, paddingLeft: 0, paddingRight: 34, paddingTop: 22, paddingBottom: 22, alignItems: 'center' },
-  panel: { flex: 1, width: '100%', maxWidth: 1520 },
-  panelInner: { flex: 1, padding: 18 },
-  topBar: { paddingHorizontal: 6, paddingBottom: 14 },
+  container: { flex: 1, backgroundColor: '#030408' },
+  shell: { flex: 1, paddingLeft: 108, paddingRight: 40, paddingTop: 28, paddingBottom: 28, alignItems: 'center' },
+  panel: { flex: 1, width: '100%', maxWidth: 1560 },
+  panelInner: { flex: 1, padding: 22 },
+  topBar: { paddingHorizontal: 8, paddingBottom: 18 },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   titleStack: { flex: 1, minWidth: 0 },
   title: { color: '#fff', fontSize: 18, fontWeight: '900' },
@@ -528,7 +764,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.16)',
   },
-  btnFocused: { transform: [{ scale: 1.04 }], borderColor: '#fff' },
+  btnFocused: { 
+    transform: [{ scale: 1.08 }], 
+    borderColor: '#fff',
+    borderWidth: 2,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 10,
+  },
   btnDisabled: { opacity: 0.6 },
   btnText: { color: '#fff', fontSize: 14, fontWeight: '900' },
   notice: {
@@ -552,4 +796,14 @@ const styles = StyleSheet.create({
   },
   upsellTitle: { color: '#fff', fontSize: 16, fontWeight: '900', marginBottom: 6 },
   upsellText: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '700' },
+  episodePicker: { flex: 1 },
+  pickerHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  closeBtn: { padding: 8, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.1)' },
+  pickerSubtitle: { color: 'rgba(255,255,255,0.6)', fontSize: 14, fontWeight: '700', marginBottom: 12 },
+  seasonList: { paddingVertical: 8, marginBottom: 8 },
+  seasonPill: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.08)', marginRight: 10 },
+  seasonText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  episodeList: { flex: 1, paddingBottom: 10 },
+  episodeItem: { padding: 12, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.05)', marginBottom: 8, borderWidth: 1, borderColor: 'transparent' },
+  episodeText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 });

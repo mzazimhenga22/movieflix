@@ -92,6 +92,8 @@ export default function BottomNav() {
   }, [pathname, syncBadge]);
 
   const isSocialRoute = pathname?.startsWith('/social-feed');
+  const hideOnLive = Boolean(pathname && pathname.startsWith('/social-feed/live'));
+  const hideOnGoLive = Boolean(pathname && pathname.startsWith('/social-feed/go-live'));
   const isActive = (route: string) => {
     const currentRoute = pathname?.split('/').pop();
     return currentRoute === route || (route === 'index' && currentRoute === 'social-feed');
@@ -135,7 +137,7 @@ export default function BottomNav() {
   );
 
   // Hide nav on profile screens (any profile path)
-  if (!isSocialRoute || (pathname && /profile/i.test(pathname))) {
+  if (!isSocialRoute || hideOnLive || hideOnGoLive || (pathname && /profile/i.test(pathname))) {
     return null;
   }
 

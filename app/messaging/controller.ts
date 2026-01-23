@@ -1,49 +1,54 @@
 /* app/messaging/messagesController.tsx */
 import { updateStreakForContext } from '@/lib/streaks/streakManager'
 import type { User } from 'firebase/auth'
-import { AppState } from 'react-native'
 import {
-    createUserWithEmailAndPassword,
-    onAuthStateChanged,
-    signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
 } from 'firebase/auth'
-
-import { notifyPush } from '@/lib/pushApi'
-import { setLastAuthUid } from '@/lib/profileStorage'
+import { AppState } from 'react-native'
 
 import {
-    DatabaseReference,
-    getDatabase,
-    off,
-    onDisconnect,
-    onValue,
-    ref,
-    serverTimestamp as rtdbServerTimestamp,
-    set,
+  loadMessagingSettings,
+  subscribeMessagingSettings,
+  type MessagingSettings,
+} from '@/lib/messagingSettingsStore'
+import { setLastAuthUid } from '@/lib/profileStorage'
+import { notifyPush } from '@/lib/pushApi'
+
+import {
+  DatabaseReference,
+  getDatabase,
+  off,
+  onDisconnect,
+  onValue,
+  ref,
+  serverTimestamp as rtdbServerTimestamp,
+  set,
 } from 'firebase/database'
 
 import {
-    addDoc,
-    arrayRemove,
-    arrayUnion,
-    collection,
-    deleteDoc,
-    doc,
-    DocumentData,
-    getDoc,
-    getDocs,
-    limit,
-    onSnapshot,
-    orderBy,
-    query,
-    Query,
-    QueryDocumentSnapshot,
-    QuerySnapshot,
-    serverTimestamp,
-    setDoc,
-    startAfter,
-    where,
-    writeBatch,
+  addDoc,
+  arrayRemove,
+  arrayUnion,
+  collection,
+  deleteDoc,
+  doc,
+  DocumentData,
+  getDoc,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  Query,
+  QueryDocumentSnapshot,
+  QuerySnapshot,
+  serverTimestamp,
+  setDoc,
+  startAfter,
+  where,
+  writeBatch,
 } from 'firebase/firestore'
 
 import { authPromise, firestore } from '../../constants/firebase'
@@ -131,7 +136,7 @@ export type Message = {
   forwarded?: boolean
   forwardedFrom?: string
   mediaUrl?: string
-  mediaType?: 'image' | 'video' | 'audio' | 'file' | null
+  mediaType?: 'image' | 'video' | 'audio' | 'file' | 'music' | 'movie' | null
   fileName?: string
   fileSize?: number
   [key: string]: any
@@ -141,6 +146,7 @@ export type Profile = {
   id: string
   displayName: string
   photoURL: string
+  bio?: string
   status?: string
   isTyping?: boolean
   blockedUsers?: string[]
@@ -173,6 +179,9 @@ let lastPresenceUid: string | null = null
 let presenceHeartbeat: ReturnType<typeof setInterval> | null = null
 let appStateSub: { remove: () => void } | null = null
 
+let hibernateEnabled = false
+let messagingSettingsSub: (() => void) | null = null
+
 const detachPresenceListeners = () => {
   if (connectedRef && connectedHandler) {
     off(connectedRef, 'value', connectedHandler)
@@ -187,8 +196,121 @@ const detachPresenceListeners = () => {
   }
   try {
     appStateSub?.remove()
-  } catch {}
+  } catch { }
   appStateSub = null
+}
+
+const setHibernateEnabled = (next: boolean) => {
+  hibernateEnabled = next
+}
+
+const stopPresence = (uid: string) => {
+  // Stop timers + listeners first so nothing flips the user back online.
+  detachPresenceListeners()
+
+  // Persist offline state (Firestore + RTDB) once.
+  void updateUserStatus(uid, 'offline')
+  try {
+    const rtdbRef = ref(realtimeDb, `/status/${uid}`)
+    void set(rtdbRef, { state: 'offline', last_changed: rtdbServerTimestamp() })
+  } catch {
+    // ignore
+  }
+}
+
+const startPresence = (uid: string) => {
+  // Clean any previous timers/listeners first.
+  detachPresenceListeners()
+
+  const userDocRef = doc(firestore, 'users', uid)
+
+  const touchPresence = async (state: 'online' | 'offline') => {
+    if (hibernateEnabled) return
+
+    const base: Record<string, any> = {
+      status: state,
+      presence: {
+        state,
+        lastActiveAt: serverTimestamp(),
+      },
+    }
+
+    // Only update lastSeen when the user goes offline (WhatsApp-like semantics).
+    if (state === 'offline') {
+      base.lastSeen = serverTimestamp()
+      base.presence.lastSeen = serverTimestamp()
+    }
+
+    await setDoc(userDocRef, base, { merge: true })
+  }
+
+  const HEARTBEAT_MS = 25_000
+  const markOnline = () => {
+    void touchPresence('online')
+  }
+  const markOffline = () => {
+    void touchPresence('offline')
+  }
+
+  if (presenceHeartbeat) clearInterval(presenceHeartbeat)
+  presenceHeartbeat = setInterval(markOnline, HEARTBEAT_MS)
+
+  try {
+    appStateSub?.remove()
+  } catch { }
+  appStateSub = AppState.addEventListener('change', (next) => {
+    if (hibernateEnabled) return
+    if (next === 'active') markOnline()
+    else markOffline()
+  })
+
+  presenceUserRef = ref(realtimeDb, `/status/${uid}`)
+  connectedRef = ref(realtimeDb, '.info/connected')
+
+  const isOfflineForDatabase = {
+    state: 'offline',
+    last_changed: rtdbServerTimestamp(),
+  }
+  const isOnlineForDatabase = {
+    state: 'online',
+    last_changed: rtdbServerTimestamp(),
+  }
+
+  connectedHandler = (snapshot: any) => {
+    if (hibernateEnabled) {
+      void set(presenceUserRef!, isOfflineForDatabase)
+      void updateUserStatus(uid, 'offline')
+      return
+    }
+
+    if (snapshot.val() === false) {
+      // Not connected: still persist "offline"
+      void set(presenceUserRef!, isOfflineForDatabase)
+      void updateUserStatus(uid, 'offline')
+      return
+    }
+
+    // When connected: ensure we go offline on disconnect, then mark online
+    onDisconnect(presenceUserRef!)
+      .set(isOfflineForDatabase)
+      .then(() => {
+        if (hibernateEnabled) {
+          void set(presenceUserRef!, isOfflineForDatabase)
+          void updateUserStatus(uid, 'offline')
+          return
+        }
+        void set(presenceUserRef!, isOnlineForDatabase)
+        void updateUserStatus(uid, 'online')
+      })
+      .catch((e) => {
+        console.warn('[messagesController] onDisconnect setup failed', e)
+      })
+  }
+
+  onValue(connectedRef, connectedHandler)
+
+  // Immediate touch for foreground entry.
+  markOnline()
 }
 
 export const ensureGlobalBroadcastChannel = async (): Promise<void> => {
@@ -230,14 +352,52 @@ export const signUpWithEmail = async (
   email: string,
   password: string,
 ): Promise<User | null> => {
+  const auth = await getAuth()
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+
   try {
-    const auth = await getAuth()
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password)
+    const userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, password)
     if (__DEV__) console.log('[messagesController] signUpWithEmail success', userCredential.user.uid)
+
+    try {
+      const uid = userCredential.user.uid
+      const userRef = doc(firestore, 'users', uid)
+
+      await setDoc(
+        userRef,
+        {
+          createdAt: serverTimestamp(),
+          email: normalizedEmail || null,
+          status: 'online',
+        },
+        { merge: true },
+      )
+
+      const welcomeRef = await addDoc(collection(firestore, 'notifications'), {
+        type: 'welcome',
+        scope: 'app',
+        channel: 'onboarding',
+        actorId: 'system',
+        actorName: 'MovieFlix',
+        actorAvatar: null,
+        targetUid: uid,
+        targetType: 'app',
+        targetId: uid,
+        docPath: userRef.path,
+        message: 'Welcome to MovieFlix! Your account is ready.',
+        read: false,
+        createdAt: serverTimestamp(),
+      })
+
+      await setDoc(userRef, { welcomeNotificationId: welcomeRef.id }, { merge: true })
+    } catch (err) {
+      console.warn('[messagesController] failed to initialize user doc on signup', err)
+    }
+
     return userCredential.user as User
   } catch (error: any) {
     console.error('[messagesController] signUpWithEmail error:', error?.message ?? error)
-    return null
+    throw error
   }
 }
 
@@ -264,7 +424,7 @@ export const signInWithEmail = async (
  * - Returns safe unsubscribe
  */
 export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
-  let unsubAuth: UnsubscribeFn = () => {}
+  let unsubAuth: UnsubscribeFn = () => { }
   let lastUid: string | null = null
 
   void authPromise
@@ -276,6 +436,10 @@ export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
           lastUid = null
           lastPresenceUid = null
           detachPresenceListeners()
+          try {
+            messagingSettingsSub?.()
+          } catch { }
+          messagingSettingsSub = null
           callback(null)
           return
         }
@@ -291,82 +455,77 @@ export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
 
         void setLastAuthUid(user.uid)
 
-        // Firestore presence (WhatsApp-like): heartbeat while active; set offline on background.
-        void updateUserStatus(user.uid, 'online')
         const userDocRef = doc(firestore, 'users', user.uid)
 
-        const touchPresence = async (state: 'online' | 'offline') => {
-          await setDoc(
-            userDocRef,
-            {
-              status: state,
-              lastSeen: serverTimestamp(),
-              presence: {
-                state,
-                lastActiveAt: serverTimestamp(),
-                lastSeen: serverTimestamp(),
-              },
-            },
-            { merge: true },
-          )
-        }
+        // Backfill existing users (created before signup init existed): ensure a base user doc + welcome notification id.
+        void (async () => {
+          try {
+            const snap = await getDoc(userDocRef)
+            const data = snap.exists() ? (snap.data() as any) : {}
 
-        const HEARTBEAT_MS = 25_000
-        const markOnline = () => {
-          void touchPresence('online')
-        }
-        const markOffline = () => {
-          void touchPresence('offline')
-        }
+            if (!snap.exists()) {
+              await setDoc(
+                userDocRef,
+                {
+                  createdAt: serverTimestamp(),
+                  status: 'offline',
+                },
+                { merge: true },
+              )
+            }
 
-        if (presenceHeartbeat) clearInterval(presenceHeartbeat)
-        presenceHeartbeat = setInterval(markOnline, HEARTBEAT_MS)
+            if (!data?.welcomeNotificationId) {
+              const welcomeRef = await addDoc(collection(firestore, 'notifications'), {
+                type: 'welcome',
+                scope: 'app',
+                channel: 'onboarding',
+                actorId: 'system',
+                actorName: 'MovieFlix',
+                actorAvatar: null,
+                targetUid: user.uid,
+                targetType: 'app',
+                targetId: user.uid,
+                docPath: userDocRef.path,
+                message: 'Welcome to MovieFlix! Your account is ready.',
+                read: false,
+                createdAt: serverTimestamp(),
+              })
 
-        try {
-          appStateSub?.remove()
-        } catch {}
-        appStateSub = AppState.addEventListener('change', (next) => {
-          if (next === 'active') markOnline()
-          else markOffline()
-        })
+              await setDoc(userDocRef, { welcomeNotificationId: welcomeRef.id }, { merge: true })
+            }
+          } catch (err) {
+            console.warn('[messagesController] user doc backfill failed', err)
+          }
+        })()
 
-        // Setup RTDB presence (clean old listeners)
-        detachPresenceListeners()
-
-        presenceUserRef = ref(realtimeDb, `/status/${user.uid}`)
-        connectedRef = ref(realtimeDb, '.info/connected')
-
-        const isOfflineForDatabase = {
-          state: 'offline',
-          last_changed: rtdbServerTimestamp(),
-        }
-        const isOnlineForDatabase = {
-          state: 'online',
-          last_changed: rtdbServerTimestamp(),
-        }
-
-        connectedHandler = (snapshot: any) => {
-          if (snapshot.val() === false) {
-            // Not connected: still persist "offline"
-            // (onDisconnect will run once connection exists)
-            void set(presenceUserRef!, isOfflineForDatabase)
-            void updateUserStatus(user.uid, 'offline')
-            return
+        // Apply presence mode based on settings (hibernate keeps you offline).
+        void (async () => {
+          let settings: MessagingSettings | null = null
+          try {
+            settings = await loadMessagingSettings()
+          } catch {
+            settings = null
           }
 
-          // When connected: ensure we go offline on disconnect, then mark online
-          onDisconnect(presenceUserRef!)
-            .set(isOfflineForDatabase)
-            .then(() => {
-              void set(presenceUserRef!, isOnlineForDatabase)
-              void updateUserStatus(user.uid, 'online')
-            })
-            .catch((e) => {
-              console.warn('[messagesController] onDisconnect setup failed', e)
-            })
-        }
+          const initialHibernate = Boolean(settings?.hibernate)
+          setHibernateEnabled(initialHibernate)
 
-        onValue(connectedRef, connectedHandler)
+          if (initialHibernate) stopPresence(user.uid)
+          else startPresence(user.uid)
+
+          try {
+            messagingSettingsSub?.()
+          } catch { }
+          messagingSettingsSub = subscribeMessagingSettings((next) => {
+            const nextHibernate = Boolean(next?.hibernate)
+            if (!lastUid) return
+            if (nextHibernate === hibernateEnabled) return
+
+            setHibernateEnabled(nextHibernate)
+            if (nextHibernate) stopPresence(lastUid)
+            else startPresence(lastUid)
+          })
+        })()
 
         callback(user)
       })
@@ -379,7 +538,11 @@ export const onAuthChange = (callback: AuthCallback): UnsubscribeFn => {
   return () => {
     try {
       unsubAuth()
-    } catch {}
+    } catch { }
+    try {
+      messagingSettingsSub?.()
+    } catch { }
+    messagingSettingsSub = null
     detachPresenceListeners()
   }
 }
@@ -427,9 +590,9 @@ export const onConversationUpdate = (
 
 export const onConversationsUpdate = (
   callback: (conversations: Conversation[]) => void,
-  options?: { uid?: string | null },
+  options?: { uid?: string | null; limit?: number },
 ): UnsubscribeFn => {
-  let unsub: UnsubscribeFn = () => {}
+  let unsub: UnsubscribeFn = () => { }
 
   void authPromise
     .then((auth) => {
@@ -439,10 +602,12 @@ export const onConversationsUpdate = (
         return
       }
 
+      const convoLimit = options?.limit && options.limit > 0 ? options.limit : 40
       const q = query(
         collection(firestore, 'conversations'),
         where('members', 'array-contains', uid),
         orderBy('updatedAt', 'desc'),
+        limit(convoLimit),
       )
 
       const snapUnsub = onSnapshot(
@@ -471,7 +636,7 @@ export const onConversationsUpdate = (
       unsub = () => {
         try {
           snapUnsub()
-        } catch {}
+        } catch { }
       }
     })
     .catch((err) => {
@@ -482,17 +647,39 @@ export const onConversationsUpdate = (
   return () => unsub()
 }
 
+// One-time fetch for older conversations (pagination beyond the realtime window)
+export const loadOlderConversations = async (
+  uid: string,
+  beforeUpdatedAt: any,
+  batchSize: number = 40,
+): Promise<Conversation[]> => {
+  const convosRef = collection(firestore, 'conversations')
+  const q = query(
+    convosRef,
+    where('members', 'array-contains', uid),
+    orderBy('updatedAt', 'desc'),
+    where('updatedAt', '<', beforeUpdatedAt),
+    limit(batchSize),
+  )
+
+  const snap = await getDocs(q)
+  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Conversation))
+}
+
 /**
  * Messages subscription:
  * - Tightened: only last 50 for perf
  * - Desc order (you can reverse in UI)
+ * - Supports pagination with initialLimit option
  */
 export const onMessagesUpdate = (
   conversationId: string,
   callback: (messages: Message[]) => void,
+  options?: { initialLimit?: number },
 ): UnsubscribeFn => {
+  const messageLimit = options?.initialLimit ?? 100
   const messagesColRef = collection(firestore, 'conversations', conversationId, 'messages')
-  const q = query(messagesColRef, orderBy('createdAt', 'desc'), limit(50))
+  const q = query(messagesColRef, orderBy('createdAt', 'desc'), limit(messageLimit))
 
   const unsubscribe = onSnapshot(
     q,
@@ -507,6 +694,29 @@ export const onMessagesUpdate = (
   )
 
   return () => unsubscribe()
+}
+
+/**
+ * Load older messages for pagination (one-time fetch, not realtime)
+ */
+export const loadOlderMessages = async (
+  conversationId: string,
+  beforeTimestamp: any,
+  batchSize: number = 50,
+): Promise<Message[]> => {
+  const messagesColRef = collection(firestore, 'conversations', conversationId, 'messages')
+  const q = query(
+    messagesColRef,
+    orderBy('createdAt', 'desc'),
+    where('createdAt', '<', beforeTimestamp),
+    limit(batchSize),
+  )
+
+  const snapshot = await getDocs(q)
+  return snapshot.docs.map((docSnap) => ({
+    id: docSnap.id,
+    ...(docSnap.data() as any),
+  }))
 }
 
 export const onUserProfileUpdate = (userId: string, callback: (profile: Profile) => void): UnsubscribeFn => {
@@ -563,7 +773,7 @@ export const onUserPresence = (
   return () => {
     try {
       unsub()
-    } catch {}
+    } catch { }
   }
 }
 
@@ -571,6 +781,34 @@ export const onUserPresence = (
  * sendMessage:
  * - Uses batch to keep message + conversation summary consistent
  */
+
+const sanitizeForFirestore = (input: any): any => {
+  if (input === undefined) return undefined
+  if (input === null) return null
+
+  if (Array.isArray(input)) {
+    return input
+      .filter((v) => v !== undefined)
+      .map((v) => sanitizeForFirestore(v))
+      .filter((v) => v !== undefined)
+  }
+
+  if (typeof input === 'object') {
+    const proto = Object.getPrototypeOf(input)
+    // Only recurse into plain objects; leave Firestore FieldValue/Timestamp/etc untouched.
+    if (proto !== Object.prototype && proto !== null) return input
+
+    const out: Record<string, any> = {}
+    for (const [k, v] of Object.entries(input)) {
+      const next = sanitizeForFirestore(v)
+      if (next !== undefined) out[k] = next
+    }
+    return out
+  }
+
+  return input
+}
+
 export const sendMessage = async (
   conversationId: string,
   message: Partial<Message> & { clientId?: string | null },
@@ -590,8 +828,8 @@ export const sendMessage = async (
   const isBroadcastChannel = conversationData.isBroadcast
   const isChannelAdmin = Boolean(
     conversationData.admins?.includes(uid) ||
-      BROADCAST_ADMIN_IDS.includes(uid) ||
-      (email && BROADCAST_ADMIN_EMAILS.includes(email)),
+    BROADCAST_ADMIN_IDS.includes(uid) ||
+    (email && BROADCAST_ADMIN_EMAILS.includes(email)),
   )
   const isPendingRequest = conversationData.status === 'pending'
   const requestInitiatorId = conversationData.requestInitiatorId || conversationData.creator || uid
@@ -607,15 +845,20 @@ export const sendMessage = async (
 
   const messagesColRef = collection(firestore, 'conversations', conversationId, 'messages')
 
+  // Create message doc ref first so we can include it in the stored payload.
+  const newMessageRef = doc(messagesColRef) // auto-id
+
+  const cleanedMessage = sanitizeForFirestore(message) as Record<string, any>
+  // Always store a concrete id and never write `undefined` to Firestore.
+  delete cleanedMessage.id
+
   const payload: Record<string, any> = {
-    ...message,
+    ...cleanedMessage,
+    id: newMessageRef.id,
     from: uid,
     createdAt: serverTimestamp(),
   }
   if (message.clientId) payload.clientId = message.clientId
-
-  // Create message doc ref first so batch can write it
-  const newMessageRef = doc(messagesColRef) // auto-id
   const batch = writeBatch(firestore)
 
   batch.set(newMessageRef, payload)
@@ -625,6 +868,8 @@ export const sendMessage = async (
     if ((message as any).mediaType === 'image') return 'Photo'
     if ((message as any).mediaType === 'video') return 'Video'
     if ((message as any).mediaType === 'audio') return 'Audio message'
+    if ((message as any).mediaType === 'music') return '🎵 Music'
+    if ((message as any).mediaType === 'movie') return '🎬 Movie'
     if ((message as any).mediaUrl) return 'Attachment'
     return ''
   })()
@@ -780,17 +1025,35 @@ const recomputeConversationLastMessage = async (
   if (!found) {
     await setDoc(
       conversationDocRef,
-      { lastMessage: '', lastMessageSenderId: null, updatedAt: serverTimestamp() },
+      { lastMessage: '', lastMessageSenderId: null, lastMessageHasMedia: false, updatedAt: serverTimestamp() },
       { merge: true },
     )
     return
   }
 
+  const previewText = (() => {
+    const text = (found as any).text as string | undefined
+    if (text) return text
+    const mediaType = (found as any).mediaType as string | undefined
+    if (mediaType === 'image') return 'Photo'
+    if (mediaType === 'video') return 'Video'
+    if (mediaType === 'audio') return 'Audio message'
+    if (mediaType === 'file') return 'Attachment'
+    if ((found as any).mediaUrl) return 'Attachment'
+    // Fallback for non-text system/call messages.
+    if ((found as any).callType === 'video') return 'Video call'
+    if ((found as any).callType === 'voice') return 'Voice call'
+    return ''
+  })()
+
+  const hasMedia = Boolean((found as any).mediaUrl || (found as any).mediaType)
+
   await setDoc(
     conversationDocRef,
     {
-      lastMessage: (found as any).text ?? '',
+      lastMessage: previewText,
       lastMessageSenderId: (found as any).from ?? (found as any).sender ?? null,
+      lastMessageHasMedia: hasMedia,
       updatedAt: serverTimestamp(),
     },
     { merge: true },
@@ -985,11 +1248,24 @@ export const findOrCreateConversation = async (otherUser: Profile): Promise<stri
 
 export const updateUserStatus = async (userId: string, status: string): Promise<void> => {
   const userDocRef = doc(firestore, 'users', userId)
-  await setDoc(
-    userDocRef,
-    { status, lastSeen: serverTimestamp() },
-    { merge: true },
-  )
+
+  const state: 'online' | 'offline' = status === 'online' ? 'online' : 'offline'
+  if (hibernateEnabled && state === 'online') return
+
+  const payload: Record<string, any> = {
+    status: state,
+    presence: {
+      state,
+      lastActiveAt: serverTimestamp(),
+    },
+  }
+
+  if (state === 'offline') {
+    payload.lastSeen = serverTimestamp()
+    payload.presence.lastSeen = serverTimestamp()
+  }
+
+  await setDoc(userDocRef, payload, { merge: true })
 }
 
 export const findUserByUsername = async (username: string): Promise<Profile | null> => {
@@ -1006,6 +1282,23 @@ export const getProfileById = async (userId: string): Promise<Profile | null> =>
   const userDoc = await getDoc(userDocRef)
   if (!userDoc.exists()) return null
   return { id: userDoc.id, ...(userDoc.data() as any) } as Profile
+}
+
+export const getProfilesByIds = async (userIds: string[]): Promise<Profile[]> => {
+  const ids = Array.from(new Set((userIds || []).map((v) => String(v || '')).filter(Boolean)))
+  if (ids.length === 0) return []
+
+  const usersRef = collection(firestore, 'users')
+  const chunks = chunk(ids, 10)
+  const results: Profile[] = []
+
+  for (const batchIds of chunks) {
+    const q = query(usersRef, where('__name__', 'in', batchIds))
+    const snap = await getDocs(q)
+    results.push(...snap.docs.map((d) => ({ ...(d.data() as any), id: d.id } as Profile)))
+  }
+
+  return results
 }
 
 // New functions for WhatsApp-like features

@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from 'expo-router';
 import {
   collection,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
@@ -67,7 +68,11 @@ export type MovieMatchTotals = {
   qualified: number;
 };
 
-export const MIN_PROGRESS = 0.7;
+// Lower the qualification threshold slightly to increase the chance of finding overlaps,
+// especially for users with short watch histories.
+export const MIN_PROGRESS = 0.55;
+const MIN_MATCHING_PROGRESS = 0.35;
+const MIN_MATCH_SCORE = 12;
 
 const GENRE_LABELS: Record<number, string> = {
   28: 'Action',
@@ -129,9 +134,32 @@ export const computeMatches = (
 ): ComputedMatch[] => {
   if (localEntries.length === 0) return [];
 
+  const getLocalKey = (entry: Media) => {
+    const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie');
+    const id = entry.id ?? (entry as any)?.tmdbId ?? entry.title ?? entry.name;
+    return `${mediaType}:${String(id)}`;
+  };
+  const getRemoteKey = (entry: RemoteEntry) => {
+    const mediaType = String(entry.mediaType || 'movie');
+    const id = entry.tmdbId ?? entry.title ?? entry.id;
+    return `${mediaType}:${String(id)}`;
+  };
+
+  const localMetaById = new Map<
+    string,
+    { updatedAtMs: number; progress: number; title: string | null }
+  >();
   const localIds = new Set(
-    localEntries.map((entry) => String(entry.id ?? entry.tmdbId ?? entry.title ?? entry.name)),
+    localEntries.map((entry) => getLocalKey(entry)),
   );
+  localEntries.forEach((entry) => {
+    const key = getLocalKey(entry);
+    localMetaById.set(key, {
+      updatedAtMs: entry.watchProgress?.updatedAt ?? 0,
+      progress: entry.watchProgress?.progress ?? 0,
+      title: entry.title || entry.name || null,
+    });
+  });
   const localGenres = new Set<number>();
   localEntries.forEach((entry) => {
     (entry.genre_ids ?? []).forEach((genre) => {
@@ -154,9 +182,14 @@ export const computeMatches = (
     const remoteQualified = profile.entries.filter((entry) => (entry.progress ?? 1) >= MIN_PROGRESS);
     if (!remoteQualified.length) return;
 
-    const remoteIds = new Set(
-      remoteQualified.map((entry) => String(entry.tmdbId ?? entry.title ?? entry.id)),
-    );
+    const remoteIds = new Set(remoteQualified.map((entry) => getRemoteKey(entry)));
+    const remoteMetaById = new Map<string, { updatedAtMs: number; title: string }>();
+    remoteQualified.forEach((entry) => {
+      remoteMetaById.set(getRemoteKey(entry), {
+        updatedAtMs: entry.updatedAt ?? 0,
+        title: entry.title || 'Untitled',
+      });
+    });
     const sharedTitleIds = [...localIds].filter((id) => remoteIds.has(id));
 
     const remoteGenres = new Set<number>();
@@ -171,20 +204,46 @@ export const computeMatches = (
 
     if (!sharedTitleIds.length && !sharedGenreIds.length) return;
 
-    const titleOverlap = sharedTitleIds.length / Math.max(baseCount, remoteIds.size || 1);
+    // Use the smaller list as the denominator to avoid penalizing users with short histories.
+    const titleOverlap =
+      sharedTitleIds.length / Math.max(1, Math.min(baseCount, remoteIds.size || 1));
     const genreOverlap =
-      sharedGenreIds.length / Math.max(localGenres.size || 1, remoteGenres.size || 1);
-    const volumeBonus = Math.min(0.15, (remoteQualified.length || 1) / 60);
-    const rawScore = Math.min(1, titleOverlap * 0.7 + genreOverlap * 0.3 + volumeBonus);
+      sharedGenreIds.length / Math.max(1, Math.min(localGenres.size || 1, remoteGenres.size || 1));
+
+    const volumeBonus = Math.min(0.16, (remoteQualified.length || 1) / 70);
+
+    const now = Date.now();
+    const recencyWindowMs = 21 * 24 * 60 * 60 * 1000;
+    const recencyAvg = sharedTitleIds.length
+      ?
+        sharedTitleIds
+          .map((id) => {
+            const localTs = localMetaById.get(id)?.updatedAtMs ?? 0;
+            const remoteTs = remoteMetaById.get(id)?.updatedAtMs ?? 0;
+            const ts = Math.max(localTs, remoteTs);
+            if (!ts) return 0;
+            const age = Math.max(0, now - ts);
+            return 1 - Math.min(1, age / recencyWindowMs);
+          })
+          .reduce((a, b) => a + b, 0) / sharedTitleIds.length
+      : 0;
+    const recencyBoost = Math.min(0.12, recencyAvg * 0.12);
+
+    const rawScore = Math.min(
+      1,
+      titleOverlap * 0.55 + genreOverlap * 0.33 + volumeBonus + recencyBoost,
+    );
     const matchScore = Math.round(rawScore * 100);
-    if (matchScore < 20) return;
+    if (matchScore < MIN_MATCH_SCORE) return;
 
     const sharedTitles = remoteQualified
-      .filter((entry) => sharedTitleIds.includes(String(entry.tmdbId ?? entry.title ?? entry.id)))
+      .filter((entry) => sharedTitleIds.includes(getRemoteKey(entry)))
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
       .map((entry) => entry.title || 'Untitled');
-    const bestPick = remoteQualified.find((entry) =>
-      sharedTitleIds.includes(String(entry.tmdbId ?? entry.title ?? entry.id)),
-    );
+
+    const bestPick = [...remoteQualified]
+      .filter((entry) => sharedTitleIds.includes(getRemoteKey(entry)))
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
 
     matches.push({
       id: profile.id,
@@ -214,6 +273,7 @@ export const computeMatches = (
 export function useMovieMatchData() {
   const { user } = useUser();
   const [profileMeta, setProfileMeta] = useState<StoredProfile | null>(null);
+  const [localMatching, setLocalMatching] = useState<Media[]>([]);
   const [localQualified, setLocalQualified] = useState<Media[]>([]);
   const [localTotals, setLocalTotals] = useState<MovieMatchTotals>({ total: 0, qualified: 0 });
   const [activeProfileId, setActiveProfileId] = useState('default');
@@ -230,18 +290,81 @@ export function useMovieMatchData() {
       const key = buildProfileScopedKey('watchHistory', profile?.id ?? undefined);
       const stored = await AsyncStorage.getItem(key);
       const parsed: Media[] = stored ? JSON.parse(stored) : [];
-      const qualified = parsed.filter((entry) => (entry.watchProgress?.progress ?? 0) >= MIN_PROGRESS);
+      const mergedById = new Map<string, Media>();
+      parsed.forEach((entry) => {
+        const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie');
+        const id = entry?.id ?? (entry as any)?.tmdbId ?? entry?.title ?? entry?.name;
+        if (id == null) return;
+        mergedById.set(`${mediaType}:${String(id)}`, entry);
+      });
+
+      if (user?.uid) {
+        try {
+          const profileId = profile?.id ?? 'default';
+          const ref = collection(firestore, 'users', user.uid, 'watchHistory');
+          const q = query(ref, orderBy('updatedAtMs', 'desc'), limit(140));
+          const snap = await getDocs(q);
+          snap.docs.forEach((docSnap) => {
+            const data = docSnap.data() as any;
+            if (data?.profileId && data.profileId !== profileId) return;
+            const tmdbId = data?.tmdbId;
+            if (!tmdbId) return;
+            const mediaType = (data?.mediaType || 'movie') as string;
+            const key = `${String(mediaType)}:${String(tmdbId)}`;
+            const existing = mergedById.get(key);
+            const existingTs = existing?.watchProgress?.updatedAt ?? 0;
+            const incomingTs = data?.watchProgress?.updatedAtMs ?? data?.updatedAtMs ?? 0;
+            if (existing && existingTs >= incomingTs) return;
+
+            mergedById.set(key, {
+              id: tmdbId,
+              title: data?.title ?? undefined,
+              name: data?.title ?? undefined,
+              media_type: mediaType,
+              poster_path: data?.posterPath ?? undefined,
+              backdrop_path: data?.backdropPath ?? undefined,
+              genre_ids: Array.isArray(data?.genreIds) ? data.genreIds : undefined,
+              vote_average: typeof data?.voteAverage === 'number' ? data.voteAverage : undefined,
+              seasonNumber: typeof data?.seasonNumber === 'number' ? data.seasonNumber : undefined,
+              episodeNumber: typeof data?.episodeNumber === 'number' ? data.episodeNumber : undefined,
+              seasonTitle: typeof data?.seasonTitle === 'string' ? data.seasonTitle : undefined,
+              watchProgress: {
+                positionMillis: data?.watchProgress?.positionMillis ?? 0,
+                durationMillis: data?.watchProgress?.durationMillis ?? 0,
+                progress: data?.watchProgress?.progress ?? 0,
+                updatedAt: incomingTs || Date.now(),
+              },
+            } as Media);
+          });
+        } catch (err) {
+          console.warn('[MovieMatch] failed to load remote watch history', err);
+        }
+      }
+
+      const merged = [...mergedById.values()];
+
+      const matching = merged.filter((entry) => {
+        const progress = entry.watchProgress?.progress ?? 0;
+        return progress >= MIN_MATCHING_PROGRESS;
+      });
+
+      const qualified = merged.filter((entry) => {
+        const progress = entry.watchProgress?.progress ?? 0;
+        return progress >= MIN_PROGRESS && progress < 0.985;
+      });
       setActiveProfileId(profile?.id ?? 'default');
+      setLocalMatching(matching);
       setLocalQualified(qualified);
-      setLocalTotals({ total: parsed.length, qualified: qualified.length });
+      setLocalTotals({ total: merged.length, qualified: qualified.length });
     } catch (err) {
       console.warn('[MovieMatch] failed to load local history', err);
       setLocalQualified([]);
+      setLocalMatching([]);
       setLocalTotals({ total: 0, qualified: 0 });
     } finally {
       setLocalLoading(false);
     }
-  }, []);
+  }, [user?.uid]);
 
   useFocusEffect(
     useCallback(() => {
@@ -251,7 +374,7 @@ export function useMovieMatchData() {
 
   useEffect(() => {
     const profilesRef = collection(firestore, 'movieMatchProfiles');
-    const q = query(profilesRef, orderBy('updatedAt', 'desc'), limit(80));
+    const q = query(profilesRef, orderBy('updatedAt', 'desc'), limit(160));
 
     const unsubscribe = onSnapshot(
       q,
@@ -287,8 +410,8 @@ export function useMovieMatchData() {
   }, []);
 
   const matches = useMemo(
-    () => computeMatches(localQualified, remoteProfiles, user?.uid ?? undefined, activeProfileId),
-    [localQualified, remoteProfiles, user?.uid, activeProfileId],
+    () => computeMatches(localMatching, remoteProfiles, user?.uid ?? undefined, activeProfileId),
+    [localMatching, remoteProfiles, user?.uid, activeProfileId],
   );
 
   const viewerName = profileMeta?.name || user?.displayName || user?.email?.split('@')[0] || 'You';

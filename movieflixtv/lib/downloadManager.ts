@@ -93,7 +93,18 @@ function getAbortController(sessionId: string) {
   return state;
 }
 
-function emit(job: PersistedJob, status: DownloadJobStatus, progress?: number, errorMessage?: string) {
+function emit(
+  job: PersistedJob,
+  status: DownloadJobStatus,
+  progress?: number,
+  errorMessage?: string,
+  progressExtras?: {
+    bytesWritten?: number;
+    totalBytes?: number;
+    completedUnits?: number;
+    totalUnits?: number;
+  },
+) {
   emitDownloadEvent({
     sessionId: job.sessionId,
     title: job.title,
@@ -115,6 +126,11 @@ function emit(job: PersistedJob, status: DownloadJobStatus, progress?: number, e
     progress,
     job.subtitle ?? null,
     errorMessage,
+    {
+      overview: job.overview ?? null,
+      posterPath: job.posterPath ?? null,
+      ...(progressExtras ?? null),
+    },
   );
 }
 
@@ -158,7 +174,10 @@ async function runJob(job: PersistedJob) {
         if (shouldAbort()) return;
         const progress = total > 0 ? completed / total : 0;
         updateJob(job.sessionId, { progress });
-        emit(job, 'downloading', progress);
+        emit(job, 'downloading', progress, undefined, {
+          completedUnits: completed,
+          totalUnits: total,
+        });
       },
     });
 
@@ -204,7 +223,10 @@ async function runJob(job: PersistedJob) {
     if (progress.totalBytesExpectedToWrite > 0) {
       const ratio = progress.totalBytesWritten / progress.totalBytesExpectedToWrite;
       updateJob(job.sessionId, { progress: ratio, destination });
-      emit(job, 'downloading', ratio);
+      emit(job, 'downloading', ratio, undefined, {
+        bytesWritten: progress.totalBytesWritten,
+        totalBytes: progress.totalBytesExpectedToWrite,
+      });
     }
   };
 

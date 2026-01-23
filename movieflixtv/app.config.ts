@@ -31,56 +31,36 @@ function googleServicesContainsPackage(filePath: string, packageName: string): b
 }
 
 function resolveGoogleServicesFile(targetPackageName?: string): string | undefined {
-  const fileEnvPath = process.env.GOOGLE_SERVICES_JSON;
+  // For the TV app, only accept TV-scoped env vars so a mobile google-services.json/base64
+  // in the same shell (.env.local) doesn't get picked up and spam warnings.
+  const fileEnvPath = process.env.GOOGLE_SERVICES_JSON_TV;
   if (fileEnvPath && fs.existsSync(fileEnvPath)) {
     if (targetPackageName && !googleServicesContainsPackage(fileEnvPath, targetPackageName)) {
       console.warn(
-        `GOOGLE_SERVICES_JSON does not contain a client for package "${targetPackageName}". Skipping ${fileEnvPath}.`
+        `GOOGLE_SERVICES_JSON_TV does not contain a client for package "${targetPackageName}". Skipping ${fileEnvPath}.`
       );
     } else {
       return fileEnvPath;
     }
   }
 
-  const base64 = process.env.GOOGLE_SERVICES_JSON_BASE64;
-  const targetPath = path.resolve(__dirname, 'google-services.json');
+  const base64 = process.env.GOOGLE_SERVICES_JSON_BASE64_TV;
 
   if (base64) {
     try {
       const decoded = Buffer.from(base64, 'base64').toString('utf-8');
-      fs.writeFileSync(targetPath, decoded, 'utf-8');
-      if (targetPackageName && !googleServicesContainsPackage(targetPath, targetPackageName)) {
-        fs.unlinkSync(targetPath);
+      // Write to a separate file so a generic/mobile base64 cannot clobber the local TV file.
+      const decodedPath = path.resolve(__dirname, 'google-services.env.json');
+      fs.writeFileSync(decodedPath, decoded, 'utf-8');
+      if (targetPackageName && !googleServicesContainsPackage(decodedPath, targetPackageName)) {
         console.warn(
-          `GOOGLE_SERVICES_JSON_BASE64 does not contain a client for package "${targetPackageName}". Ignoring decoded file.`
+          `GOOGLE_SERVICES_JSON_BASE64_TV does not contain a client for package "${targetPackageName}". Ignoring decoded file.`
         );
       } else {
-        return targetPath;
+        return decodedPath;
       }
     } catch (e) {
       console.warn('Failed to decode GOOGLE_SERVICES_JSON_BASE64:', e);
-    }
-  }
-
-  if (fs.existsSync(targetPath)) {
-    if (targetPackageName && !googleServicesContainsPackage(targetPath, targetPackageName)) {
-      console.warn(
-        `google-services.json exists at ${targetPath} but does not contain a client for package "${targetPackageName}". Ignoring it.`
-      );
-    } else {
-      return targetPath;
-    }
-  }
-
-  // Fallback to repo-root google-services.json (useful for local dev)
-  const repoRootFallback = path.resolve(__dirname, '..', 'google-services.json');
-  if (fs.existsSync(repoRootFallback)) {
-    if (targetPackageName && !googleServicesContainsPackage(repoRootFallback, targetPackageName)) {
-      console.warn(
-        `Repo-root google-services.json does not contain a client for package "${targetPackageName}". Not using it for MovieFlix TV.`
-      );
-    } else {
-      return repoRootFallback;
     }
   }
 
@@ -99,9 +79,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     androidConfig.googleServicesFile = googleServicesFile;
   } else {
     delete (androidConfig as { googleServicesFile?: string }).googleServicesFile;
-    console.warn(
-      'google-services.json not found for MovieFlix TV. Set GOOGLE_SERVICES_JSON (File env var) or GOOGLE_SERVICES_JSON_BASE64 to enable Firebase on Android builds.'
-    );
   }
 
   return {

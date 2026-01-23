@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React from 'react';
@@ -25,8 +26,8 @@ import { formatKsh } from '../../lib/money';
 import {
   createMarketplaceOrder,
   createTicketsForPaidOrder,
-  getMarketplaceOrderByDocId,
-  marketplaceSubmitPaybillReceipt,
+  mpesaMarketplaceQuery,
+  mpesaMarketplaceStkPush,
   quoteMarketplaceCart,
   type MarketplaceCartQuote,
 } from './api';
@@ -41,15 +42,15 @@ export default function MarketplaceCheckoutScreen() {
   const [quoteError, setQuoteError] = React.useState<string | null>(null);
   const [orderDocId, setOrderDocId] = React.useState<string | null>(null);
   const [orderId, setOrderId] = React.useState<string | null>(null);
-  const [receiptCode, setReceiptCode] = React.useState('');
-  const [submittingReceipt, setSubmittingReceipt] = React.useState(false);
-  const [receiptSubmitted, setReceiptSubmitted] = React.useState(false);
+  const [mpesaPhone, setMpesaPhone] = React.useState('');
+  const [mpesaBusy, setMpesaBusy] = React.useState(false);
+  const [mpesaCheckoutRequestId, setMpesaCheckoutRequestId] = React.useState<string | null>(null);
+  const [mpesaStatus, setMpesaStatus] = React.useState<string | null>(null);
   const [checkingStatus, setCheckingStatus] = React.useState(false);
   const { user } = useUser();
   const activeProfile = useActiveProfile();
 
-  const PAYBILL_NUMBER = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_NUMBER ?? process.env.EXPO_PUBLIC_PAYBILL_NUMBER ?? '247247').trim();
-  const PAYBILL_ACCOUNT = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_ACCOUNT ?? process.env.EXPO_PUBLIC_PAYBILL_ACCOUNT ?? '480755').trim();
+  const MPESA_PHONE_CACHE_KEY = 'marketplaceMpesaPhone';
 
   const busyRef = React.useRef(false);
   const fulfilledRef = React.useRef(false);
@@ -59,11 +60,68 @@ export default function MarketplaceCheckoutScreen() {
   }, [setAccentColor]);
 
   React.useEffect(() => {
+    let mounted = true;
+    void AsyncStorage.getItem(MPESA_PHONE_CACHE_KEY)
+      .then((stored) => {
+        if (!mounted) return;
+        if (stored && stored.trim()) setMpesaPhone(stored.trim());
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [MPESA_PHONE_CACHE_KEY]);
+
+  const isLikelyKenyaPhone = React.useCallback((raw: string) => {
+    const cleaned = raw.trim().replace(/^[+]/, '').replace(/\s|-/g, '');
+    if (!cleaned) return false;
+    if (!/^\d+$/.test(cleaned)) return false;
+    return cleaned.startsWith('0') || cleaned.startsWith('254') || cleaned.startsWith('7') || cleaned.startsWith('1');
+  }, []);
+
+  const buildLocalQuote = React.useCallback((): MarketplaceCartQuote | null => {
+    if (cart.items.length === 0) return null;
+
+    const lines = cart.items
+      .map((item) => {
+        const quantity = Math.max(1, Math.min(10, Math.floor(Number(item.quantity) || 1)));
+        const unitPrice = Math.round(Number(item.product.price));
+        if (!Number.isFinite(unitPrice) || unitPrice <= 0) return null;
+
+        return {
+          product: item.product as any,
+          quantity,
+          unitPrice,
+          lineTotal: unitPrice * quantity,
+        };
+      })
+      .filter(Boolean) as any[];
+
+    if (lines.length === 0) return null;
+
+    const subtotal = lines.reduce((sum, l) => sum + Number(l.lineTotal ?? 0), 0);
+    const platformFee = Math.round(subtotal * 0.05);
+    const total = subtotal + platformFee;
+
+    return {
+      currency: 'KES',
+      lines: lines as any,
+      subtotal,
+      platformFee,
+      total,
+    } as MarketplaceCartQuote;
+  }, [cart.items]);
+
+  React.useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         setQuoteError(null);
         setQuoteLoading(true);
+
+        const local = buildLocalQuote();
+        if (!cancelled && local) setQuote(local);
+
         const q = await quoteMarketplaceCart({
           items: cart.items.map((i) => ({ productId: i.productId, quantity: i.quantity })),
           buyerId: user?.uid ?? null,
@@ -71,7 +129,8 @@ export default function MarketplaceCheckoutScreen() {
         if (!cancelled) setQuote(q);
       } catch (err: any) {
         if (!cancelled) {
-          setQuote(null);
+          const local = buildLocalQuote();
+          setQuote(local);
           setQuoteError(err?.message || 'Unable to price your cart right now.');
         }
       } finally {
@@ -81,7 +140,7 @@ export default function MarketplaceCheckoutScreen() {
     return () => {
       cancelled = true;
     };
-  }, [cart.items, user?.uid]);
+  }, [buildLocalQuote, cart.items, user?.uid]);
 
   const notifySellers = React.useCallback(
     async (args: { quote: MarketplaceCartQuote; orderId: string; buyerName: string; buyerEmail: string | null }) => {
@@ -137,79 +196,64 @@ export default function MarketplaceCheckoutScreen() {
       return;
     }
 
-    if (!quote) {
+    const activeQuote = quote ?? buildLocalQuote();
+    if (!activeQuote || activeQuote.total <= 0) {
       Alert.alert('Unable to checkout', quoteError || 'Please try again.');
+      return;
+    }
+
+    if (activeQuote.lines.some((l: any) => String(l?.product?.sellerId ?? '').trim() === user.uid)) {
+      Alert.alert('Not allowed', 'You cannot purchase your own listing.');
+      return;
+    }
+
+    if (!mpesaPhone.trim() || !isLikelyKenyaPhone(mpesaPhone)) {
+      Alert.alert('Invalid phone', 'Enter a Kenya phone number (e.g. 07XXXXXXXX or 2547XXXXXXXX).');
       return;
     }
 
     setPlacing(true);
     busyRef.current = true;
     try {
+      const firebaseToken = await user.getIdToken(true);
+
       const { docId, orderId } = await createMarketplaceOrder({
         buyerId: user.uid,
         buyerProfileId: activeProfile?.id ?? null,
-        quote,
+        quote: activeQuote,
       });
       setOrderDocId(docId);
       setOrderId(orderId);
       fulfilledRef.current = false;
 
-      setReceiptCode('');
-      setReceiptSubmitted(false);
+      setMpesaCheckoutRequestId(null);
+      setMpesaStatus(null);
 
-      Alert.alert(
-        'Order created',
-        `Pay via M-Pesa Paybill\n\nPaybill: ${PAYBILL_NUMBER}\nAccount/Business No: ${PAYBILL_ACCOUNT}\nAmount: ${formatKsh(quote.total)}\n\nUse reference: ${orderId}\n\nAfter payment, paste the M-Pesa receipt code (e.g. QRTSITS25S) below.`
-      );
+      try {
+        await AsyncStorage.setItem(MPESA_PHONE_CACHE_KEY, mpesaPhone.trim());
+      } catch {
+        // ignore
+      }
+
+      setMpesaBusy(true);
+      const stk = await mpesaMarketplaceStkPush({
+        firebaseToken,
+        phone: mpesaPhone.trim(),
+        amount: Math.round(activeQuote.total),
+        accountReference: orderId,
+        transactionDesc: `Marketplace order ${orderId}`,
+      });
+
+      setMpesaCheckoutRequestId(stk.checkoutRequestId ?? null);
+      setMpesaStatus(stk.customerMessage ?? 'STK push sent. Enter your M-Pesa PIN then tap “Check status”.');
+
+      Alert.alert('Check your phone', stk.customerMessage ?? 'Enter your M-Pesa PIN prompt then tap “Check status”.');
     } catch (err: any) {
       console.error('[marketplace] order start failed', err);
       Alert.alert('Checkout failed', err?.message || 'Unable to start checkout.');
     } finally {
       setPlacing(false);
-      busyRef.current = false;
-    }
-  };
-
-  const submitReceipt = async () => {
-    if (submittingReceipt || placing || busyRef.current) return;
-    if (!user?.uid) {
-      Alert.alert('Sign in required', 'Please sign in to submit your payment.');
-      return;
-    }
-    if (!orderDocId || !orderId || !quote) {
-      Alert.alert('Missing order', 'Create an order first.');
-      return;
-    }
-
-    const code = receiptCode.trim().toUpperCase();
-    if (!code) {
-      Alert.alert('Receipt required', 'Paste the M-Pesa receipt code you received by SMS (e.g. QRTSITS25S).');
-      return;
-    }
-
-    if (!/^[A-Z0-9]{10}$/.test(code)) {
-      Alert.alert('Invalid receipt code', 'Receipt code should be 10 characters (letters/numbers), e.g. QRTSITS25S.');
-      return;
-    }
-
-    setSubmittingReceipt(true);
-    busyRef.current = true;
-    try {
-      const firebaseToken = await user.getIdToken();
-
-      await marketplaceSubmitPaybillReceipt({
-        firebaseToken,
-        orderDocId,
-        receiptCode: code,
-      });
-
-      setReceiptSubmitted(true);
-      Alert.alert('Receipt submitted', 'We received your receipt code. Verification can take a short while.');
-    } catch (err: any) {
-      console.error('[marketplace] receipt submit failed', err);
-      Alert.alert('Submit failed', err?.message || 'Unable to submit receipt right now.');
-    } finally {
-      setSubmittingReceipt(false);
+      setMpesaBusy(false);
       busyRef.current = false;
     }
   };
@@ -225,14 +269,29 @@ export default function MarketplaceCheckoutScreen() {
       return;
     }
 
+    if (!mpesaCheckoutRequestId) {
+      Alert.alert('Missing request', 'Start payment first to get an STK prompt.');
+      return;
+    }
+
     setCheckingStatus(true);
     busyRef.current = true;
     try {
-      const order = await getMarketplaceOrderByDocId(orderDocId);
-      const status = String(order?.status ?? '').toLowerCase();
+      const firebaseToken = await user.getIdToken(true);
+      const res = await mpesaMarketplaceQuery({
+        firebaseToken,
+        checkoutRequestId: mpesaCheckoutRequestId,
+        orderDocId,
+      });
+
+      const status = String(res?.order?.status ?? '').toLowerCase();
+      const resultCode = res?.resultCode;
+
       if (status !== 'paid') {
+        const desc = res?.resultDesc || (resultCode != null ? `Result code: ${String(resultCode)}` : 'Not confirmed yet');
+        setMpesaStatus(desc);
         if (!opts?.silent) {
-          Alert.alert('Not confirmed yet', 'Your payment is not confirmed yet. Please try again shortly.');
+          Alert.alert('Not confirmed yet', desc);
         }
         return;
       }
@@ -277,17 +336,7 @@ export default function MarketplaceCheckoutScreen() {
       setCheckingStatus(false);
       busyRef.current = false;
     }
-  }, [activeProfile?.id, activeProfile?.name, cart, checkingStatus, notifySellers, orderDocId, orderId, placing, quote, router, user]);
-
-  React.useEffect(() => {
-    if (!receiptSubmitted) return;
-    if (!orderDocId || !orderId || !quote) return;
-    const interval = setInterval(() => {
-      void checkPaymentStatus({ silent: true });
-    }, 6000);
-
-    return () => clearInterval(interval);
-  }, [checkPaymentStatus, orderDocId, orderId, quote, receiptSubmitted]);
+  }, [activeProfile?.id, activeProfile?.name, cart, checkingStatus, mpesaCheckoutRequestId, notifySellers, orderDocId, orderId, placing, quote, router, user]);
 
   return (
     <ScreenWrapper>
@@ -308,7 +357,7 @@ export default function MarketplaceCheckoutScreen() {
             </TouchableOpacity>
           </View>
 
-          {cart.loading || quoteLoading ? (
+          {cart.loading || (quoteLoading && !quote) ? (
             <View style={styles.loading}>
               <ActivityIndicator size="large" color="#E50914" />
               <Text style={styles.loadingText}>Preparing checkout…</Text>
@@ -379,52 +428,46 @@ export default function MarketplaceCheckoutScreen() {
               </View>
 
               <View style={styles.card}>
-                <Text style={styles.sectionTitle}>Pay with M-Pesa Paybill (Equity)</Text>
+                <Text style={styles.sectionTitle}>Pay with M-Pesa (STK Push)</Text>
                 <Text style={styles.mutedNote}>
-                  1) Pay via Paybill {PAYBILL_NUMBER} and use account/business no {PAYBILL_ACCOUNT}.
-                  {'\n'}2) After payment, paste the M-Pesa receipt code you received by SMS (e.g. QRTSITS25S).
-                  {'\n'}3) We’ll verify and complete your order automatically once confirmed.
+                  1) Enter your phone number.
+                  {'\n'}2) Tap “Create order & pay” to receive an M-Pesa prompt.
+                  {'\n'}3) Enter your M-Pesa PIN, then tap “Check status”.
                 </Text>
 
+                <Text style={styles.inputLabel}>Phone number</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="07XXXXXXXX"
+                  placeholderTextColor="rgba(255,255,255,0.5)"
+                  keyboardType="phone-pad"
+                  value={mpesaPhone}
+                  onChangeText={(t) => setMpesaPhone(t)}
+                  editable={!placing && !mpesaBusy && !checkingStatus}
+                />
+
+                {!!mpesaStatus && <Text style={styles.mutedNote}>{mpesaStatus}</Text>}
+
                 <TouchableOpacity
-                  style={[styles.primaryBtn, (placing || !quote) && { opacity: 0.6 }]}
+                  style={[styles.primaryBtn, (placing || !quote || (quote?.total ?? 0) <= 0) && { opacity: 0.6 }]}
                   onPress={startOrder}
-                  disabled={placing || !quote}
+                  disabled={placing || !quote || (quote?.total ?? 0) <= 0}
                 >
                   {placing ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
                     <>
-                      <Ionicons name="receipt-outline" size={18} color="#fff" />
-                      <Text style={styles.primaryBtnText}>Create order · {formatKsh(quote?.total ?? 0)}</Text>
+                      <Ionicons name="phone-portrait-outline" size={18} color="#fff" />
+                      <Text style={styles.primaryBtnText}>Create order & pay · {formatKsh(quote?.total ?? cart.subtotal ?? 0)}</Text>
                     </>
                   )}
                 </TouchableOpacity>
 
                 {!!orderDocId && (
                   <>
-                    <Text style={styles.inputLabel}>M-Pesa receipt code</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="QRTSITS25S"
-                      placeholderTextColor="rgba(255,255,255,0.5)"
-                      autoCapitalize="characters"
-                      value={receiptCode}
-                      onChangeText={(t) => setReceiptCode(t.replace(/[^0-9a-zA-Z]/g, '').toUpperCase())}
-                      editable={!placing && !submittingReceipt && !checkingStatus}
-                    />
-
-                    <TouchableOpacity
-                      style={[styles.secondaryBtn, (submittingReceipt || receiptSubmitted) && { opacity: 0.6 }]}
-                      onPress={submitReceipt}
-                      disabled={submittingReceipt || receiptSubmitted}
-                    >
-                      {submittingReceipt ? (
-                        <ActivityIndicator color="#fff" />
-                      ) : (
-                        <Text style={styles.secondaryBtnText}>{receiptSubmitted ? 'Receipt submitted' : 'Submit receipt'}</Text>
-                      )}
-                    </TouchableOpacity>
+                    {mpesaCheckoutRequestId ? (
+                      <Text style={styles.mutedNote}>CheckoutRequestID: {mpesaCheckoutRequestId}</Text>
+                    ) : null}
 
                     <TouchableOpacity
                       style={[styles.secondaryBtn, checkingStatus && { opacity: 0.6 }]}
@@ -436,7 +479,7 @@ export default function MarketplaceCheckoutScreen() {
                   </>
                 )}
 
-                <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/marketplace/cart')} disabled={placing || submittingReceipt || checkingStatus}>
+                <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/marketplace/cart')} disabled={placing || mpesaBusy || checkingStatus}>
                   <Text style={styles.secondaryBtnText}>Back to cart</Text>
                 </TouchableOpacity>
               </View>

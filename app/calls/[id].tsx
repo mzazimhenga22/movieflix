@@ -1,5 +1,6 @@
  import {
   endCall,
+  heartbeatCallParticipant,
   joinCallAsParticipant,
   listenToCall,
   markParticipantLeft,
@@ -15,6 +16,7 @@ import {
   closeConnection,
   createAnswer,
   createOffer,
+  createOfferWithOptions,
   initializeWebRTC,
   setIceCandidateCallback,
   setRemoteDescription,
@@ -27,9 +29,14 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import type { User } from 'firebase/auth';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
+  Modal,
+  Platform,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -38,11 +45,43 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RTCIceCandidate, RTCSessionDescription, RTCView } from 'react-native-webrtc';
 import { getLastSeen, onAuthChange, onUserPresence } from '../messaging/controller';
+import { useMessagingSettings } from '../../hooks/useMessagingSettings';
 import CallControls from './components/CallControls';
+
+type VideoFilterId = 'none' | 'sepia' | 'warm' | 'cool' | 'noir' | 'rose';
+const VIDEO_FILTERS: Array<{ id: VideoFilterId; label: string; overlayColor: string; overlayOpacity: number }> = [
+  { id: 'none', label: 'None', overlayColor: 'transparent', overlayOpacity: 0 },
+  { id: 'sepia', label: 'Sepia', overlayColor: '#7a4e21', overlayOpacity: 0.24 },
+  { id: 'warm', label: 'Warm', overlayColor: '#ff7a2f', overlayOpacity: 0.14 },
+  { id: 'cool', label: 'Cool', overlayColor: '#2f9bff', overlayOpacity: 0.12 },
+  { id: 'noir', label: 'Noir', overlayColor: '#000000', overlayOpacity: 0.18 },
+  { id: 'rose', label: 'Rose', overlayColor: '#ff4fa0', overlayOpacity: 0.10 },
+];
+
+const CALL_GRADIENT_PALETTES: [string, string, string][] = [
+  ['#0e0a1c', '#3a1247', '#07040e'],
+  ['#07152a', '#0c3d6a', '#060912'],
+  ['#0b1b16', '#0b5038', '#070b0a'],
+  ['#1c0b0b', '#6a0c0c', '#070404'],
+  ['#0c0a0f', '#3b2240', '#05050a'],
+];
+
+const VideoFilterOverlay = ({ filterId }: { filterId: VideoFilterId }) => {
+  const selected = VIDEO_FILTERS.find((f) => f.id === filterId) ?? VIDEO_FILTERS[0];
+  if (selected.id === 'none' || selected.overlayOpacity <= 0) return null;
+  return (
+    <View
+      pointerEvents="none"
+      style={[StyleSheet.absoluteFillObject, { backgroundColor: selected.overlayColor, opacity: selected.overlayOpacity }]}
+    />
+  );
+};
 
 const CallScreen = () => {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+
+  const { settings } = useMessagingSettings();
 
   const [user, setUser] = useState<User | null>(null);
   const [call, setCall] = useState<CallSession | null>(null);
@@ -57,8 +96,68 @@ const CallScreen = () => {
   const [remoteStream, setRemoteStream] = useState<any>(null);
   const [webrtcReady, setWebrtcReady] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [videoFilterId, setVideoFilterId] = useState<VideoFilterId>('none');
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [otherPresence, setOtherPresence] = useState<{ state: 'online' | 'offline'; last_changed: number | null } | null>(null);
   const [otherLastSeen, setOtherLastSeen] = useState<Date | null>(null);
+  const [connectionState, setConnectionState] = useState<string | null>(null);
+  const [iceState, setIceState] = useState<string | null>(null);
+
+  const voiceBgFade = useRef(new Animated.Value(0)).current;
+  const voiceBgIndexRef = useRef(0);
+  const [voiceBgIndex, setVoiceBgIndex] = useState(0);
+  const [voiceBgNextIndex, setVoiceBgNextIndex] = useState(1);
+
+  // Ambient orb animations
+  const orbPulse1 = useRef(new Animated.Value(0)).current;
+  const orbPulse2 = useRef(new Animated.Value(0)).current;
+  const ringPulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Orb 1 pulse animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(orbPulse1, { toValue: 1, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(orbPulse1, { toValue: 0, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    ).start();
+    // Orb 2 pulse animation (offset)
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(orbPulse2, { toValue: 1, duration: 2500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(orbPulse2, { toValue: 0, duration: 2500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    ).start();
+    // Ring pulse for dialing state
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(ringPulse, { toValue: 1, duration: 1200, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+        Animated.timing(ringPulse, { toValue: 0, duration: 1200, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+      ])
+    ).start();
+  }, [orbPulse1, orbPulse2, ringPulse]);
+
+  const localStreamUrl = useMemo(() => {
+    if (!localStream || typeof localStream?.toURL !== 'function') return null;
+    try {
+      return localStream.toURL();
+    } catch {
+      return null;
+    }
+  }, [localStream]);
+
+  const remoteStreamUrl = useMemo(() => {
+    if (!remoteStream || typeof remoteStream?.toURL !== 'function') return null;
+    try {
+      return remoteStream.toURL();
+    } catch {
+      return null;
+    }
+  }, [remoteStream]);
+
+  const videoFilterLabel = useMemo(() => {
+    return (VIDEO_FILTERS.find((f) => f.id === videoFilterId) ?? VIDEO_FILTERS[0]).label;
+  }, [videoFilterId]);
 
   const peerConnectionRef = useRef<any>(null);
   const hasJoinedRef = useRef(false);
@@ -66,6 +165,16 @@ const CallScreen = () => {
   const processedOffersRef = useRef<Set<string>>(new Set());
   const processedAnswersRef = useRef<Set<string>>(new Set());
   const processedIceRef = useRef<Set<string>>(new Set());
+  const iceRestartAttemptedRef = useRef(false);
+
+  const hashString = useCallback((input: string) => {
+    let h = 2166136261;
+    for (let i = 0; i < input.length; i += 1) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(16);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthChange((authUser) => {
@@ -75,6 +184,40 @@ const CallScreen = () => {
   }, []);
 
   useEffect(() => {
+    if (call?.type !== 'voice') return;
+
+    const seed = String(call?.id ?? '0');
+    const startIndex = seed
+      .split('')
+      .reduce((acc, ch) => (acc + ch.charCodeAt(0)) % CALL_GRADIENT_PALETTES.length, 0);
+    voiceBgIndexRef.current = startIndex;
+    setVoiceBgIndex(startIndex);
+    setVoiceBgNextIndex((startIndex + 1) % CALL_GRADIENT_PALETTES.length);
+    voiceBgFade.setValue(0);
+
+    let alive = true;
+    const interval = setInterval(() => {
+      const next = (voiceBgIndexRef.current + 1) % CALL_GRADIENT_PALETTES.length;
+      setVoiceBgNextIndex(next);
+      voiceBgFade.setValue(0);
+      Animated.timing(voiceBgFade, {
+        toValue: 1,
+        duration: 1200,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (!alive || !finished) return;
+        voiceBgIndexRef.current = next;
+        setVoiceBgIndex(next);
+      });
+    }, 5200);
+
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, [call?.id, call?.type, voiceBgFade]);
+
+  useEffect(() => {
     if (!id) return;
     const unsubscribe = listenToCall(String(id), async (session) => {
       setCall(session);
@@ -82,12 +225,12 @@ const CallScreen = () => {
     return () => unsubscribe();
   }, [id, user?.uid]);
 
-  const otherUserId = (() => {
+  const otherUserId = useMemo(() => {
     if (!call?.members?.length || !user?.uid) return null;
     if (call.isGroup) return null;
     const others = call.members.filter((m) => m !== user.uid);
     return others.length === 1 ? others[0] : null;
-  })();
+  }, [call?.isGroup, call?.members, user?.uid]);
 
   useEffect(() => {
     if (!otherUserId) {
@@ -98,6 +241,10 @@ const CallScreen = () => {
 
     const unsub = onUserPresence(otherUserId, (status) => {
       setOtherPresence(status);
+      if (settings.hibernate) {
+        setOtherLastSeen(null);
+        return;
+      }
       if (status.state === 'online') {
         setOtherLastSeen(null);
         offlineTimeoutAtRef.current = null;
@@ -113,7 +260,7 @@ const CallScreen = () => {
         unsub();
       } catch {}
     };
-  }, [otherUserId]);
+  }, [otherUserId, settings.hibernate]);
 
   useEffect(() => {
     // If the callee is online and we haven't started ringing yet, flip the call state to ringing.
@@ -142,7 +289,8 @@ const CallScreen = () => {
 
         // Non-initiators only accept the initiator's offer.
         if (!isInitiator && senderId === call.initiatorId && senderSignaling.offer) {
-          const offerKey = `${call.id}:${senderId}:offer`;
+          const sdpHash = hashString(String(senderSignaling.offer?.sdp ?? ''));
+          const offerKey = `${call.id}:${senderId}:offer:${sdpHash}`;
           if (!processedOffersRef.current.has(offerKey)) {
             processedOffersRef.current.add(offerKey);
             try {
@@ -158,7 +306,8 @@ const CallScreen = () => {
 
         // Initiator accepts answers from any other participant.
         if (isInitiator && senderSignaling.answer) {
-          const answerKey = `${call.id}:${senderId}:answer`;
+          const sdpHash = hashString(String(senderSignaling.answer?.sdp ?? ''));
+          const answerKey = `${call.id}:${senderId}:answer:${sdpHash}`;
           if (!processedAnswersRef.current.has(answerKey)) {
             processedAnswersRef.current.add(answerKey);
             try {
@@ -191,7 +340,7 @@ const CallScreen = () => {
         }
       }
     })();
-  }, [call?.id, call?.initiatorId, call?.signaling, user?.uid, webrtcReady]);
+  }, [call?.id, call?.initiatorId, call?.signaling, hashString, user?.uid, webrtcReady]);
 
   useEffect(() => {
     if (!call) return;
@@ -269,11 +418,45 @@ const CallScreen = () => {
         try {
           (peerConnection as any).onconnectionstatechange = () => {
             const state = (peerConnection as any).connectionState;
+            try {
+              setConnectionState(state ?? null);
+            } catch {}
             if (state === 'connected') setIsConnected(true);
+            if (state === 'failed') {
+              // Failed ICE/DTLS handshake is common on weak networks without TURN.
+              // Best-effort retry (initiator only) to avoid being stuck forever.
+              if (!iceRestartAttemptedRef.current && call.initiatorId === user.uid) {
+                iceRestartAttemptedRef.current = true;
+                void (async () => {
+                  try {
+                    const offer = await createOfferWithOptions({ iceRestart: true });
+                    await sendOffer(call.id, user.uid, offer);
+                  } catch (err) {
+                    console.warn('ICE restart offer failed', err);
+                  }
+                })();
+              }
+            }
           };
           (peerConnection as any).oniceconnectionstatechange = () => {
             const iceState = (peerConnection as any).iceConnectionState;
+            try {
+              setIceState(iceState ?? null);
+            } catch {}
             if (iceState === 'connected' || iceState === 'completed') setIsConnected(true);
+            if (iceState === 'failed') {
+              if (!iceRestartAttemptedRef.current && call.initiatorId === user.uid) {
+                iceRestartAttemptedRef.current = true;
+                void (async () => {
+                  try {
+                    const offer = await createOfferWithOptions({ iceRestart: true });
+                    await sendOffer(call.id, user.uid, offer);
+                  } catch (err) {
+                    console.warn('ICE restart offer failed', err);
+                  }
+                })();
+              }
+            }
           };
         } catch {
           // ignore
@@ -313,6 +496,67 @@ const CallScreen = () => {
       cancelled = true;
     };
   }, [call?.id, call?.channelName, call?.type, user?.uid]);
+
+  useEffect(() => {
+    // Watchdog: if we're stuck in "connecting/checking" for too long, attempt a single ICE restart.
+    if (!call?.id || !user?.uid) return;
+    if (!webrtcReady || isConnected) return;
+    if (call.type !== 'video') return;
+    if (call.initiatorId !== user.uid) return;
+
+    const pc: any = peerConnectionRef.current;
+    const state = String(pc?.connectionState ?? '');
+    const ice = String(pc?.iceConnectionState ?? '');
+    const looksStuck = state === 'connecting' || ice === 'checking' || ice === 'disconnected' || state === '';
+    if (!looksStuck) return;
+
+    const t = setTimeout(() => {
+      if (iceRestartAttemptedRef.current) return;
+      iceRestartAttemptedRef.current = true;
+      void (async () => {
+        try {
+          const offer = await createOfferWithOptions({ iceRestart: true });
+          await sendOffer(call.id, user.uid, offer);
+        } catch (err) {
+          console.warn('ICE restart offer failed', err);
+        }
+      })();
+    }, 18_000);
+
+    return () => clearTimeout(t);
+  }, [call?.id, call?.initiatorId, call?.type, isConnected, user?.uid, webrtcReady]);
+
+  useEffect(() => {
+    // If the call is still not connected after a grace period, show a helpful error.
+    if (!webrtcReady || isConnected) return;
+    if (!call?.id) return;
+
+    const t = setTimeout(() => {
+      if (isConnected) return;
+      setError(
+        'Still connecting. This usually happens on weak networks or when a TURN relay is needed. Try switching networks or start a voice call.',
+      );
+    }, 32_000);
+
+    return () => clearTimeout(t);
+  }, [call?.id, isConnected, webrtcReady]);
+
+  useEffect(() => {
+    // Pro: participant heartbeat so the other side can detect reconnecting/stale clients.
+    if (!call?.id || !user?.uid) return;
+    if (call.status !== 'active') return;
+
+    const t = setInterval(() => {
+      const pc: any = peerConnectionRef.current;
+      const extras = {
+        connectionState: typeof pc?.connectionState === 'string' ? pc.connectionState : null,
+        iceState: typeof pc?.iceConnectionState === 'string' ? pc.iceConnectionState : null,
+      };
+      void heartbeatCallParticipant(call.id, user.uid, extras).catch(() => {});
+    }, 25_000);
+
+    return () => clearInterval(t);
+  }, [call?.id, call?.status, user?.uid]);
 
   useEffect(() => {
     return () => {
@@ -364,25 +608,23 @@ const CallScreen = () => {
   }, [call?.id, call?.initiatorId, call?.isGroup, call?.ringTimeoutAt, call?.status, cleanupConnection, isConnected, otherPresence?.state, router, user?.uid]);
 
   const toggleAudio = useCallback(async () => {
-    const next = !mutedAudio;
-    const success = webrtcToggleAudio();
-    if (success) {
-      setMutedAudio(next);
-      if (call?.id && user?.uid) {
-        await updateParticipantMuteState(call.id, user.uid, { mutedAudio: next });
-      }
+    const result = webrtcToggleAudio();
+    if (!result) return;
+    const nextMuted = !result.enabled;
+    setMutedAudio(nextMuted);
+    if (call?.id && user?.uid) {
+      await updateParticipantMuteState(call.id, user.uid, { mutedAudio: nextMuted });
     }
   }, [mutedAudio, call?.id, user?.uid]);
 
   const toggleVideo = useCallback(async () => {
     if (call?.type === 'voice') return;
-    const next = !mutedVideo;
-    const success = webrtcToggleVideo();
-    if (success) {
-      setMutedVideo(next);
-      if (call?.id && user?.uid) {
-        await updateParticipantMuteState(call.id, user.uid, { mutedVideo: next });
-      }
+    const result = webrtcToggleVideo();
+    if (!result) return;
+    const nextMuted = !result.enabled;
+    setMutedVideo(nextMuted);
+    if (call?.id && user?.uid) {
+      await updateParticipantMuteState(call.id, user.uid, { mutedVideo: nextMuted });
     }
   }, [mutedVideo, call?.id, call?.type, user?.uid]);
 
@@ -402,20 +644,79 @@ const CallScreen = () => {
   }
 
   const subtitle = (() => {
-    if (isConnected || call.status === 'active') return 'Connected';
+    if (call.status === 'active') {
+      if (connectionState === 'disconnected' || connectionState === 'connecting') return 'Reconnecting…';
+      if (iceState === 'disconnected' || iceState === 'checking') return 'Reconnecting…';
+      return 'Connected';
+    }
+    if (isConnected) return 'Connected';
     if (call.isGroup) return call.status === 'ringing' ? 'Ringing…' : 'Calling group…';
-    if (otherPresence?.state === 'online') return 'Ringing…';
-    if (otherLastSeen) return `Calling… (last seen ${otherLastSeen.toLocaleString()})`;
+    if (call.status === 'ringing') return 'Ringing…';
+    if (!settings.hibernate && otherLastSeen) return `Calling… (last seen ${otherLastSeen.toLocaleString()})`;
     return 'Calling…';
   })();
 
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#0d0c12', '#05050a']}
+        colors={call.type === 'voice' ? CALL_GRADIENT_PALETTES[voiceBgIndex] : ['#0d0c12', '#05050a']}
         style={StyleSheet.absoluteFill}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
+      />
+      {call.type === 'voice' ? (
+        <Animated.View style={[StyleSheet.absoluteFillObject, { opacity: voiceBgFade }]} pointerEvents="none">
+          <LinearGradient
+            colors={CALL_GRADIENT_PALETTES[voiceBgNextIndex]}
+            style={StyleSheet.absoluteFill}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+          />
+        </Animated.View>
+      ) : null}
+
+      {/* Animated ambient orbs */}
+      <Animated.View
+        style={[
+          styles.ambientOrb1,
+          {
+            opacity: orbPulse1.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.6] }),
+            transform: [{ scale: orbPulse1.interpolate({ inputRange: [0, 1], outputRange: [1, 1.15] }) }],
+          },
+        ]}
+        pointerEvents="none"
+      >
+        <LinearGradient
+          colors={call.type === 'voice' ? ['#ff4b4b50', '#ff4b4b10', 'transparent'] : ['#6482ff40', '#6482ff10', 'transparent']}
+          style={StyleSheet.absoluteFillObject}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+        />
+      </Animated.View>
+      <Animated.View
+        style={[
+          styles.ambientOrb2,
+          {
+            opacity: orbPulse2.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.25] }),
+            transform: [{ scale: orbPulse2.interpolate({ inputRange: [0, 1], outputRange: [1.1, 0.95] }) }],
+          },
+        ]}
+        pointerEvents="none"
+      >
+        <LinearGradient
+          colors={call.type === 'voice' ? ['#ffa72650', '#ff704310', 'transparent'] : ['#a855f740', '#a855f710', 'transparent']}
+          style={StyleSheet.absoluteFillObject}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+        />
+      </Animated.View>
+
+      <LinearGradient
+        colors={['rgba(0,0,0,0.18)', 'rgba(0,0,0,0.65)', 'rgba(0,0,0,0.9)']}
+        style={StyleSheet.absoluteFillObject}
+        start={{ x: 0.2, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+        pointerEvents="none"
       />
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={styles.topBar}>
@@ -436,7 +737,7 @@ const CallScreen = () => {
         <View style={styles.body}>
           {call.type === 'video' ? (
             <View style={styles.videoArea}>
-              {!remoteStream ? (
+              {!remoteStreamUrl ? (
                 <View style={styles.waitingCard}>
                   <BlurView intensity={60} tint="dark" style={styles.waitingBlur}>
                     <Ionicons name="videocam-outline" size={32} color="#fff" />
@@ -446,30 +747,73 @@ const CallScreen = () => {
                   </BlurView>
                 </View>
               ) : (
-                <RTCView
-                  streamURL={remoteStream.toURL()}
-                  style={styles.remoteVideo}
-                  objectFit="cover"
-                />
+                <View style={styles.remoteVideo}>
+                  <RTCView
+                    key={remoteStreamUrl}
+                    streamURL={remoteStreamUrl}
+                    style={StyleSheet.absoluteFillObject}
+                    objectFit="cover"
+                    zOrder={0}
+                  />
+                  <VideoFilterOverlay filterId={videoFilterId} />
+                </View>
               )}
-              {localStream && (
+              {localStreamUrl && (
                 <View style={styles.localPreview}>
                   <RTCView
-                    streamURL={localStream.toURL()}
+                    key={localStreamUrl}
+                    streamURL={localStreamUrl}
                     style={styles.localVideo}
                     objectFit="cover"
+                    mirror
+                    zOrder={1}
                   />
+                  <VideoFilterOverlay filterId={videoFilterId} />
                   <Text style={styles.previewLabel}>You</Text>
                 </View>
               )}
             </View>
           ) : (
             <View style={styles.voiceArea}>
-              <Ionicons name="call" size={36} color="#fff" />
+              {/* Pulsing rings for dialing state */}
+              {!isConnected && (
+                <>
+                  <Animated.View
+                    style={[
+                      styles.voiceRing,
+                      styles.voiceRing1,
+                      {
+                        opacity: ringPulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0] }),
+                        transform: [{ scale: ringPulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2] }) }],
+                      },
+                    ]}
+                  />
+                  <Animated.View
+                    style={[
+                      styles.voiceRing,
+                      styles.voiceRing2,
+                      {
+                        opacity: ringPulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0, 0.3, 0] }),
+                        transform: [{ scale: ringPulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
+                      },
+                    ]}
+                  />
+                </>
+              )}
+              <View style={styles.voiceIconWrap}>
+                <LinearGradient
+                  colors={['rgba(229,9,20,0.3)', 'rgba(229,9,20,0.1)']}
+                  style={StyleSheet.absoluteFillObject}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                />
+                <Ionicons name="call" size={40} color="#fff" />
+              </View>
               <Text style={styles.voiceTitle}>{call.conversationName ?? 'Voice call'}</Text>
-              <Text style={styles.voiceSubtitle}>
-                {subtitle}
-              </Text>
+              <View style={styles.voiceStatusPill}>
+                {isConnected && <View style={styles.voiceStatusDot} />}
+                <Text style={styles.voiceSubtitle}>{subtitle}</Text>
+              </View>
             </View>
           )}
         </View>
@@ -483,9 +827,44 @@ const CallScreen = () => {
             onToggleAudio={toggleAudio}
             onToggleVideo={toggleVideo}
             onToggleSpeaker={toggleSpeaker}
+            onOpenFilters={call.type === 'video' ? () => setFiltersOpen(true) : undefined}
+            filterLabel={videoFilterLabel}
             onEnd={handleHangUp}
           />
         </View>
+
+        <Modal visible={filtersOpen} transparent animationType="fade" onRequestClose={() => setFiltersOpen(false)}>
+          <Pressable style={styles.modalBackdrop} onPress={() => setFiltersOpen(false)}>
+            <Pressable style={styles.modalCard} onPress={() => {}}>
+              <Text style={styles.modalTitle}>Video filters</Text>
+              <Text style={styles.modalSubtitle}>Applies locally (does not change what the other person receives).</Text>
+              <View style={styles.modalGrid}>
+                {VIDEO_FILTERS.map((filter) => {
+                  const active = filter.id === videoFilterId;
+                  return (
+                    <TouchableOpacity
+                      key={filter.id}
+                      style={[styles.filterPill, active && styles.filterPillActive]}
+                      onPress={() => setVideoFilterId(filter.id)}
+                      activeOpacity={0.85}
+                    >
+                      <View
+                        style={[
+                          styles.filterSwatch,
+                          { backgroundColor: filter.overlayColor, opacity: Math.max(0.1, filter.overlayOpacity) },
+                        ]}
+                      />
+                      <Text style={[styles.filterLabel, active && styles.filterLabelActive]}>{filter.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <TouchableOpacity style={styles.modalDone} onPress={() => setFiltersOpen(false)}>
+                <Text style={styles.modalDoneText}>Done</Text>
+              </TouchableOpacity>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
         {error && (
           <View style={styles.errorBanner}>
@@ -598,22 +977,92 @@ const styles = StyleSheet.create({
     marginTop: 8,
     color: '#fff',
   },
+  ambientOrb1: {
+    position: 'absolute',
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    top: '10%',
+    left: -60,
+    overflow: 'hidden',
+  },
+  ambientOrb2: {
+    position: 'absolute',
+    width: 250,
+    height: 250,
+    borderRadius: 125,
+    bottom: '15%',
+    right: -40,
+    overflow: 'hidden',
+  },
   voiceArea: {
-    borderRadius: 24,
-    paddingVertical: 48,
+    borderRadius: 28,
+    paddingVertical: 56,
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
     marginHorizontal: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  voiceRing: {
+    position: 'absolute',
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: 'rgba(229,9,20,0.5)',
+  },
+  voiceRing1: {
+    width: 100,
+    height: 100,
+  },
+  voiceRing2: {
+    width: 100,
+    height: 100,
+  },
+  voiceIconWrap: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(229,9,20,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.3)',
+    overflow: 'hidden',
   },
   voiceTitle: {
-    marginTop: 16,
+    marginTop: 20,
     color: '#fff',
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
   },
   voiceSubtitle: {
-    marginTop: 6,
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  voiceStatusPill: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  voiceStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4ade80',
+    shadowColor: '#4ade80',
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
   },
   errorBanner: {
     alignSelf: 'center',
@@ -626,6 +1075,78 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#fff',
     fontSize: 12,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 18,
+    backgroundColor: 'rgba(18,18,24,0.92)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    padding: 16,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  modalSubtitle: {
+    marginTop: 6,
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+  },
+  modalGrid: {
+    marginTop: 14,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  filterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  filterPillActive: {
+    backgroundColor: 'rgba(229,9,20,0.22)',
+    borderColor: 'rgba(229,9,20,0.35)',
+  },
+  filterSwatch: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+  },
+  filterLabel: {
+    color: 'rgba(255,255,255,0.85)',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  filterLabelActive: {
+    color: '#fff',
+  },
+  modalDone: {
+    marginTop: 16,
+    alignSelf: 'flex-end',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: '#E50914',
+  },
+  modalDoneText: {
+    color: '#fff',
+    fontWeight: '900',
   },
   loadingWrap: {
     flex: 1,

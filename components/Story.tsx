@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { StyleSheet, View, Text, Image, Animated, Easing, TouchableOpacity } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 
 interface StoryMedia {
   type: 'image' | 'video';
@@ -23,6 +24,7 @@ const StoryComponent: React.FC<StoryProps> = ({ stories }) => {
   const displayedStories = stories.slice(0, 4);
   const slideAnim = useRef(new Animated.Value(0)).current;
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
 
   useEffect(() => {
     // When stories change, trigger the animation
@@ -37,12 +39,14 @@ const StoryComponent: React.FC<StoryProps> = ({ stories }) => {
   }, [stories]); // Dependency on the whole stories array
 
   const handleStoryPress = (story: Story) => {
-    router.push({
-      pathname: '/story-viewer',
-      params: {
-        stories: JSON.stringify(stories), // Pass all stories
-        initialStoryId: story.id, // Pass the ID of the tapped story
-      },
+    deferNav(() => {
+      router.push({
+        pathname: '/story-viewer',
+        params: {
+          stories: JSON.stringify(stories), // Pass all stories
+          initialStoryId: story.id, // Pass the ID of the tapped story
+        },
+      });
     });
   };
 
@@ -57,8 +61,12 @@ const StoryComponent: React.FC<StoryProps> = ({ stories }) => {
         <View style={styles.railSheen} pointerEvents="none" />
         <View style={styles.railGlow} pointerEvents="none" />
         <Animated.View style={[styles.storiesContainer, { transform: [{ translateY: slideAnim }] }]}>
-          {displayedStories.map((story) => (
-            <TouchableOpacity key={story.id} style={styles.storyContainer} onPress={() => handleStoryPress(story)}>
+          {displayedStories.map((story, index) => (
+            <TouchableOpacity
+              key={`story-${index}-${String(story.id)}-${story.title}`}
+              style={styles.storyContainer}
+              onPress={() => handleStoryPress(story)}
+            >
               <View style={styles.storyImageWrapper}>
                 <Image source={{ uri: story.image }} style={styles.storyImage} />
               </View>

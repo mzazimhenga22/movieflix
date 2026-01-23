@@ -21,6 +21,8 @@ import { CastMember, Media } from '../../types';
 import NewChatSheet from '../messaging/components/NewChatSheet';
 import { Profile, findOrCreateConversation, getFollowing } from '../messaging/controller';
 import MovieDetailsView from './MovieDetailsView';
+import { logInteraction } from '../../lib/algo';
+import { useUser } from '../../hooks/use-user';
 
 interface Video {
   key: string;
@@ -34,7 +36,24 @@ const ACCENT = '#E50914';
 const MovieDetailsContainer: React.FC = () => {
   const { id, mediaType } = useLocalSearchParams();
   const router = useRouter();
+  const { user } = useUser();
   const [movie, setMovie] = useState<Media | null>(null);
+  // ... (keep existing state)
+
+  useEffect(() => {
+    if (id && mediaType && user?.uid && movie) {
+      void logInteraction({
+        type: 'view',
+        actorId: user.uid,
+        targetId: String(id),
+        targetType: mediaType === 'tv' ? 'tv' : 'movie',
+        meta: {
+          title: movie.title || movie.name,
+          genres: movie.genre_ids
+        }
+      });
+    }
+  }, [id, mediaType, user?.uid, movie?.id]); // Only log once movie details are loaded
   const [trailers, setTrailers] = useState<Video[]>([]);
   const [relatedMovies, setRelatedMovies] = useState<Media[]>([]);
   const [seasons, setSeasons] = useState<any[]>([]);

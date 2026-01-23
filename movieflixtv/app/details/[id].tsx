@@ -609,7 +609,7 @@ export default function TvDetailsScreen() {
         />
         <Text style={styles.errorTitle}>Couldn’t load</Text>
         <Text style={styles.errorText}>{error ?? 'Unknown error'}</Text>
-        <TvFocusable onPress={() => router.back()} style={styles.secondaryBtn}>
+        <TvFocusable onPress={() => router.back()} style={styles.secondaryBtn} isTVSelectable={true} accessibilityLabel="Go back">
           <Text style={styles.secondaryText}>Go back</Text>
         </TvFocusable>
       </View>
@@ -666,6 +666,8 @@ export default function TvDetailsScreen() {
             <View style={styles.topBar}>
               <TvFocusable
                 onPress={() => router.back()}
+                isTVSelectable={true}
+                accessibilityLabel="Back"
                 style={({ focused }: any) => [styles.iconBtn, focused ? styles.btnFocused : null]}
               >
                 <Ionicons name="arrow-back" size={18} color="#fff" />
@@ -683,6 +685,8 @@ export default function TvDetailsScreen() {
               <View style={styles.topActions}>
                 <TvFocusable
                   onPress={() => void toggleMyList()}
+                  isTVSelectable={true}
+                  accessibilityLabel={inMyList ? 'Remove from list' : 'Add to list'}
                   style={({ focused }: any) => [styles.iconBtn, focused ? styles.btnFocused : null]}
                 >
                   <Ionicons name={inMyList ? 'checkmark' : 'add'} size={18} color="#fff" />
@@ -690,6 +694,8 @@ export default function TvDetailsScreen() {
                 <TvFocusable
                   onPress={() => (existingDownload ? playOffline() : void startDownload())}
                   disabled={downloading || scraping}
+                  isTVSelectable={true}
+                  accessibilityLabel={existingDownload ? 'Play offline' : 'Download'}
                   style={({ focused }: any) => [
                     styles.iconBtn,
                     (downloading || scraping) ? { opacity: 0.6 } : null,
@@ -738,13 +744,15 @@ export default function TvDetailsScreen() {
                   </View>
 
                   <View style={styles.ctaRow}>
-                    <TvFocusable onPress={play} style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}>
+                    <TvFocusable onPress={play} isTVSelectable={true} accessibilityLabel="Play" style={({ focused }: any) => [styles.primaryBtn, focused ? styles.btnFocused : null]}>
                       <Ionicons name="play" size={18} color="#000" />
                       <Text style={styles.primaryText}>Play</Text>
                     </TvFocusable>
                     <TvFocusable
                       onPress={() => (existingDownload ? playOffline() : void startDownload())}
                       disabled={downloading || scraping}
+                      isTVSelectable={true}
+                      accessibilityLabel={existingDownload ? 'Play offline' : 'Download'}
                       style={({ focused }: any) => [
                         styles.secondaryBtn,
                         (downloading || scraping) ? { opacity: 0.6 } : null,
@@ -754,7 +762,7 @@ export default function TvDetailsScreen() {
                       <Ionicons name={existingDownload ? 'download' : 'cloud-download'} size={18} color="#fff" />
                       <Text style={styles.secondaryText}>{existingDownload ? 'Offline' : 'Download'}</Text>
                     </TvFocusable>
-                    <TvFocusable onPress={() => void toggleMyList()} style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}>
+                    <TvFocusable onPress={() => void toggleMyList()} isTVSelectable={true} accessibilityLabel={inMyList ? 'My List' : 'Add to list'} style={({ focused }: any) => [styles.ghostBtn, focused ? styles.btnFocused : null]}>
                       <Ionicons name={inMyList ? 'checkmark' : 'add'} size={18} color="#fff" />
                       <Text style={styles.secondaryText}>{inMyList ? 'My List' : 'Add'}</Text>
                     </TvFocusable>
@@ -795,6 +803,8 @@ export default function TvDetailsScreen() {
                         onPress={playTrailer}
                         onFocus={() => setTrailerFocused(true)}
                         onBlur={() => setTrailerFocused(false)}
+                        isTVSelectable={true}
+                        accessibilityLabel="Watch trailer"
                         style={({ focused }: any) => [styles.trailerCard, focused ? styles.trailerCardFocused : null]}
                       >
                         {trailerFocused && !lowEndDevice ? (
@@ -862,6 +872,8 @@ export default function TvDetailsScreen() {
                               <TvFocusable
                                 key={s.id}
                                 onPress={() => setSelectedSeasonNumber(s.season_number)}
+                                isTVSelectable={true}
+                                accessibilityLabel={s.name}
                                 style={({ focused }: any) => [
                                   styles.seasonChip,
                                   selected ? styles.seasonChipSelected : null,
@@ -897,6 +909,8 @@ export default function TvDetailsScreen() {
                             return (
                               <TvFocusable
                                 onPress={() => playEpisode(ep)}
+                                isTVSelectable={true}
+                                accessibilityLabel={`Episode ${ep.episode_number}: ${ep.name}`}
                                 style={({ focused }: any) => [
                                   styles.episodeCard,
                                   focused ? styles.episodeCardFocused : null,
@@ -1114,7 +1128,15 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   secondaryText: { color: '#fff', fontSize: 15, fontWeight: '900' },
-  btnFocused: { transform: [{ scale: 1.04 }], borderColor: '#fff' },
+  btnFocused: { 
+    transform: [{ scale: 1.08 }], 
+    borderColor: '#fff',
+    borderWidth: 2,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 10,
+  },
 
   episodesSection: { marginTop: 20 },
   sectionTitle: { color: '#fff', fontSize: 22, fontWeight: '900', marginBottom: 12 },

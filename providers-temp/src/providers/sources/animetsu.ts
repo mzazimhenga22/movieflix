@@ -50,5 +50,6 @@ export const animetsuScraper = makeSourcerer({
   name: 'Animetsu',
   rank: 112,
   flags: [],
+  disabled: true,
   scrapeShow: comboScraper,
 });

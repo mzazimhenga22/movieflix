@@ -1,55 +1,51 @@
 import { useEffect, useState } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getProfileScopedKey } from '@/lib/profileStorage';
-
-export interface MessagingSettings {
-  notificationsEnabled: boolean;
-  showPreviews: boolean;
-  readReceipts: boolean;
-  typingIndicators: boolean;
-  mediaAutoDownloadWifi: boolean;
-  mediaAutoDownloadCellular: boolean;
-}
-
-const DEFAULT_SETTINGS: MessagingSettings = {
-  notificationsEnabled: true,
-  showPreviews: true,
-  readReceipts: true,
-  typingIndicators: true,
-  mediaAutoDownloadWifi: true,
-  mediaAutoDownloadCellular: false,
-};
+import {
+  DEFAULT_MESSAGING_SETTINGS,
+  loadMessagingSettings,
+  saveMessagingSettings,
+  subscribeMessagingSettings,
+  type MessagingSettings,
+} from '@/lib/messagingSettingsStore';
 
 export const useMessagingSettings = () => {
-  const [settings, setSettings] = useState<MessagingSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<MessagingSettings>(DEFAULT_MESSAGING_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    loadSettings();
-  }, []);
+    let mounted = true;
 
-  const loadSettings = async () => {
-    try {
-      const key = await getProfileScopedKey('messagingSettings');
-      const stored = await AsyncStorage.getItem(key);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        setSettings({ ...DEFAULT_SETTINGS, ...parsed });
+    void (async () => {
+      try {
+        const next = await loadMessagingSettings();
+        if (mounted) setSettings(next);
+      } catch (err) {
+        console.warn('[useMessagingSettings] Failed to load settings', err);
+      } finally {
+        if (mounted) setIsLoading(false);
       }
-    } catch (err) {
-      console.warn('[useMessagingSettings] Failed to load settings', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    })();
+
+    const unsub = subscribeMessagingSettings((next) => {
+      if (!mounted) return;
+      setSettings(next);
+    });
+
+    return () => {
+      mounted = false;
+      try {
+        unsub();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
 
   const updateSettings = async (newSettings: Partial<MessagingSettings>) => {
     try {
       const updated = { ...settings, ...newSettings };
       setSettings(updated);
 
-      const key = await getProfileScopedKey('messagingSettings');
-      await AsyncStorage.setItem(key, JSON.stringify(updated));
+      await saveMessagingSettings(updated);
     } catch (err) {
       console.warn('[useMessagingSettings] Failed to save settings', err);
     }

@@ -490,7 +490,7 @@ export const createMarketplaceListing = async (
     categoryKey: validated.categoryKey,
     productType: validated.productType ?? ProductType.PHYSICAL,
 
-    eventKind: validated.eventKind,
+    eventKind: validated.eventKind ?? null,
     eventStartsAt: validated.eventStartsAt ?? null,
     eventVenue: validated.eventVenue ?? null,
     eventRoomCode: validated.eventRoomCode ?? null,
@@ -691,9 +691,28 @@ export const createTicketsForPaidOrder = async (args: {
 
   const ticketIds: string[] = [];
 
-  const eventLines = args.quote.lines.filter((l) => l.product.productType === ProductType.EVENT);
-  for (const line of eventLines) {
-    const qty = Math.max(1, Math.min(10, Math.floor(line.quantity)));
+  // Quote lines may be built from lightweight cart snapshots (missing productType/event fields),
+  // so resolve products from Firestore before issuing tickets.
+  const resolved = await Promise.all(
+    args.quote.lines.map(async (line) => {
+      const productId = String((line as any)?.product?.id ?? '').trim();
+      if (!productId) return null;
+
+      const maybeType = (line as any)?.product?.productType;
+      const product = maybeType ? (line.product as any) : await getProductById(productId);
+      if (!product) return null;
+
+      return { line, product };
+    })
+  );
+
+  const eventLines = resolved.filter((r): r is { line: MarketplaceQuotedLine; product: Product & { id: string } } => {
+    if (!r) return false;
+    return (r.product as any)?.productType === ProductType.EVENT;
+  });
+
+  for (const { line, product } of eventLines) {
+    const qty = Math.max(1, Math.min(10, Math.floor(Number(line.quantity) || 1)));
 
     for (let i = 0; i < qty; i += 1) {
       const ticketId = `MFTK-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`.slice(
@@ -707,13 +726,13 @@ export const createTicketsForPaidOrder = async (args: {
         orderId,
         buyerId,
         buyerProfileId: args.buyerProfileId ?? null,
-        sellerId: line.product.sellerId,
-        productId: line.product.id,
-        productName: line.product.name,
-        eventKind: line.product.eventKind,
-        eventStartsAt: line.product.eventStartsAt ?? null,
-        eventVenue: line.product.eventVenue ?? null,
-        eventRoomCode: line.product.eventRoomCode ?? null,
+        sellerId: product.sellerId,
+        productId: product.id,
+        productName: product.name,
+        eventKind: product.eventKind,
+        eventStartsAt: product.eventStartsAt ?? null,
+        eventVenue: product.eventVenue ?? null,
+        eventRoomCode: product.eventRoomCode ?? null,
         status: 'active',
         createdAt: serverTimestamp(),
       };
@@ -817,6 +836,15 @@ type DarajaMarketplaceQueryResponse = {
   raw: any;
 };
 
+type DarajaStkQueryResponse = {
+  ok: true;
+  uid: string;
+  checkoutRequestId: string;
+  resultCode: string | number | null;
+  resultDesc: string | null;
+  raw: any;
+};
+
 const darajaFunctionUrl = () => {
   if (!supabaseUrl) throw new Error('Supabase env vars missing');
   return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/daraja`;
@@ -827,6 +855,23 @@ const paybillFunctionUrl = () => {
   return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/paybill`;
 };
 
+async function parseEdgeFunctionResponse(res: Response, fallbackMessage: string) {
+  const raw = await res.text();
+  const data = (() => {
+    try {
+      return raw ? (JSON.parse(raw) as any) : ({} as any);
+    } catch {
+      return { raw };
+    }
+  })();
+
+  if (!res.ok) {
+    throw new Error(data?.error || data?.message || `${fallbackMessage} (HTTP ${res.status})`);
+  }
+
+  return data;
+}
+
 export const marketplaceSubmitPaybillReceipt = async (args: {
   firebaseToken: string;
   orderDocId: string;
@@ -835,7 +880,9 @@ export const marketplaceSubmitPaybillReceipt = async (args: {
   const res = await fetch(paybillFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-authorization': `Bearer ${args.firebaseToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -845,8 +892,7 @@ export const marketplaceSubmitPaybillReceipt = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Payment receipt submission failed');
+  const data = await parseEdgeFunctionResponse(res, 'Payment receipt submission failed');
   return data as PaybillMarketplaceSubmitResponse;
 };
 
@@ -858,7 +904,9 @@ export const promoCreditsSubmitPaybillReceipt = async (args: {
   const res = await fetch(paybillFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-authorization': `Bearer ${args.firebaseToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -868,8 +916,7 @@ export const promoCreditsSubmitPaybillReceipt = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Promo credits receipt submission failed');
+  const data = await parseEdgeFunctionResponse(res, 'Promo credits receipt submission failed');
   return data as PaybillPromoCreditsSubmitResponse;
 };
 
@@ -883,7 +930,8 @@ export const mpesaMarketplaceStkPush = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -895,8 +943,7 @@ export const mpesaMarketplaceStkPush = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Payment request failed');
+  const data = await parseEdgeFunctionResponse(res, 'Payment request failed');
   return data as DarajaMarketplaceStkPushResponse;
 };
 
@@ -908,7 +955,8 @@ export const mpesaMarketplaceQuery = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -918,9 +966,29 @@ export const mpesaMarketplaceQuery = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Payment verification failed');
+  const data = await parseEdgeFunctionResponse(res, 'Payment verification failed');
   return data as DarajaMarketplaceQueryResponse;
+};
+
+export const darajaStkQuery = async (args: {
+  firebaseToken: string;
+  checkoutRequestId: string;
+}): Promise<DarajaStkQueryResponse> => {
+  const res = await fetch(darajaFunctionUrl(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: 'stkquery',
+      checkoutRequestId: args.checkoutRequestId,
+    }),
+  });
+
+  const data = await parseEdgeFunctionResponse(res, 'Payment verification failed');
+  return data as DarajaStkQueryResponse;
 };
 
 type DarajaPromoCreditsStkPushResponse = {
@@ -957,7 +1025,8 @@ export const mpesaPromoCreditsStkPush = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -969,8 +1038,7 @@ export const mpesaPromoCreditsStkPush = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Credit top up failed');
+  const data = await parseEdgeFunctionResponse(res, 'Credit top up failed');
   return data as DarajaPromoCreditsStkPushResponse;
 };
 
@@ -981,7 +1049,8 @@ export const mpesaPromoCreditsQuery = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -990,8 +1059,7 @@ export const mpesaPromoCreditsQuery = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Credit top up verification failed');
+  const data = await parseEdgeFunctionResponse(res, 'Credit top up verification failed');
   return data as DarajaPromoCreditsQueryResponse;
 };
 
@@ -1014,7 +1082,8 @@ export const marketplacePromoteWithCredits = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -1026,8 +1095,7 @@ export const marketplacePromoteWithCredits = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Unable to start promotion');
+  const data = await parseEdgeFunctionResponse(res, 'Unable to start promotion');
   return data as MarketplacePromoteCreditsResponse;
 };
 
@@ -1041,7 +1109,8 @@ export const marketplaceExtendPromotionWithCredits = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -1053,8 +1122,7 @@ export const marketplaceExtendPromotionWithCredits = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Unable to extend promotion');
+  const data = await parseEdgeFunctionResponse(res, 'Unable to extend promotion');
   return data as MarketplacePromoteCreditsResponse;
 };
 
@@ -1065,7 +1133,8 @@ export const marketplaceCancelPromotion = async (args: {
   const res = await fetch(darajaFunctionUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${args.firebaseToken}`,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      'x-firebase-token': args.firebaseToken,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -1074,8 +1143,7 @@ export const marketplaceCancelPromotion = async (args: {
     }),
   });
 
-  const data = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(data?.error || 'Unable to cancel promotion');
+  const data = await parseEdgeFunctionResponse(res, 'Unable to cancel promotion');
   return data as { ok: true; uid: string; productId: string };
 };
 

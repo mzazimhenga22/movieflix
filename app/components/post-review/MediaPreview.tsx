@@ -1,5 +1,5 @@
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 import {
 
@@ -10,6 +10,10 @@ import {
   Text,
 
   TextInput,
+
+  FlatList,
+
+  Image,
 
   KeyboardAvoidingView,
 
@@ -40,6 +44,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import MediaContent, { MediaContentHandle } from './media-preview/MediaContent';
+
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../constants/api';
+import { getPersistedCache, setPersistedCache, deletePersistedCache } from '../../../lib/persistedCache';
 
 
 
@@ -73,6 +80,20 @@ interface ReviewData {
 
   overlayTextPosition?: { x: number; y: number };
 
+  // Optional: attached movie metadata (used when picking from search)
+  movieId?: number;
+  moviePosterUrl?: string | null;
+  movieReleaseYear?: string | null;
+
+}
+
+const REVIEW_DRAFT_KEY = '__movieflix_review_draft_v1';
+
+interface MovieSearchResult {
+  id: number;
+  title: string;
+  year: string | null;
+  posterUrl: string | null;
 }
 
 
@@ -131,6 +152,9 @@ export default function MediaPreview({
 
   const [isPosting, setIsPosting] = useState(false);
 
+  const [draftOverlayPosition, setDraftOverlayPosition] = useState<{ x: number; y: number } | undefined>(
+    initialReviewData?.overlayTextPosition,
+  );
   const insets = useSafeAreaInsets();
 
 
@@ -144,6 +168,109 @@ export default function MediaPreview({
   const [isRatingModalVisible, setRatingModalVisible] = useState(false);
 
   const [isTitleModalVisible, setTitleModalVisible] = useState(false);
+
+  const [movieResults, setMovieResults] = useState<MovieSearchResult[]>([]);
+  const [movieSearchLoading, setMovieSearchLoading] = useState(false);
+  const [movieSearchError, setMovieSearchError] = useState<string | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+
+  useEffect(() => {
+    if (!isTitleModalVisible) {
+      setMovieResults([]);
+      setMovieSearchLoading(false);
+      setMovieSearchError(null);
+      try {
+        searchAbortRef.current?.abort();
+      } catch {}
+      searchAbortRef.current = null;
+      return;
+    }
+
+    const q = (reviewData.title || '').trim();
+    if (q.length < 2) {
+      setMovieResults([]);
+      setMovieSearchLoading(false);
+      setMovieSearchError(null);
+      return;
+    }
+
+    if (!API_KEY) {
+      setMovieResults([]);
+      setMovieSearchLoading(false);
+      setMovieSearchError('Movie search is not configured.');
+      return;
+    }
+
+    setMovieSearchError(null);
+    setMovieSearchLoading(true);
+
+    const timer = setTimeout(() => {
+      try {
+        searchAbortRef.current?.abort();
+      } catch {}
+
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+
+      void fetch(
+        `${API_BASE_URL}/search/movie?api_key=${encodeURIComponent(API_KEY)}&query=${encodeURIComponent(q)}&include_adult=false`,
+        { signal: controller.signal },
+      )
+        .then((res) => res.json())
+        .then((json) => {
+          const results: any[] = Array.isArray(json?.results) ? json.results : [];
+          setMovieResults(
+            results.slice(0, 20).map((r) => {
+              const title = String(r?.title || r?.name || '').trim();
+              const releaseDate = String(r?.release_date || r?.first_air_date || '').trim();
+              const year = releaseDate ? releaseDate.slice(0, 4) : null;
+              const posterPath = r?.poster_path ? String(r.poster_path) : '';
+              const posterUrl = posterPath ? `${IMAGE_BASE_URL}${posterPath}` : null;
+              return {
+                id: Number(r?.id),
+                title,
+                year,
+                posterUrl,
+              } satisfies MovieSearchResult;
+            }),
+          );
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return;
+          setMovieSearchError('Unable to search right now.');
+          setMovieResults([]);
+        })
+        .finally(() => {
+          setMovieSearchLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      try {
+        searchAbortRef.current?.abort();
+      } catch {}
+    };
+  }, [isTitleModalVisible, reviewData.title]);
+
+  useEffect(() => {
+    if (initialReviewData) return;
+    let cancelled = false;
+    void (async () => {
+      const cached = await getPersistedCache<any>(REVIEW_DRAFT_KEY);
+      if (cancelled || !cached?.value) return;
+      const draft = cached.value;
+      setReviewData(draft.reviewData || { rating: 0, review: '', title: '' });
+      setOverlayText(draft.overlayText || '');
+      if (draft.overlayTextPosition) setDraftOverlayPosition(draft.overlayTextPosition);
+      setDraftSavedAt(cached.savedAtMs || null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialReviewData]);
 
 
 
@@ -170,6 +297,8 @@ export default function MediaPreview({
         overlayTextPosition: { x: currentTextPosition.x, y: currentTextPosition.y },
 
       });
+      await deletePersistedCache(REVIEW_DRAFT_KEY);
+      setDraftSavedAt(null);
 
     } catch (e: any) {
 
@@ -224,6 +353,33 @@ export default function MediaPreview({
     if (onClose) onClose();
   };
 
+  const handleSaveDraft = async () => {
+    if (draftSaving) return;
+    setDraftSaving(true);
+    try {
+      const currentTextPosition =
+        (mediaContentRef.current &&
+        typeof (mediaContentRef.current as any).getOverlayTextPosition === 'function'
+          ? (mediaContentRef.current as any).getOverlayTextPosition()
+          : null) || { x: 0, y: 0 };
+
+      await setPersistedCache(REVIEW_DRAFT_KEY, {
+        media,
+        reviewData,
+        overlayText,
+        overlayTextPosition: currentTextPosition,
+      });
+      setDraftOverlayPosition(currentTextPosition);
+      setDraftSavedAt(Date.now());
+      Alert.alert('Draft saved', 'You can resume this review draft from the feed.');
+    } catch (e) {
+      console.warn('Failed to save draft', e);
+      Alert.alert('Could not save draft', 'Please try again.');
+    } finally {
+      setDraftSaving(false);
+    }
+  };
+
 
 
   return (
@@ -253,7 +409,7 @@ export default function MediaPreview({
 
               setOverlayText={setOverlayText}
 
-              initialOverlayTextPosition={initialReviewData ? initialReviewData.overlayTextPosition : undefined}
+              initialOverlayTextPosition={draftOverlayPosition}
 
               isEditingText={false}
 
@@ -352,16 +508,27 @@ export default function MediaPreview({
 
 
             <View style={[styles.footer, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
+                <View style={styles.footerRow}>
+                  <TouchableOpacity onPress={handleSaveDraft} disabled={draftSaving || isPosting} style={styles.draftButton}>
+                    {draftSaving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.draftButtonText}>{draftSavedAt ? 'Save again' : 'Save draft'}</Text>
+                    )}
+                  </TouchableOpacity>
 
-                <TouchableOpacity onPress={handlePost} disabled={isPosting} style={styles.postButton}>
+                  <TouchableOpacity onPress={handlePost} disabled={isPosting} style={styles.postButton}>
+                      <LinearGradient colors={["#ff8a00", "#e50914"]} style={styles.postButtonGradient}>
+                          {isPosting ? <ActivityIndicator color="#fff" /> : <Text style={styles.postButtonText}>{isEditing ? 'Update' : 'Post'}</Text>}
+                      </LinearGradient>
+                  </TouchableOpacity>
+                </View>
 
-                    <LinearGradient colors={["#ff8a00", "#e50914"]} style={styles.postButtonGradient}>
-
-                        {isPosting ? <ActivityIndicator color="#fff" /> : <Text style={styles.postButtonText}>{isEditing ? 'Update' : 'Post'}</Text>}
-
-                    </LinearGradient>
-
-                </TouchableOpacity>
+                {draftSavedAt ? (
+                  <Text style={styles.draftHint} numberOfLines={1}>
+                    Draft saved • tap &quot;Save draft&quot; to update before posting
+                  </Text>
+                ) : null}
 
             </View>
 
@@ -379,23 +546,79 @@ export default function MediaPreview({
 
             <Pressable style={styles.modalContent}>
 
-                <Text style={styles.modalTitle}>Movie Title</Text>
+                <Text style={styles.modalTitle}>Pick a movie</Text>
 
-                <TextInput
+                <View style={styles.movieSearchRow}>
+                  <Ionicons name="search" size={16} color="rgba(255,255,255,0.7)" />
+                  <TextInput
+                      style={[styles.modalInput, styles.movieSearchInput]}
+                      placeholder="Search movies"
+                      placeholderTextColor="#888"
+                      value={reviewData.title}
+                      onChangeText={title => setReviewData(d => ({ ...d, title }))}
+                      autoFocus
+                  />
+                  {reviewData.title ? (
+                    <TouchableOpacity
+                      onPress={() => setReviewData((d) => ({ ...d, title: '', movieId: undefined, moviePosterUrl: null, movieReleaseYear: null }))}
+                      style={styles.movieSearchClear}
+                    >
+                      <Ionicons name="close-circle" size={18} color="rgba(255,255,255,0.7)" />
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
 
-                    style={styles.modalInput}
+                {movieSearchLoading ? (
+                  <View style={styles.movieSearchStatus}>
+                    <ActivityIndicator color="#fff" />
+                    <Text style={styles.movieSearchStatusText}>Searching…</Text>
+                  </View>
+                ) : movieSearchError ? (
+                  <Text style={styles.movieSearchErrorText}>{movieSearchError}</Text>
+                ) : null}
 
-                    placeholder="e.g. The Matrix"
+                {movieResults.length > 0 ? (
+                  <FlatList
+                    data={movieResults}
+                    keyExtractor={(item) => String(item.id)}
+                    style={styles.movieResultsList}
+                    keyboardShouldPersistTaps="handled"
+                    renderItem={({ item }) => (
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        style={styles.movieResultRow}
+                        onPress={() => {
+                          setReviewData((d) => ({
+                            ...d,
+                            title: item.title,
+                            movieId: item.id,
+                            moviePosterUrl: item.posterUrl,
+                            movieReleaseYear: item.year,
+                          }));
+                          setTitleModalVisible(false);
+                        }}
+                      >
+                        {item.posterUrl ? (
+                          <Image source={{ uri: item.posterUrl }} style={styles.moviePoster} />
+                        ) : (
+                          <View style={styles.moviePosterFallback}>
+                            <Ionicons name="film-outline" size={18} color="rgba(255,255,255,0.65)" />
+                          </View>
+                        )}
 
-                    placeholderTextColor="#888"
-
-                    value={reviewData.title}
-
-                    onChangeText={title => setReviewData(d => ({ ...d, title }))}
-
-                    autoFocus
-
-                />
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.movieResultTitle} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          {item.year ? (
+                            <Text style={styles.movieResultMeta}>{item.year}</Text>
+                          ) : null}
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                    ItemSeparatorComponent={() => <View style={styles.movieResultSep} />}
+                  />
+                ) : null}
 
                 <TouchableOpacity onPress={() => setTitleModalVisible(false)} style={styles.modalButton}>
 
@@ -709,6 +932,162 @@ const styles = StyleSheet.create({
         fontSize: 16,
 
         marginBottom: 20,
+
+    },
+
+    movieSearchRow: {
+
+        flexDirection: 'row',
+
+        alignItems: 'center',
+
+        gap: 10,
+
+        paddingHorizontal: 12,
+
+        backgroundColor: 'rgba(255,255,255,0.06)',
+
+        borderRadius: 10,
+
+        marginBottom: 12,
+
+    },
+
+    movieSearchInput: {
+
+        flex: 1,
+
+        minWidth: 0,
+
+        backgroundColor: 'transparent',
+
+        color: 'white',
+
+        padding: 0,
+
+        marginBottom: 0,
+
+    },
+
+    movieSearchClear: {
+
+        padding: 4,
+
+    },
+
+    movieSearchStatus: {
+
+        flexDirection: 'row',
+
+        alignItems: 'center',
+
+        gap: 8,
+
+        marginBottom: 10,
+
+    },
+
+    movieSearchStatusText: {
+
+        color: 'rgba(255,255,255,0.75)',
+
+        fontSize: 12,
+
+        fontWeight: '600',
+
+    },
+
+    movieSearchErrorText: {
+
+        color: 'rgba(255,80,80,0.95)',
+
+        fontSize: 12,
+
+        fontWeight: '700',
+
+        marginBottom: 10,
+
+    },
+
+    movieResultsList: {
+
+        maxHeight: 280,
+
+        marginBottom: 12,
+
+    },
+
+    movieResultRow: {
+
+        flexDirection: 'row',
+
+        alignItems: 'center',
+
+        gap: 12,
+
+        paddingVertical: 8,
+
+        paddingHorizontal: 6,
+
+        borderRadius: 12,
+
+    },
+
+    movieResultSep: {
+
+        height: 1,
+
+        backgroundColor: 'rgba(255,255,255,0.08)',
+
+        marginVertical: 6,
+
+    },
+
+    moviePoster: {
+
+        width: 40,
+
+        height: 56,
+
+        borderRadius: 10,
+
+        backgroundColor: 'rgba(255,255,255,0.08)',
+
+    },
+
+    moviePosterFallback: {
+
+        width: 40,
+
+        height: 56,
+
+        borderRadius: 10,
+
+        backgroundColor: 'rgba(255,255,255,0.08)',
+
+        alignItems: 'center',
+
+        justifyContent: 'center',
+
+    },
+
+    movieResultTitle: {
+
+        color: 'white',
+
+        fontSize: 14,
+
+        fontWeight: '700',
+
+    },
+
+    movieResultMeta: {
+
+        color: 'rgba(255,255,255,0.65)',
+
+        fontSize: 12,
+
+        marginTop: 2,
 
     },
 

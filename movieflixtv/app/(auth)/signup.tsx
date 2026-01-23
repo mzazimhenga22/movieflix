@@ -1,305 +1,319 @@
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  ScrollView,
+  Animated,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions
 } from 'react-native';
 
-import { authPromise, firestore } from '@/constants/firebase';
-import TvVirtualKeyboard from '../components/TvVirtualKeyboard';
+import QRCode from 'react-native-qrcode-svg';
 import { TvFocusable } from '../components/TvSpatialNavigation';
 
 export default function TvSignupScreen() {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [activeField, setActiveField] = useState<'name' | 'email' | 'password' | 'confirm'>('name');
-  const [lowercase, setLowercase] = useState(true);
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
 
-  const canSubmit = useMemo(() => {
-    return (
-      name.trim().length >= 2 &&
-      email.trim().length > 3 &&
-      password.length >= 6 &&
-      confirm.length >= 6 &&
-      password === confirm &&
-      !busy
-    );
-  }, [busy, confirm, email, name, password]);
+  const cardAnim = useRef(new Animated.Value(0)).current;
+  const logoAnim = useRef(new Animated.Value(0)).current;
 
-  const applyKey = useCallback(
-    (value: string) => {
-      const set =
-        activeField === 'name'
-          ? setName
-          : activeField === 'email'
-            ? setEmail
-            : activeField === 'password'
-              ? setPassword
-              : setConfirm;
+  useEffect(() => {
+    Animated.stagger(100, [
+      Animated.spring(logoAnim, { toValue: 1, friction: 8, tension: 50, useNativeDriver: true }),
+      Animated.spring(cardAnim, { toValue: 1, friction: 9, tension: 55, useNativeDriver: true }),
+    ]).start();
+  }, [cardAnim, logoAnim]);
 
-      if (value === 'DEL') {
-        set((prev) => prev.slice(0, -1));
-        return;
-      }
-      if (value === 'CLEAR') {
-        set('');
-        return;
-      }
+  const isCompact = screenHeight < 800;
+  const cardMaxWidth = Math.min(700, screenWidth - 160);
 
-      if (value === ' ' && activeField === 'email') return;
-
-      const next = (() => {
-        if (lowercase && /^[A-Z]$/.test(value)) return value.toLowerCase();
-        return value;
-      })();
-
-      set((prev) => {
-        const merged = `${prev}${next}`;
-        return merged.length > 64 ? merged.slice(0, 64) : merged;
-      });
-    },
-    [activeField, lowercase],
-  );
-
-  const submit = useCallback(async () => {
-    const displayName = name.trim();
-    const e = email.trim();
-    if (!displayName || !e || !password) {
-      Alert.alert('Missing info', 'Fill in all fields.');
-      return;
-    }
-    if (password !== confirm) {
-      Alert.alert('Passwords do not match', 'Re-enter your password.');
-      return;
-    }
-
-    try {
-      setBusy(true);
-      const auth = await authPromise;
-      const cred = await createUserWithEmailAndPassword(auth, e, password);
-      await updateProfile(cred.user, { displayName });
-      await setDoc(
-        doc(firestore, 'users', cred.user.uid),
-        {
-          displayName,
-          email: e,
-          planTier: 'free',
-          createdAt: Date.now(),
-        },
-        { merge: true },
-      );
-      router.replace('/select-profile');
-    } catch (err: any) {
-      Alert.alert('Sign up failed', err?.message ?? 'Unable to create account.');
-    } finally {
-      setBusy(false);
-    }
-  }, [confirm, email, name, password]);
+  // Deep link to app store or app sign up page
+  const signupUrl = 'https://movieflix.app/signup'; // Replace with actual URL
 
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#150a13', '#070815', '#05060f']}
+        colors={['#0d1a12', '#0d0815', '#05060f']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
 
-      <ScrollView
-        style={{ flex: 1, width: '100%' }}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
+      {/* Accent glow */}
+      <View style={styles.glowContainer}>
+        <LinearGradient
+          colors={['rgba(80,200,120,0.12)', 'transparent']}
+          style={styles.glow}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+        />
+      </View>
+
+      {/* Logo */}
+      <Animated.View
+        style={[
+          styles.logoContainer,
+          {
+            opacity: logoAnim,
+            transform: [{ translateY: logoAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
+          },
+        ]}
       >
-        <View style={styles.card}>
-          <Text style={styles.title}>Create account</Text>
-          <Text style={styles.subtitle}>Use the same account on phone and TV.</Text>
-
-        <View style={styles.fieldsGrid}>
-          <TvFocusable
-            onPress={() => setActiveField('name')}
-            style={({ focused }: any) => [
-              styles.field,
-              activeField === 'name' ? styles.fieldActive : null,
-              focused ? styles.fieldFocused : null,
-            ]}
-          >
-            <Text style={styles.fieldLabel}>Name</Text>
-            <Text style={styles.fieldValue} numberOfLines={1}>
-              {name || '—'}
-            </Text>
-          </TvFocusable>
-
-          <TvFocusable
-            onPress={() => setActiveField('email')}
-            style={({ focused }: any) => [
-              styles.field,
-              activeField === 'email' ? styles.fieldActive : null,
-              focused ? styles.fieldFocused : null,
-            ]}
-          >
-            <Text style={styles.fieldLabel}>Email</Text>
-            <Text style={styles.fieldValue} numberOfLines={1}>
-              {email || '—'}
-            </Text>
-          </TvFocusable>
-
-          <TvFocusable
-            onPress={() => setActiveField('password')}
-            style={({ focused }: any) => [
-              styles.field,
-              activeField === 'password' ? styles.fieldActive : null,
-              focused ? styles.fieldFocused : null,
-            ]}
-          >
-            <Text style={styles.fieldLabel}>Password</Text>
-            <Text style={styles.fieldValue} numberOfLines={1}>
-              {password ? '•'.repeat(Math.min(password.length, 18)) : '—'}
-            </Text>
-          </TvFocusable>
-
-          <TvFocusable
-            onPress={() => setActiveField('confirm')}
-            style={({ focused }: any) => [
-              styles.field,
-              activeField === 'confirm' ? styles.fieldActive : null,
-              focused ? styles.fieldFocused : null,
-            ]}
-          >
-            <Text style={styles.fieldLabel}>Confirm</Text>
-            <Text style={styles.fieldValue} numberOfLines={1}>
-              {confirm ? '•'.repeat(Math.min(confirm.length, 18)) : '—'}
-            </Text>
-          </TvFocusable>
+        <View style={styles.logoIcon}>
+          <Ionicons name="film" size={28} color="#50c878" />
         </View>
+        <Text style={styles.logoText}>MovieFlix</Text>
+      </Animated.View>
 
-        <View style={styles.keyboardHeaderRow}>
-          <Text style={styles.keyboardHint}>Use the on-screen keyboard</Text>
-          <TvFocusable
-            onPress={() => setLowercase((prev) => !prev)}
-            style={({ focused }: any) => [styles.caseBtn, focused ? styles.caseBtnFocused : null]}
-          >
-            <Text style={styles.caseText}>{lowercase ? 'abc' : 'ABC'}</Text>
-          </TvFocusable>
-        </View>
-
-        <TvVirtualKeyboard
-          mode={activeField === 'email' ? 'email' : 'default'}
-          disabled={busy}
-          onKeyPress={applyKey}
+      {/* Main card */}
+      <Animated.View
+        style={[
+          styles.card,
+          { maxWidth: cardMaxWidth },
+          {
+            opacity: cardAnim,
+            transform: [
+              { translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [40, 0] }) },
+              { scale: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) },
+            ],
+          },
+        ]}
+      >
+        <LinearGradient
+          colors={['rgba(255,255,255,0.06)', 'rgba(255,255,255,0.02)', 'transparent']}
+          style={[StyleSheet.absoluteFill, { borderRadius: 32 }]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
         />
 
-        <TvFocusable
-          onPress={() => void submit()}
-          disabled={!canSubmit}
-          style={({ focused }: any) => [
-            styles.primaryBtn,
-            !canSubmit ? styles.btnDisabled : null,
-            focused ? styles.btnFocused : null,
-          ]}
-        >
-          {busy ? <ActivityIndicator color="#fff" /> : null}
-          <Text style={styles.primaryText}>{busy ? 'Creating…' : 'Create account'}</Text>
-        </TvFocusable>
+        <View style={styles.content}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.iconBadge}>
+              <Ionicons name="phone-portrait-outline" size={32} color="#50c878" />
+            </View>
+            <Text style={[styles.title, isCompact && styles.titleCompact]}>Sign Up on Mobile</Text>
+            <Text style={styles.subtitle}>
+              To create a new account, please use the MovieFlix app on your phone or tablet.
+            </Text>
+          </View>
 
+          {/* QR Code */}
+          <View style={styles.qrSection}>
+            <View style={styles.qrBox}>
+              <QRCode
+                value={signupUrl}
+                size={160}
+                quietZone={12}
+                backgroundColor="#ffffff"
+                color="#000000"
+              />
+            </View>
+            <Text style={styles.qrHint}>Scan to download the app</Text>
+          </View>
+
+          {/* Steps */}
+          <View style={styles.steps}>
+            <View style={styles.step}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
+              <Text style={styles.stepText}>Download MovieFlix on your phone</Text>
+            </View>
+            <View style={styles.step}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>2</Text></View>
+              <Text style={styles.stepText}>Create your account in the app</Text>
+            </View>
+            <View style={styles.step}>
+              <View style={styles.stepNum}><Text style={styles.stepNumText}>3</Text></View>
+              <Text style={styles.stepText}>Sign in here using QR code or email</Text>
+            </View>
+          </View>
+
+          {/* Back button */}
           <TvFocusable
             onPress={() => router.replace('/(auth)/login')}
-            style={({ focused }: any) => [styles.secondaryBtn, focused ? styles.btnFocused : null]}
+            tvPreferredFocus
+            isTVSelectable={true}
+            accessibilityLabel="Back to sign in"
+            style={({ focused }: any) => [styles.backBtn, focused && styles.backBtnFocused]}
           >
-            <Text style={styles.secondaryText}>Back to login</Text>
+            <Ionicons name="arrow-back-outline" size={20} color="#fff" />
+            <Text style={styles.backText}>Back to Sign In</Text>
           </TvFocusable>
         </View>
-      </ScrollView>
+      </Animated.View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  scrollContent: {
-    flexGrow: 1,
+  container: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 24,
+    paddingHorizontal: 80,
+    paddingVertical: 32,
+  },
+  glowContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: '50%',
+  },
+  glow: {
+    flex: 1,
+    borderBottomLeftRadius: 500,
+    borderBottomRightRadius: 500,
+  },
+  logoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 24,
+  },
+  logoIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: 'rgba(80,200,120,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(80,200,120,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoText: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: -0.5,
   },
   card: {
-    width: '92%',
-    maxWidth: 980,
-    borderRadius: 24,
-    padding: 26,
-    backgroundColor: 'rgba(0,0,0,0.26)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    width: '100%',
+    borderRadius: 32,
+    padding: 40,
+    backgroundColor: 'rgba(10,12,25,0.85)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 20 },
+    shadowOpacity: 0.5,
+    shadowRadius: 40,
+    elevation: 20,
   },
-  title: { color: '#fff', fontSize: 34, fontWeight: '900' },
-  subtitle: { color: 'rgba(255,255,255,0.72)', fontSize: 16, fontWeight: '700', marginTop: 6 },
-  fieldsGrid: {
-    marginTop: 16,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
+  content: {
+    alignItems: 'center',
   },
-  field: {
-    flexGrow: 1,
-    flexBasis: 0,
-    minWidth: 320,
-    borderRadius: 18,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+  header: {
+    alignItems: 'center',
+    marginBottom: 28,
   },
-  fieldActive: { borderColor: 'rgba(229,9,20,0.95)', backgroundColor: 'rgba(229,9,20,0.12)' },
-  fieldFocused: { transform: [{ scale: 1.02 }], borderColor: '#fff' },
-  fieldLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: '900', letterSpacing: 1.4, textTransform: 'uppercase' },
-  fieldValue: { color: '#fff', fontSize: 18, fontWeight: '900', marginTop: 8 },
-  keyboardHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14 },
-  keyboardHint: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '800' },
-  caseBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+  iconBadge: {
+    width: 72,
+    height: 72,
+    borderRadius: 20,
+    backgroundColor: 'rgba(80,200,120,0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-  },
-  caseBtnFocused: { transform: [{ scale: 1.03 }], borderColor: '#fff' },
-  caseText: { color: '#fff', fontSize: 13, fontWeight: '900', letterSpacing: 1.2 },
-  primaryBtn: {
-    marginTop: 18,
-    height: 56,
-    borderRadius: 18,
-    backgroundColor: 'rgba(229,9,20,0.82)',
-    borderWidth: 1,
-    borderColor: 'rgba(229,9,20,0.95)',
-    flexDirection: 'row',
+    borderColor: 'rgba(80,200,120,0.25)',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    marginBottom: 16,
   },
-  primaryText: { color: '#fff', fontSize: 16, fontWeight: '900' },
-  secondaryBtn: {
+  title: {
+    color: '#fff',
+    fontSize: 32,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    textAlign: 'center',
+  },
+  titleCompact: {
+    fontSize: 28,
+  },
+  subtitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 15,
+    fontWeight: '600',
+    marginTop: 10,
+    textAlign: 'center',
+    maxWidth: 450,
+    lineHeight: 22,
+  },
+  qrSection: {
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  qrBox: {
+    padding: 16,
+    borderRadius: 20,
+    backgroundColor: '#fff',
+  },
+  qrHint: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 13,
+    fontWeight: '600',
     marginTop: 12,
-    height: 56,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.10)',
+  },
+  steps: {
+    width: '100%',
+    maxWidth: 380,
+    gap: 12,
+    marginBottom: 28,
+  },
+  step: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  stepNum: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(80,200,120,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  secondaryText: { color: '#fff', fontSize: 15, fontWeight: '900' },
-  btnFocused: { transform: [{ scale: 1.03 }], borderColor: '#fff' },
-  btnDisabled: { opacity: 0.6 },
+  stepNumText: {
+    color: '#50c878',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  stepText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  backBtnFocused: {
+    transform: [{ scale: 1.03 }],
+    borderColor: '#fff',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  backText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
 });

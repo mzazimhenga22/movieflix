@@ -5,10 +5,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
+import { getPersistedCache, setPersistedCache } from '@/lib/persistedCache';
 
 import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../constants/api';
+import { authPromise, firestore } from '../../../constants/firebase';
 import { getProfileScopedKey } from '../../../lib/profileStorage';
 import type { Media } from '../../../types';
+import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
 
 type RankedRecommendation = Media & {
   score: number;
@@ -76,12 +80,12 @@ const scoreCandidate = (candidate: Media, weights: Map<number, number>) => {
 
 export default function RecommendedView() {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recommendations, setRecommendations] = useState<RankedRecommendation[]>([]);
 
   const load = useCallback(async () => {
-    setLoading(true);
     setError(null);
 
     try {
@@ -90,12 +94,76 @@ export default function RecommendedView() {
         getProfileScopedKey('myList'),
       ]);
 
+      const cacheKey = `__movieflix_recommended_v1:${watchKey}:${myListKey}`;
+      const cached = await getPersistedCache<RankedRecommendation[]>(cacheKey, { maxAgeMs: 2 * 60 * 60 * 1000 });
+      if (cached?.value?.length) {
+        setRecommendations(cached.value);
+        setLoading(false);
+        // If cache is still fresh, don't hit network.
+        return;
+      }
+
+      setLoading(true);
+
       const [watchRaw, myListRaw] = await Promise.all([
         AsyncStorage.getItem(watchKey).catch(() => null),
         AsyncStorage.getItem(myListKey).catch(() => null),
       ]);
 
-      const continueWatching: Media[] = watchRaw ? JSON.parse(watchRaw) : [];
+      const mergedByKey = new Map<string, Media>();
+
+      const continueWatchingLocal: Media[] = watchRaw ? JSON.parse(watchRaw) : [];
+      continueWatchingLocal.forEach((entry) => {
+        const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie');
+        mergedByKey.set(`${mediaType}:${String(entry.id)}`, entry);
+      });
+
+      try {
+        const auth = await authPromise;
+        const uid = auth?.currentUser?.uid;
+        if (uid) {
+          const ref = collection(firestore, 'users', uid, 'watchHistory');
+          const q = query(ref, orderBy('updatedAtMs', 'desc'), limit(80));
+          const snap = await getDocs(q);
+
+          snap.docs.forEach((docSnap) => {
+            const data = docSnap.data() as any;
+            if (data?.completed === true) return;
+            const tmdbId = data?.tmdbId;
+            if (!tmdbId) return;
+            const mediaType = String(data?.mediaType || 'movie');
+            const key = `${mediaType}:${String(tmdbId)}`;
+
+            const existing = mergedByKey.get(key);
+            const existingTs = existing?.watchProgress?.updatedAt ?? 0;
+            const incomingTs = data?.watchProgress?.updatedAtMs ?? data?.updatedAtMs ?? 0;
+            if (existing && existingTs >= incomingTs) return;
+
+            mergedByKey.set(key, {
+              id: tmdbId,
+              title: data?.title ?? undefined,
+              name: data?.title ?? undefined,
+              media_type: mediaType,
+              poster_path: data?.posterPath ?? undefined,
+              backdrop_path: data?.backdropPath ?? undefined,
+              genre_ids: Array.isArray(data?.genreIds) ? data.genreIds : undefined,
+              watchProgress: {
+                positionMillis: data?.watchProgress?.positionMillis ?? 0,
+                durationMillis: data?.watchProgress?.durationMillis ?? 0,
+                progress: data?.watchProgress?.progress ?? 0,
+                updatedAt: incomingTs || Date.now(),
+              },
+            } as Media);
+          });
+        }
+      } catch {
+        // best-effort only
+      }
+
+      const continueWatching: Media[] = [...mergedByKey.values()]
+        .filter((entry) => (entry.watchProgress?.progress ?? 0) < 0.985)
+        .sort((a, b) => (b.watchProgress?.updatedAt ?? 0) - (a.watchProgress?.updatedAt ?? 0))
+        .slice(0, 40);
       const myList: Media[] = myListRaw ? JSON.parse(myListRaw) : [];
 
       const { weights, topGenreIds } = buildPreferenceWeights(continueWatching, myList);
@@ -149,6 +217,7 @@ export default function RecommendedView() {
         .slice(0, 24);
 
       setRecommendations(ranked);
+      void setPersistedCache(cacheKey, ranked);
     } catch (e: any) {
       setRecommendations([]);
       setError(e?.message || 'Failed to load recommendations');
@@ -205,7 +274,7 @@ export default function RecommendedView() {
               style={styles.movieCard}
               activeOpacity={0.9}
               onPress={() =>
-                router.push(`/details/${movie.id}?mediaType=${movie.media_type || 'movie'}`)
+                deferNav(() => router.push(`/details/${movie.id}?mediaType=${movie.media_type || 'movie'}`))
               }
             >
               <BlurView intensity={30} tint="dark" style={styles.cardContent}>

@@ -1,6 +1,7 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { onAuthStateChanged } from 'firebase/auth';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 import { authPromise, firestore } from '../constants/firebase';
 
@@ -8,7 +9,7 @@ const __DEV__FLAG = typeof __DEV__ !== 'undefined' && __DEV__;
 const ALLOW_PLAN_OVERRIDE =
   __DEV__FLAG &&
   String((typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_ALLOW_PLAN_OVERRIDE) ?? '').trim() ===
-    '1';
+  '1';
 
 
 type PlanTier = 'free' | 'plus' | 'premium';
@@ -17,6 +18,7 @@ type SubscriptionContextType = {
   isSubscribed: boolean;
   currentPlan: PlanTier;
   refresh: () => Promise<void>;
+  loading: boolean;
 };
 
 
@@ -39,6 +41,7 @@ type Props = {
 export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [currentPlan, setCurrentPlan] = useState<PlanTier>('free');
+  const [loading, setLoading] = useState(true);
 
   const normalizePlanTier = useCallback((raw: unknown): PlanTier => {
     const v = String(raw ?? '')
@@ -47,6 +50,8 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
     return v === 'premium' || v === 'plus' || v === 'free' ? (v as PlanTier) : 'free';
   }, []);
 
+  const getCacheKey = (uid: string) => `planCache:${uid}`;
+
   const refresh = useCallback(async () => {
     try {
       const auth = await authPromise;
@@ -54,7 +59,16 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
       if (!user) {
         setCurrentPlan('free');
         setIsSubscribed(false);
+        setLoading(false);
         return;
+      }
+
+      // Try cache first
+      const cached = await AsyncStorage.getItem(getCacheKey(user.uid));
+      if (cached) {
+        const tier = normalizePlanTier(cached);
+        setCurrentPlan(tier);
+        setIsSubscribed(tier !== 'free');
       }
 
       const snap = await getDoc(doc(firestore, 'users', user.uid));
@@ -68,16 +82,19 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
         if (override === 'premium' || override === 'plus' || override === 'free') {
           setCurrentPlan(override as PlanTier);
           setIsSubscribed(override !== 'free');
+          setLoading(false);
           return;
         }
       }
 
       setCurrentPlan(tier);
       setIsSubscribed(tier !== 'free');
+      await AsyncStorage.setItem(getCacheKey(user.uid), tier);
     } catch (err) {
       console.warn('[SubscriptionProvider] failed to refresh plan', err);
-      setCurrentPlan('free');
-      setIsSubscribed(false);
+      // Don't override with 'free' if we might be offline; just keep what we have
+    } finally {
+      setLoading(false);
     }
   }, [normalizePlanTier]);
 
@@ -87,7 +104,7 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
 
     void authPromise
       .then((auth) => {
-        unsubAuth = onAuthStateChanged(auth, (user) => {
+        unsubAuth = onAuthStateChanged(auth, async (user) => {
           if (unsubUser) {
             unsubUser();
             unsubUser = null;
@@ -96,15 +113,32 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
           if (!user) {
             setCurrentPlan('free');
             setIsSubscribed(false);
+            setLoading(false);
             return;
           }
+
+          // Hydrate from cache immediately
+          try {
+            const cached = await AsyncStorage.getItem(getCacheKey(user.uid));
+            console.log('[SubscriptionProvider] Cached plan:', cached);
+            if (cached) {
+              const tier = normalizePlanTier(cached);
+              setCurrentPlan(tier);
+              setIsSubscribed(tier !== 'free');
+            }
+          } catch (e) {
+            console.warn('[SubscriptionProvider] Cache read error', e);
+          }
+          setLoading(false);
 
           const userRef = doc(firestore, 'users', user.uid);
           unsubUser = onSnapshot(
             userRef,
             async (snap) => {
+              console.log('[SubscriptionProvider] Snapshot received. Metadata:', snap.metadata);
               const data = (snap.data() as any) ?? {};
               const nextTier = normalizePlanTier(data?.planTier ?? data?.subscription?.tier);
+              console.log('[SubscriptionProvider] Plan from Firestore:', nextTier);
 
               if (ALLOW_PLAN_OVERRIDE) {
                 const override = String((typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PLAN_TIER_OVERRIDE) ?? '')
@@ -119,6 +153,7 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
 
               setCurrentPlan(nextTier);
               setIsSubscribed(nextTier !== 'free');
+              await AsyncStorage.setItem(getCacheKey(user.uid), nextTier);
             },
             (err) => {
               console.warn('[SubscriptionProvider] plan snapshot error', err);
@@ -140,6 +175,7 @@ export const SubscriptionProvider: React.FC<Props> = ({ children }) => {
         isSubscribed,
         currentPlan,
         refresh,
+        loading,
       }}
     >
       {children}

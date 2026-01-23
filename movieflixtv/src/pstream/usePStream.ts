@@ -1,5 +1,6 @@
-import { useCallback, useState } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { useCallback, useState } from 'react';
+import { firestore } from '../../constants/firebase';
 import type {
   ProviderControls,
   Qualities,
@@ -10,10 +11,11 @@ import type {
 import {
   makeProviders,
   makeStandardFetcher,
-  targets,
   setM3U8ProxyUrl,
+  targets,
+  ytMusic
 } from '../../providers-temp/lib/index.js';
-import { firestore } from '../../constants/firebase';
+import { DirectYtResolver } from './DirectYtResolver';
 
 /* ───────── TYPES ───────── */
 
@@ -362,7 +364,7 @@ async function validatePlayback(playback: PStreamPlayback): Promise<boolean> {
   if (!uri) return false;
   const headers = (playback.headers ?? {}) as Record<string, string>;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), 5500);
   try {
     const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
     if (isHls) {
@@ -439,8 +441,8 @@ function orderEmbedsEnglishFirst(embeds: Embed[]): Embed[] {
 /* ───────── FALLBACK SOURCES ───────── */
 
 const FALLBACK_SOURCES = ['cuevana3', 'ridomovies', 'hdrezka', 'warezcdn'];
-const SOURCE_CONCURRENCY = 2;
-const EMBED_CONCURRENCY = 2;
+const SOURCE_CONCURRENCY = 3;
+const EMBED_CONCURRENCY = 3;
 
 async function runWithSlidingWindow<T>(
   items: T[],
@@ -516,7 +518,158 @@ export function usePStream() {
     }
   }, []);
 
-  return { loading, error, result, scrape };
+  const searchMusic = useCallback(async (query: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      console.log('[PStream] Searching music:', query);
+      const songs = await scrapeMusic(query);
+      console.log(`[PStream] Found ${songs.length} songs`);
+      return songs;
+    } catch (e: any) {
+      console.error('[PStream] Music search error:', e);
+      setError(e?.message ?? 'Music error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getMusicStream = useCallback(async (videoId: string, type: 'audio' | 'video' = 'video') => {
+    setLoading(true);
+    setError(null);
+
+    // Fetch dynamic instances from official Piped API
+    const fetchDynamicInstances = async (): Promise<string[]> => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch('https://piped-instances.kavin.rocks/', {
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json' },
+        });
+        clearTimeout(timeout);
+        if (!res.ok) return [];
+        const instances = await res.json();
+        return instances
+          .filter((i: any) => i.api_url && (i.uptime_24h === undefined || i.uptime_24h >= 80))
+          .sort((a: any, b: any) => (b.uptime_24h || 100) - (a.uptime_24h || 100))
+          .map((i: any) => i.api_url)
+          .slice(0, 8);
+      } catch {
+        return [];
+      }
+    };
+
+    // Static fallback instances
+    const STATIC_INSTANCES = [
+      'https://api.piped.private.coffee',
+      'https://pipedapi.kavin.rocks',
+      'https://pipedapi-libre.kavin.rocks',
+      'https://pipedapi.leptons.xyz',
+      'https://pipedapi.nosebs.ru',
+    ];
+
+    try {
+      console.log(`[PStream] Resolving direct ${type} stream for:`, videoId);
+
+      // Get dynamic instances and combine with static (deduped)
+      // DISABLED: Piped instances are causing too many errors/timeouts.
+      // const dynamicInstances = await fetchDynamicInstances();
+      // const allInstances = [...new Set([...dynamicInstances, ...STATIC_INSTANCES])];
+      const allInstances: string[] = [];
+      console.log(`[PStream] Piped instances DISABLED - Going direct to DirectYtResolver`);
+
+      // Try each Piped instance
+      for (const instance of allInstances) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+
+          const res = await fetch(`${instance}/streams/${videoId}`, {
+            signal: controller.signal,
+            headers: { 'Accept': 'application/json' },
+          });
+          clearTimeout(timeout);
+
+          if (!res.ok) {
+            console.warn(`[PStream] ${instance} returned ${res.status}`);
+            continue;
+          }
+
+          // Validate JSON response
+          const contentType = res.headers.get('content-type');
+          if (!contentType?.includes('application/json')) {
+            console.warn(`[PStream] ${instance} returned non-JSON`);
+            continue;
+          }
+
+          const data = await res.json();
+          if (data.error) {
+            console.warn(`[PStream] ${instance} error: ${data.error}`);
+            continue;
+          }
+
+          // Priority 1: Try HLS stream (best for mobile playback)
+          if (data.hls) {
+            console.log(`[PStream] Resolved HLS from ${instance}`);
+            return { uri: data.hls };
+          }
+
+          if (type === 'audio') {
+            // Prefer M4A for audio, then any audio stream
+            const audioStream =
+              data.audioStreams?.find((s: any) => s.format === 'M4A' || s.mimeType?.includes('audio/mp4')) ||
+              data.audioStreams?.find((s: any) => s.mimeType?.includes('audio/')) ||
+              data.audioStreams?.[0];
+            if (audioStream?.url) {
+              console.log(`[PStream] Resolved audio from ${instance}`);
+              return { uri: audioStream.url };
+            }
+          } else {
+            // For video, prefer streams with audio
+            const videoStream =
+              data.videoStreams?.find((s: any) => s.format === 'MP4' && !s.videoOnly) ||
+              data.videoStreams?.find((s: any) => !s.videoOnly) ||
+              data.videoStreams?.[0];
+            if (videoStream?.url) {
+              console.log(`[PStream] Resolved video from ${instance}: ${videoStream.quality || 'unknown'}`);
+              return { uri: videoStream.url };
+            }
+          }
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            console.warn(`[PStream] Timeout from ${instance}`);
+          } else if (instance === 'https://api.piped.private.coffee' || instance === 'https://pipedapi.kavin.rocks') {
+            console.warn(`[PStream] ${instance} returned ${err.message || 500}`);
+          } else {
+            console.warn(`[PStream] Failed from ${instance}:`, err.message || err);
+          }
+        }
+      }
+
+      console.warn('[PStream] All Piped instances failed, trying Direct YouTube Resolver...');
+
+      // Fallback to Direct YouTube Resolver (internal API)
+      const directResult = await DirectYtResolver.getStream(videoId, type);
+      if (directResult) {
+        console.log(`[PStream] Resolved ${type} from DirectYT`);
+        return { uri: directResult.url, headers: directResult.headers };
+      }
+
+      // All instances failed - return null (caller should handle gracefully)
+      console.warn('[PStream] All instances failed, no valid stream found');
+      return null;
+    } catch (e: any) {
+      console.error('[PStream] Music stream resolution error:', e);
+      setError(e?.message ?? 'Stream error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { loading, error, result, scrape, searchMusic, getMusicStream };
 }
 
 export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeOptions) {
@@ -553,7 +706,6 @@ export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeO
           media,
           sourceOrder: [sourceId],
           embedOrder: [embedId],
-          disableOpensubtitles: true,
         });
         if (embedRun?.stream) {
           const playback = buildPlayback(embedRun.stream, sourceId, embedId);
@@ -581,7 +733,6 @@ export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeO
         const discovery: RunOutputWithEmbeds | null = await providers.runAll({
           media,
           sourceOrder: [sourceId],
-          disableOpensubtitles: true,
         });
 
         if (!discovery) return null;
@@ -637,4 +788,12 @@ export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeO
   }
 }
 
-export default usePStream;
+export async function scrapeMusic(query: string) {
+  try {
+    const songs = await ytMusic.search(query);
+    return songs;
+  } catch (err: any) {
+    console.warn('[PStream] Music search failed', err);
+    throw err;
+  }
+}

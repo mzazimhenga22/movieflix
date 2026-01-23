@@ -2,15 +2,37 @@ import { authPromise, firestore } from '@/constants/firebase';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
 import { arrayUnion, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { Platform } from 'react-native';
+
+const BACKGROUND_NOTIFICATION_TASK = 'BACKGROUND_NOTIFICATION_TASK';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
   }),
+});
+
+// Register background task to handle notifications when app is in background/killed
+TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async ({ data, error }: any) => {
+  if (error) {
+    console.warn('[push] background task error', error);
+    return;
+  }
+  if (data) {
+    // This allows the app to perform logic when a notification is received in background.
+    // The OS usually wakes the app briefly to execute this.
+    console.log('[push] background notification received', data);
+  }
+});
+
+Notifications.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK).catch((err) => {
+  console.warn('[push] failed to register background task', err);
 });
 
 export const prepareNotificationsAsync = async (): Promise<Notifications.PermissionStatus | null> => {
@@ -44,6 +66,14 @@ export const prepareNotificationsAsync = async (): Promise<Notifications.Permiss
       importance: Notifications.AndroidImportance.DEFAULT,
       vibrationPattern: [0, 150],
       lightColor: '#e50914',
+    });
+
+    await Notifications.setNotificationChannelAsync('downloads-progress', {
+      name: 'Download Progress',
+      importance: Notifications.AndroidImportance.LOW,
+      vibrationPattern: undefined,
+      lightColor: '#e50914',
+      sound: undefined,
     });
   }
 
@@ -116,13 +146,13 @@ export const getFirebaseIdToken = async (): Promise<string | null> => {
 
 export type PushRouteData = {
   type?:
-    | 'message'
-    | 'call'
-    | 'story'
-    | 'reel'
-    | 'continue_watching'
-    | 'new_movie'
-    | 'app_update';
+  | 'message'
+  | 'call'
+  | 'story'
+  | 'reel'
+  | 'continue_watching'
+  | 'new_movie'
+  | 'app_update';
   conversationId?: string;
   callId?: string;
   storyId?: string;

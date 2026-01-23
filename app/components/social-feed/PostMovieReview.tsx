@@ -1,14 +1,25 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
+import { getPersistedCache } from '@/lib/persistedCache';
 
 export default function PostMovieReview() {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
+  const [hasDraft, setHasDraft] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      const cached = await getPersistedCache<any>('__movieflix_review_draft_v1');
+      setHasDraft(Boolean(cached?.value));
+    })();
+  }, []);
 
   const handlePostReview = () => {
-    router.push('/post-review');
+    deferNav(() => router.push('/post-review'));
   };
 
   return (
@@ -26,10 +37,12 @@ export default function PostMovieReview() {
         </View>
         <View style={styles.textContent}>
           <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">Post Movie Review</Text>
-          <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="tail">Share your thoughts about a movie</Text>
+          <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="tail">
+            {hasDraft ? 'Resume your draft or start a new one' : 'Share your thoughts about a movie'}
+          </Text>
         </View>
         <View style={styles.chevronWrap}>
-          <Ionicons name="chevron-forward" size={20} color="#fff" />
+          <Ionicons name={hasDraft ? 'document-text-outline' : 'chevron-forward'} size={20} color="#fff" />
         </View>
       </View>
     </TouchableOpacity>

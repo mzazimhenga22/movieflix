@@ -25,3 +25,8 @@ export function useTvAccent() {
   if (!ctx) throw new Error('useTvAccent must be used within TvAccentProvider');
   return ctx;
 }
+
+// Dummy default export to satisfy expo-router
+export default function TvAccentContextRoute() {
+  return null;
+}

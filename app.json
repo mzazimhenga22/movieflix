@@ -2,17 +2,15 @@
   "expo": {
     "name": "MovieFlix",
     "slug": "movieflix",
-    "version": "1.0.0",
-    "supportsPictureInPicture": true,
+    "version": "1.0.4",
     "runtimeVersion": "1.0.0",
     "updates": {
-      "url": "https://u.expo.dev/56b697d6-b709-4b80-909a-27b3a97856c1",
       "enabled": true,
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
     },
     "orientation": "portrait",
-    "icon": "./assets/images/logo-safe.png",
+    "icon": "./assets/images/app-icon.png",
     "scheme": "movieflix",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -21,20 +19,23 @@
       "bundleIdentifier": "com.movieflix.app",
       "backgroundColor": "#1C1C1E",
       "infoPlist": {
-        "NSCameraUsageDescription": "Allow MovieFlix to use your camera to scan a TV sign-in QR code.",
+        "NSCameraUsageDescription": "Allow MovieFlix to use your camera for video calls, going live, and scanning QR codes.",
+        "NSMicrophoneUsageDescription": "Allow MovieFlix to use your microphone for voice/video calls and live streaming.",
         "UIBackgroundModes": [
-          "audio"
+          "audio",
+          "fetch",
+          "remote-notification",
+          "processing"
         ]
       }
     },
     "android": {
       "package": "com.movieflix.app",
-      "usesCleartextTraffic": true,
-      "googleServicesFile": "./google-services.json",
+      "launchMode": "singleTask",
       "adaptiveIcon": {
         "backgroundColor": "#E53935",
-        "foregroundImage": "./assets/images/logo-safe.png",
-        "monochromeImage": "./assets/images/logo-safe.png"
+        "foregroundImage": "./assets/images/adaptive-foreground.png",
+        "monochromeImage": "./assets/images/adaptive-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -42,6 +43,7 @@
       "intentFilters": [],
       "permissions": [
         "android.permission.CAMERA",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_MEDIA_IMAGES",
         "android.permission.READ_MEDIA_VIDEO",
@@ -49,13 +51,16 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
-        "android.permission.ACCESS_MEDIA_LOCATION"
+        "android.permission.ACCESS_MEDIA_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.WAKE_LOCK"
       ]
     },
     "splash": {
-      "image": "./assets/images/logo-safe.png",
+      "image": "./assets/images/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#E53935"
+      "backgroundColor": "#000000"
     },
     "web": {
       "output": "static",
@@ -68,12 +73,12 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/logo-safe.png",
+          "image": "./assets/images/splash.png",
           "resizeMode": "contain",
-          "backgroundColor": "#E53935",
+          "backgroundColor": "#000000",
           "dark": {
-            "image": "./assets/images/logo-safe.png",
-            "backgroundColor": "#E53935"
+            "image": "./assets/images/splash.png",
+            "backgroundColor": "#000000"
           }
         }
       ],
@@ -94,7 +99,8 @@
             "compileSdkVersion": 36,
             "targetSdkVersion": 36,
             "minSdkVersion": 24,
-            "buildToolsVersion": "36.0.0"
+            "buildToolsVersion": "36.0.0",
+            "usesCleartextTraffic": true
           }
         }
       ],
@@ -106,14 +112,10 @@
     },
     "extra": {
       "router": {},
-      "agora": {
-        "appId": "",
-        "tokenEndpoint": ""
-      },
       "eas": {
-        "projectId": "56b697d6-b709-4b80-909a-27b3a97856c1"
+        "projectId": "fec9b894-ee58-40d6-bae2-b8e839912ee4"
       }
     },
-    "owner": "vivescharris"
+    "owner": "mzazimhenga"
   }
 }

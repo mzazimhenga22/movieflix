@@ -12,6 +12,7 @@ import {
   View,
 } from 'react-native';
 import React from 'react';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 
 import { IMAGE_BASE_URL } from '../../../constants/api';
 import {
@@ -29,6 +30,7 @@ const resolvePosterUri = (path?: string | null) => {
 
 export default function MovieMatchView() {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const {
     matches,
     heroMatch,
@@ -48,7 +50,7 @@ export default function MovieMatchView() {
       ? `${viewerName}, comparing ${localTotals.qualified} of your recent plays with ${
           matches.length || 'new'
         } film fans`
-      : 'Watch at least 70% of a title to unlock Movie Match insights.';
+      : 'Watch at least 55% of a title to unlock Movie Match insights.';
 
   const renderAvatar = (match: ComputedMatch, size = 48) => {
     const initial = match.profileName.charAt(0).toUpperCase();
@@ -73,7 +75,7 @@ export default function MovieMatchView() {
   };
 
   const handleStartParty = () => {
-    router.push('/watchparty');
+    deferNav(() => router.push('/watchparty'));
   };
 
   const renderMatchCard = (match: ComputedMatch) => (
@@ -200,7 +202,7 @@ export default function MovieMatchView() {
                   <TouchableOpacity style={styles.primaryBtn} onPress={handleStartParty}>
                     <Text style={styles.primaryBtnText}>Start watch party</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.secondaryBtn} onPress={() => router.push('/messaging')}>
+                  <TouchableOpacity style={styles.secondaryBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
                     <Text style={styles.secondaryBtnText}>Ping matches</Text>
                   </TouchableOpacity>
                 </View>

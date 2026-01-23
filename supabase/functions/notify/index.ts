@@ -304,6 +304,50 @@ serve(async (req: Request) => {
       return jsonResponse({ ok: true, kind, sent: expoMessages.length, result });
     }
 
+    if (kind === 'notification') {
+      const notificationId = String(body.notificationId || '');
+      if (!notificationId) throw new HttpError(400, 'Missing notificationId');
+
+      const notifSnap = await db.collection('notifications').doc(notificationId).get();
+      if (!notifSnap.exists) throw new HttpError(404, 'Notification not found');
+      const notif = notifSnap.data() || {};
+
+      const actorId = String((notif as any).actorId || '');
+      const targetUid = String((notif as any).targetUid || (notif as any).targetUserId || '');
+      if (!targetUid) throw new HttpError(400, 'Notification missing targetUid');
+
+      // Only the actor (or an admin) can fan out a push for this notification.
+      if (!isAdmin && actorId && actorId !== uid) throw new HttpError(403, 'Not allowed to send this notification');
+
+      const actorName = String((notif as any).actorName || (notif as any).fromName || 'Someone');
+      const type = String((notif as any).type || 'notification');
+      const message = String((notif as any).message || '').trim();
+
+      const title =
+        type === 'like'
+          ? `${actorName} liked your post`
+          : type === 'comment'
+            ? `${actorName} commented`
+            : type === 'follow'
+              ? `${actorName} started following you`
+              : 'MovieFlix';
+      const bodyText = message || 'Tap to view';
+
+      const rec = await loadRecipientsFromUserIds(db, [targetUid]);
+      const expoMessages = buildExpoMessagesForRecipients(rec, {
+        title,
+        body: bodyText,
+        data: {
+          type: 'notification',
+          notificationId,
+          url: '/social-feed/notifications',
+        },
+      });
+
+      const result = await sendExpoPush(expoMessages);
+      return jsonResponse({ ok: true, kind, sent: expoMessages.length, result });
+    }
+
     if (kind === 'story') {
       const storyId = String(body.storyId || '');
       if (!storyId) throw new HttpError(400, 'Missing storyId');

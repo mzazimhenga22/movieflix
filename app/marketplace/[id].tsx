@@ -24,6 +24,7 @@ import { useAccent } from '../components/AccentContext';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
 import { getProductById, reportMarketplaceProduct, type Product } from './api';
 import { formatKsh } from '../../lib/money';
+import { logInteraction } from '@/lib/algo';
 
 export default function MarketplaceProductDetailsScreen() {
   const router = useRouter();
@@ -37,9 +38,48 @@ export default function MarketplaceProductDetailsScreen() {
   const [loading, setLoading] = React.useState(true);
   const [messagingBusy, setMessagingBusy] = React.useState(false);
 
+  // Log view interaction
+  useEffect(() => {
+    if (product && user?.uid) {
+      void logInteraction({
+        type: 'market_view',
+        actorId: user.uid,
+        targetId: product.id,
+        targetType: 'product',
+        meta: {
+          name: product.name,
+          category: product.categoryKey || product.category,
+          price: product.price,
+          tags: (product as any).tags
+        }
+      });
+    }
+  }, [product?.id, user?.uid]);
+
   React.useEffect(() => {
     setAccentColor('#e50914');
   }, [setAccentColor]);
+
+  // ... (keep existing fetching logic)
+
+  const handleBuyNow = useCallback(() => {
+    if (!product || !user?.uid) return;
+    
+    // Log Purchase Intent
+    void logInteraction({
+      type: 'market_purchase', // Logging intent as purchase for this demo
+      actorId: user.uid,
+      targetId: product.id,
+      targetType: 'product',
+      meta: {
+        name: product.name,
+        price: product.price
+      }
+    });
+
+    cart.addToCart(product, 1);
+    router.push('/marketplace/checkout');
+  }, [product, user?.uid, cart, router]);
 
   React.useEffect(() => {
     const productId = typeof id === 'string' ? id : Array.isArray(id) ? id[0] : undefined;
@@ -270,10 +310,7 @@ export default function MarketplaceProductDetailsScreen() {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.primaryBtn}
-                      onPress={() => {
-                        cart.addToCart(product, 1);
-                        router.push('/marketplace/checkout');
-                      }}
+                      onPress={handleBuyNow}
                     >
                       <Ionicons name="flash-outline" size={18} color="#fff" />
                       <Text style={styles.primaryBtnText}>Buy now</Text>

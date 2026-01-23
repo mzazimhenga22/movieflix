@@ -34,15 +34,19 @@ export default function TvLoginScanScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [hasScanned, setHasScanned] = useState(false);
 
-  const supabaseUrl = useMemo(
-    () => (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim().replace(/\/$/, ''),
-    [],
-  );
+  const cleanEnv = useCallback((value: string) => value.trim().replace(/^['"]/, '').replace(/['"]$/, ''), []);
+
+  const supabaseUrl = useMemo(() => cleanEnv(process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').replace(/\/$/, ''), [cleanEnv]);
+  const supabaseAnonKey = useMemo(() => cleanEnv(process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? ''), [cleanEnv]);
 
   const approve = useCallback(
     async (code: string, nonce: string) => {
       if (!supabaseUrl) {
         Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to enable TV login.');
+        return;
+      }
+      if (!supabaseAnonKey) {
+        Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_ANON_KEY to enable TV login.');
         return;
       }
 
@@ -61,7 +65,14 @@ export default function TvLoginScanScreen() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
+            // Supabase gateway expects apikey/authorization, so the Firebase token is sent separately.
+            ...(supabaseAnonKey
+              ? {
+                  apikey: supabaseAnonKey,
+                  authorization: `Bearer ${supabaseAnonKey}`,
+                }
+              : null),
+            'x-firebase-authorization': `Bearer ${idToken}`,
           },
           body: JSON.stringify({ action: 'approve', code, nonce }),
         });
@@ -77,7 +88,7 @@ export default function TvLoginScanScreen() {
         setSubmitting(false);
       }
     },
-    [supabaseUrl],
+    [supabaseAnonKey, supabaseUrl],
   );
 
   const onBarcodeScanned = useCallback(

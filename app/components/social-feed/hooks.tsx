@@ -1,3 +1,4 @@
+import * as Haptics from 'expo-haptics';
 import {
     addDoc,
     arrayRemove,
@@ -10,15 +11,18 @@ import {
     limit,
     orderBy,
     query,
+    runTransaction,
     serverTimestamp,
     updateDoc,
 } from 'firebase/firestore';
-import { useCallback, useEffect, useState } from 'react';
-import { Alert } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Platform } from 'react-native';
 import { firestore } from '../../../constants/firebase';
 import { supabase, supabaseConfigured } from '../../../constants/supabase';
 import { useUser } from '../../../hooks/use-user';
 import { logInteraction, recommendForFeed } from '../../../lib/algo';
+import { getPersistedCache, setPersistedCache } from '@/lib/persistedCache';
+import { notifyPush } from '../../../lib/pushApi';
 import type { FeedCardItem, Comment as FeedComment } from '../../../types/social-feed';
 
 export type ReviewItem = FeedCardItem & {
@@ -32,8 +36,28 @@ export function useSocialReactions() {
   const [loading, setLoading] = useState(true);
   const { user } = useUser();
 
+  const cacheKey = `__movieflix_social_feed_v1:${user?.uid ? String(user.uid) : 'anon'}`;
+  const hydratedFromCacheRef = useRef(false);
+  const likeInFlightRef = useRef<Set<ReviewItem['id']>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const cached = await getPersistedCache<ReviewItem[]>(cacheKey, { maxAgeMs: 8 * 60 * 1000 });
+      if (cancelled) return;
+      if (cached?.value?.length) {
+        hydratedFromCacheRef.current = true;
+        setReviews(cached.value);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheKey]);
+
   const refreshReviews = useCallback(async () => {
-    setLoading(true);
+    if (!hydratedFromCacheRef.current) setLoading(true);
     const extractTags = (text?: string): string[] => {
       if (!text) return [];
       const matches = Array.from(
@@ -166,9 +190,12 @@ export function useSocialReactions() {
 
       try {
         const ranked = await recommendForFeed(items, { userId: user?.uid ?? null, friends: [] });
-        setReviews(ranked as ReviewItem[]);
+        const finalItems = ranked as ReviewItem[];
+        setReviews(finalItems);
+        void setPersistedCache(cacheKey, finalItems);
       } catch (e) {
         setReviews(items);
+        void setPersistedCache(cacheKey, items);
       }
     } catch (error) {
       console.warn('Failed to load social reviews from Firestore', error);
@@ -176,11 +203,17 @@ export function useSocialReactions() {
     } finally {
       setLoading(false);
     }
-  }, [user?.uid]);
+  }, [cacheKey, user?.uid]);
 
   useEffect(() => {
     refreshReviews();
   }, [refreshReviews]);
+
+  const triggerHaptic = useCallback((type: Haptics.ImpactFeedbackStyle = Haptics.ImpactFeedbackStyle.Light) => {
+    if (Platform.OS !== 'web') {
+      void Haptics.impactAsync(type);
+    }
+  }, []);
 
   const createNotification = useCallback(
     async ({
@@ -202,7 +235,7 @@ export function useSocialReactions() {
     }) => {
       if (!targetUid || !user?.uid || targetUid === user.uid) return;
       try {
-        await addDoc(collection(firestore, 'notifications'), {
+        const ref = await addDoc(collection(firestore, 'notifications'), {
           type,
           scope: 'social',
           channel: 'community',
@@ -217,6 +250,8 @@ export function useSocialReactions() {
           read: false,
           createdAt: serverTimestamp(),
         });
+
+        void notifyPush({ kind: 'notification', notificationId: ref.id });
       } catch (err) {
         console.warn('Failed to create notification', err);
       }
@@ -224,71 +259,148 @@ export function useSocialReactions() {
     [user?.uid, user?.displayName],
   );
 
-  const handleLike = (id: ReviewItem['id']) => {
-    const targetReview = reviews.find((item) => item.id === id);
-    if (!targetReview || !user?.uid) return;
-    const nextLiked = !targetReview.liked;
-    const delta = nextLiked ? 1 : -1;
+  const handleLike = useCallback(
+    async (id: ReviewItem['id']) => {
+      const uid = user?.uid ? String(user.uid) : null;
+      const targetReview = reviews.find((item) => item.id === id);
+      if (!targetReview || !uid) return;
 
-    setReviews((prev) =>
-      prev.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              liked: nextLiked,
-              likes: Math.max(0, item.likes + delta),
-              likerIds: nextLiked
-                ? [...(item.likerIds || []), user.uid]
-                : item.likerIds?.filter((uid) => uid !== user.uid) || [],
-            }
-          : item
-      )
-    );
+      if (likeInFlightRef.current.has(id)) return;
+      likeInFlightRef.current.add(id);
 
-    if (targetReview.origin === 'firestore' && targetReview.docId) {
-      const reviewRef = doc(firestore, 'reviews', targetReview.docId);
-      updateDoc(reviewRef, {
-        likes: increment(delta),
-        likerIds: nextLiked ? arrayUnion(user.uid) : arrayRemove(user.uid),
-        updatedAt: serverTimestamp(),
-      }).catch((err) => console.warn('Failed to persist like', err));
+      const prevLiked = Boolean(targetReview.liked);
+      const prevLikes = Number(targetReview.likes ?? 0) || 0;
+      const prevLikerIds = Array.isArray(targetReview.likerIds) ? targetReview.likerIds : [];
 
-      if (nextLiked) {
-        const actorName =
-          user?.displayName || user?.email?.split('@')[0] || 'Movie fan';
-        createNotification({
-          targetUid: targetReview.userId,
-          type: 'like',
-          actorName,
-          actorAvatar: (user as any)?.photoURL ?? null,
-          targetId: targetReview.docId,
-          docPath: `reviews/${targetReview.docId}`,
-          message: `${actorName} liked your feed${targetReview.movie ? ` about "${targetReview.movie}"` : ''}.`,
-        });
-      }
-      // log like to local algo events
+      const nextLiked = !prevLiked;
+      const delta = nextLiked ? 1 : -1;
+
+      triggerHaptic(nextLiked ? Haptics.ImpactFeedbackStyle.Medium : Haptics.ImpactFeedbackStyle.Light);
+
+      // optimistic
+      setReviews((prev) =>
+        prev.map((item) => {
+          if (item.id !== id) return item;
+          const baseLikerIds = Array.isArray(item.likerIds) ? item.likerIds : [];
+          const nextLikerIds = nextLiked
+            ? Array.from(new Set([...baseLikerIds, uid]))
+            : baseLikerIds.filter((x) => x !== uid);
+          return {
+            ...item,
+            liked: nextLiked,
+            likes: Math.max(0, (Number(item.likes ?? 0) || 0) + delta),
+            likerIds: nextLikerIds,
+          };
+        }),
+      );
+
       try {
-        void logInteraction({ type: 'like', actorId: user?.uid ?? null, targetId: id, targetUserId: targetReview.userId ?? null });
-      } catch (e) {
-        /* ignore */
-      }
-    }
-  };
+        if (targetReview.origin === 'firestore' && targetReview.docId) {
+          const reviewRef = doc(firestore, 'reviews', targetReview.docId);
+          const result = await runTransaction(firestore, async (tx) => {
+            const snap = await tx.get(reviewRef);
+            if (!snap.exists()) return null;
+            const data = snap.data() as any;
+            const likerIds = Array.isArray(data?.likerIds) ? data.likerIds.map(String) : [];
+            const currentlyLiked = likerIds.includes(uid);
 
-  const handleBookmark = (id: ReviewItem['id']) => {
+            if (currentlyLiked === nextLiked) {
+              const likesRaw = Number(data?.likes);
+              const safeLikes = Number.isFinite(likesRaw) ? likesRaw : likerIds.length;
+              return { liked: currentlyLiked, likes: Math.max(0, safeLikes), likerIds };
+            }
+
+            const nextLikerIds = nextLiked
+              ? Array.from(new Set([...likerIds, uid]))
+              : likerIds.filter((x) => x !== uid);
+            const likesRaw = Number(data?.likes);
+            const baseLikes = Number.isFinite(likesRaw) ? likesRaw : likerIds.length;
+            const nextLikes = Math.max(0, baseLikes + (nextLiked ? 1 : -1));
+
+            tx.update(reviewRef, {
+              likes: nextLikes,
+              likerIds: nextLikerIds,
+              updatedAt: serverTimestamp(),
+            });
+
+            return { liked: nextLiked, likes: nextLikes, likerIds: nextLikerIds };
+          });
+
+          if (result) {
+            setReviews((prev) => prev.map((item) => (item.id === id ? { ...item, ...result } : item)));
+
+            if (!prevLiked && result.liked) {
+              const actorName = user?.displayName || user?.email?.split('@')[0] || 'Movie fan';
+              createNotification({
+                targetUid: targetReview.userId,
+                type: 'like',
+                actorName,
+                actorAvatar: (user as any)?.photoURL ?? null,
+                targetId: targetReview.docId,
+                docPath: `reviews/${targetReview.docId}`,
+                message: `${actorName} liked your feed${targetReview.movie ? ` about "${targetReview.movie}"` : ''}.`,
+              });
+            }
+
+            try {
+              void logInteraction({
+                type: 'like',
+                actorId: uid,
+                targetId: id,
+                targetType: 'feed_post',
+                targetUserId: targetReview.userId ?? null,
+                meta: {
+                  movie: targetReview.movie,
+                  genres: targetReview.genres,
+                  hasMedia: !!(targetReview.image || targetReview.videoUrl)
+                }
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to persist like', err);
+        setReviews((prev) =>
+          prev.map((item) =>
+            item.id === id
+              ? { ...item, liked: prevLiked, likes: prevLikes, likerIds: prevLikerIds }
+              : item,
+          ),
+        );
+      } finally {
+        likeInFlightRef.current.delete(id);
+      }
+    },
+    [createNotification, reviews, user, triggerHaptic],
+  );
+
+  const handleBookmark = useCallback((id: ReviewItem['id']) => {
+    triggerHaptic(Haptics.ImpactFeedbackStyle.Light);
     setReviews((prev) =>
       prev.map((item) => (item.id === id ? { ...item, bookmarked: !item.bookmarked } : item))
     );
-  };
+    
+    const target = reviews.find(r => r.id === id);
+    if (target && user?.uid) {
+      void logInteraction({
+        type: 'share', 
+        actorId: user.uid,
+        targetId: id,
+        targetType: 'feed_post',
+        meta: { movie: target.movie }
+      });
+    }
+  }, [reviews, user?.uid, triggerHaptic]);
 
-  const handleComment = (id: ReviewItem['id'], text?: string) => {
+  const handleComment = useCallback((id: ReviewItem['id'], text?: string) => {
     const trimmed = text?.trim();
     if (!trimmed) return;
 
     const commenter =
       user?.displayName || user?.email?.split('@')[0] || user?.uid || 'You';
 
-    // prepare optimistic local comment
     const localComment = {
       id: Date.now(),
       user: commenter,
@@ -296,9 +408,10 @@ export function useSocialReactions() {
       spoiler: false,
     };
 
-    // determine pending doc id before mutating state to avoid closure type issues
     const target = reviews.find((r) => r.id === id);
     const pendingDocId = target && target.origin === 'firestore' && target.docId ? target.docId : null;
+
+    triggerHaptic(Haptics.ImpactFeedbackStyle.Medium);
 
     setReviews((prev) =>
       prev.map((item) => {
@@ -311,12 +424,20 @@ export function useSocialReactions() {
       })
     );
 
-    // log comment
     try {
-      void logInteraction({ type: 'comment', actorId: user?.uid ?? null, targetId: id, targetUserId: target?.userId ?? null, meta: { snippet: (trimmed || '').slice(0, 120) } });
-    } catch (e) {
-      /* ignore */
-    }
+      void logInteraction({ 
+        type: 'comment', 
+        actorId: user?.uid ?? null, 
+        targetId: id, 
+        targetType: 'feed_post',
+        targetUserId: target?.userId ?? null, 
+        meta: { 
+          snippet: (trimmed || '').slice(0, 120),
+          movie: target?.movie,
+          genres: target?.genres
+        } 
+      });
+    } catch (e) { /* ignore */ }
 
     if (pendingDocId) {
       const reviewRef = doc(firestore, 'reviews', pendingDocId);
@@ -349,13 +470,23 @@ export function useSocialReactions() {
         commentPromise,
       ]).catch((err) => console.warn('Failed to persist comment', err));
     }
-  };
+  }, [reviews, user, triggerHaptic, createNotification]);
 
-  const handleWatch = (id: ReviewItem['id']) => {
+  const handleWatch = useCallback((id: ReviewItem['id']) => {
     setReviews((prev) =>
       prev.map((item) => (item.id === id ? { ...item, watched: item.watched + 1 } : item))
     );
-  };
+    const target = reviews.find(r => r.id === id);
+    if (target && user?.uid) {
+      void logInteraction({
+        type: 'view',
+        actorId: user.uid,
+        targetId: id,
+        targetType: 'feed_post',
+        meta: { movie: target.movie, genres: target.genres }
+      });
+    }
+  }, [reviews, user?.uid]);
 
   const handleShare = (id: ReviewItem['id']) => {
     Alert.alert('Share', `Share review ${id}`);
@@ -367,7 +498,6 @@ export function useSocialReactions() {
       if (!target) return;
       if (!user?.uid || !target.userId || String(target.userId) !== String(user.uid)) return;
 
-      // optimistic
       setReviews((prev) => prev.filter((r) => r.id !== id));
 
       try {
@@ -385,7 +515,6 @@ export function useSocialReactions() {
         const docId = target.docId ?? (typeof target.id === 'string' ? target.id : null);
         if (!docId) return;
 
-        // best-effort delete subcollection comments first
         try {
           const commentsRef = collection(firestore, 'reviews', docId, 'comments');
           const commentsSnap = await getDocs(query(commentsRef, limit(250)));
@@ -397,7 +526,6 @@ export function useSocialReactions() {
         await deleteDoc(doc(firestore, 'reviews', docId));
       } catch (err) {
         console.warn('Failed to delete review', err);
-        // rollback
         setReviews((prev) => {
           const exists = prev.some((r) => r.id === id);
           if (exists) return prev;

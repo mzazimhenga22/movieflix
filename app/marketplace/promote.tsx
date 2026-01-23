@@ -11,21 +11,22 @@ import {
   TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import Slider from '@react-native-community/slider';
+import { addDoc, collection, doc, runTransaction, serverTimestamp, updateDoc } from 'firebase/firestore';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { useAccent } from '../components/AccentContext';
 import { useUser } from '../../hooks/use-user';
 import {
-  getProducts,
+  getProductsBySellerId,
+  db,
   getPromoCreditsAccount,
   isProductPromoted,
-  marketplaceCancelPromotion,
-  marketplaceExtendPromotionWithCredits,
-  marketplacePromoteWithCredits,
-  promoCreditsSubmitPaybillReceipt,
+  darajaStkQuery,
+  mpesaMarketplaceStkPush,
   type Product,
 } from './api';
 import { formatKsh } from '../../lib/money';
@@ -35,8 +36,13 @@ export default function PromoteScreen() {
   const { setAccentColor } = useAccent();
   const { user } = useUser();
 
-  const PAYBILL_NUMBER = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_NUMBER ?? process.env.EXPO_PUBLIC_PAYBILL_NUMBER ?? '247247').trim();
-  const PAYBILL_ACCOUNT = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_ACCOUNT ?? process.env.EXPO_PUBLIC_PAYBILL_ACCOUNT ?? '480755').trim();
+  const MPESA_PHONE_CACHE_KEY = 'promoCreditsMpesaPhone';
+  const PROMO_CREDITS_TOPUPS_COLLECTION = 'promo_credits_topups';
+  const PROMO_CREDITS_ACCOUNTS_COLLECTION = 'promo_credits_accounts';
+  const PROMO_CREDITS_TRANSACTIONS_COLLECTION = 'promo_credits_transactions';
+  const PROMO_CREDITS_KES_PER_CREDIT = 10;
+  const PROMO_CREDITS_MIN_TOPUP_KSH = 50;
+  const PROMO_CREDITS_MAX_TOPUP_KSH = 50_000;
 
   const formatCredits = useCallback((value: number) => {
     const v = Math.max(0, Math.round(Number(value) || 0));
@@ -56,8 +62,12 @@ export default function PromoteScreen() {
   const [creditsBalance, setCreditsBalance] = useState(0);
   const [creditsLoading, setCreditsLoading] = useState(false);
   const [topupAmountKsh, setTopupAmountKsh] = useState('500');
-  const [topupReceiptCode, setTopupReceiptCode] = useState('');
   const [topupSubmitting, setTopupSubmitting] = useState(false);
+  const [topupPhone, setTopupPhone] = useState('');
+  const [topupDocId, setTopupDocId] = useState<string | null>(null);
+  const [topupCheckoutRequestId, setTopupCheckoutRequestId] = useState<string | null>(null);
+  const [topupStatus, setTopupStatus] = useState<string | null>(null);
+  const [topupChecking, setTopupChecking] = useState(false);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
@@ -121,6 +131,26 @@ export default function PromoteScreen() {
   }, [setAccentColor]);
 
   useEffect(() => {
+    let mounted = true;
+    void AsyncStorage.getItem(MPESA_PHONE_CACHE_KEY)
+      .then((stored) => {
+        if (!mounted) return;
+        if (stored && stored.trim()) setTopupPhone(stored.trim());
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [MPESA_PHONE_CACHE_KEY]);
+
+  const isLikelyKenyaPhone = useCallback((raw: string) => {
+    const cleaned = raw.trim().replace(/^[+]/, '').replace(/[\s-]/g, '');
+    if (!cleaned) return false;
+    if (!/^\d+$/.test(cleaned)) return false;
+    return cleaned.startsWith('0') || cleaned.startsWith('254') || cleaned.startsWith('7') || cleaned.startsWith('1');
+  }, []);
+
+  useEffect(() => {
     void reloadCredits();
   }, [reloadCredits, user?.uid, reloadKey]);
 
@@ -130,8 +160,15 @@ export default function PromoteScreen() {
     (async () => {
       try {
         setLoading(true);
-        const all = await getProducts();
-        const mine = all.filter((p): p is Product & { id: string } => !!p.id && !!user?.uid && p.sellerId === user.uid);
+        if (!user?.uid) {
+          if (!cancelled) {
+            setProducts([]);
+            setSelectedProducts([]);
+          }
+          return;
+        }
+
+        const mine = (await getProductsBySellerId(user.uid)).filter((p): p is Product & { id: string } => !!p.id);
         if (!cancelled) {
           setProducts(mine);
           setSelectedProducts((prev) => prev.filter((id) => mine.some((p) => p.id === id)));
@@ -165,6 +202,137 @@ export default function PromoteScreen() {
     []
   );
 
+  const promoteWithCreditsLocal = useCallback(
+    async (args: {
+      productIds: string[];
+      placement: 'search' | 'story' | 'feed';
+      durationUnit: 'hours' | 'days';
+      durationValue: number;
+      mode: 'purchase' | 'extend';
+    }) => {
+      if (!user?.uid) throw new Error('Sign in required');
+
+      const productIds = (args.productIds ?? []).map((id) => String(id ?? '').trim()).filter(Boolean);
+      if (productIds.length === 0) throw new Error('Select at least one product');
+      if (productIds.length > 10) throw new Error('Select up to 10 products at a time');
+
+      const placement = args.placement;
+      const unit = args.durationUnit;
+      const value = Math.max(1, Math.round(Number(args.durationValue) || 1));
+
+      const perUnit = (rates as any)?.[unit]?.[placement] ?? 0;
+      const totalCredits = Math.max(0, Math.round(Number(perUnit) * value * productIds.length));
+      if (totalCredits <= 0) throw new Error('Promotion cost must be greater than zero');
+
+      const now = Date.now();
+      const msPerUnit = unit === 'hours' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      const addMs = value * msPerUnit;
+
+      return await runTransaction(db, async (tx) => {
+        const productsCollection = 'marketplace_products';
+        const promoAccountsCollection = 'promo_credits_accounts';
+        const promoTxCollection = 'promo_credits_transactions';
+
+        const productRefs = productIds.map((id) => doc(db, productsCollection, id));
+        const productSnaps = await Promise.all(productRefs.map((ref) => tx.get(ref)));
+
+        let baseEndsAtMs = now;
+        for (const snap of productSnaps) {
+          if (!snap.exists()) throw new Error('One or more products not found');
+          const data = snap.data() as any;
+          const sellerId = String(data?.sellerId ?? '').trim();
+          if (!sellerId || sellerId !== user.uid) throw new Error('You can only promote your own products');
+
+          if (args.mode === 'extend') {
+            const rawEnds = data?.promotionEndsAt ?? null;
+            const endsMs =
+              rawEnds && typeof rawEnds?.toMillis === 'function'
+                ? rawEnds.toMillis()
+                : rawEnds && typeof rawEnds?.toDate === 'function'
+                  ? rawEnds.toDate().getTime()
+                  : rawEnds instanceof Date
+                    ? rawEnds.getTime()
+                    : typeof rawEnds === 'number'
+                      ? rawEnds
+                      : typeof rawEnds === 'string'
+                        ? Date.parse(rawEnds)
+                        : null;
+            if (typeof endsMs === 'number' && Number.isFinite(endsMs)) {
+              baseEndsAtMs = Math.max(baseEndsAtMs, endsMs);
+            }
+          }
+        }
+
+        const accountRef = doc(db, promoAccountsCollection, user.uid);
+        const accountSnap = await tx.get(accountRef);
+        const account = (accountSnap.exists() ? accountSnap.data() : {}) as any;
+        const available = Math.max(0, Math.round(Number(account?.availableCredits ?? 0)));
+        if (available < totalCredits) throw new Error('Insufficient promo credits. Please top up to continue.');
+
+        const after = available - totalCredits;
+        const endsAt = new Date(baseEndsAtMs + addMs);
+        const perProductCredits = Math.round(totalCredits / productIds.length);
+
+        const promoTxRef = doc(collection(db, promoTxCollection));
+        tx.set(promoTxRef, {
+          userId: user.uid,
+          type: args.mode === 'extend' ? 'promotion_extend' : 'promotion_purchase',
+          direction: 'debit',
+          credits: totalCredits,
+          balanceAfter: after,
+          reference: {
+            productIds,
+            placement,
+            durationUnit: unit,
+            durationValue: value,
+          },
+          createdAt: serverTimestamp(),
+        });
+
+        tx.set(
+          accountRef,
+          {
+            userId: user.uid,
+            availableCredits: after,
+            lifetimeIn: Number(account?.lifetimeIn ?? 0),
+            lifetimeOut: Number(account?.lifetimeOut ?? 0) + totalCredits,
+            updatedAt: serverTimestamp(),
+            ...(accountSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+          },
+          { merge: true }
+        );
+
+        for (const ref of productRefs) {
+          tx.set(
+            ref,
+            {
+              promoted: true,
+              promotionPlacement: placement,
+              promotionDurationUnit: unit,
+              promotionDurationValue: value,
+              promotionEndsAt: endsAt,
+              promotionBid: perProductCredits,
+              promotionCost: perProductCredits,
+              promotionCurrency: 'credits',
+              promotionCostCredits: perProductCredits,
+              promotionLastPurchaseTxId: promoTxRef.id,
+              promotionUpdatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+
+        return {
+          availableCredits: after,
+          totalCredits,
+          endsAt: endsAt.toISOString(),
+          transactionId: promoTxRef.id,
+        };
+      });
+    },
+    [rates, user?.uid]
+  );
+
   const activeCampaigns = useMemo(() => {
     const mine = products || [];
     const active = mine.filter((p) => isProductPromoted(p));
@@ -187,9 +355,13 @@ export default function PromoteScreen() {
             if (campaignBusyId || submitting) return;
             setCampaignBusyId(product.id);
             void (async () => {
-              if (!user) throw new Error('Sign in required');
-              const firebaseToken = await user.getIdToken();
-              await marketplaceCancelPromotion({ firebaseToken, productId: product.id });
+              if (!user?.uid) throw new Error('Sign in required');
+              if (String(product.sellerId ?? '').trim() !== user.uid) throw new Error('Not allowed');
+              await updateDoc(doc(db, 'marketplace_products', product.id), {
+                promoted: false,
+                promotionEndsAt: new Date(),
+                promotionUpdatedAt: serverTimestamp(),
+              } as any);
             })()
               .then(async () => {
                 await reloadCredits();
@@ -204,7 +376,7 @@ export default function PromoteScreen() {
         },
       ]);
     },
-    [campaignBusyId, reload, reloadCredits, submitting, user],
+    [campaignBusyId, reload, reloadCredits, submitting, user?.uid],
   );
 
   const extendCampaign = useCallback(
@@ -223,14 +395,12 @@ export default function PromoteScreen() {
         if (campaignBusyId || submitting) return;
         setCampaignBusyId(product.id);
         void (async () => {
-          if (!user) throw new Error('Sign in required');
-          const firebaseToken = await user.getIdToken();
-          await marketplaceExtendPromotionWithCredits({
-            firebaseToken,
+          await promoteWithCreditsLocal({
             productIds: [product.id],
             placement: placementKey,
             durationUnit: unit,
             durationValue: addUnits,
+            mode: 'extend',
           });
         })()
           .then(async () => {
@@ -262,7 +432,7 @@ export default function PromoteScreen() {
         { text: 'Not now', style: 'cancel' },
       ]);
     },
-    [campaignBusyId, reload, reloadCredits, submitting, user],
+    [campaignBusyId, promoteWithCreditsLocal, reload, reloadCredits, submitting],
   );
 
   const durationMax = durationUnit === 'hours' ? 72 : 30;
@@ -300,39 +470,204 @@ export default function PromoteScreen() {
     }
 
     const amount = Math.round(Number(topupAmountKsh));
-    const receiptCode = topupReceiptCode.trim().toUpperCase();
+
+    if (amount < PROMO_CREDITS_MIN_TOPUP_KSH) {
+      Alert.alert('Amount too low', `Minimum top up is ${formatKsh(PROMO_CREDITS_MIN_TOPUP_KSH)}.`);
+      return;
+    }
+    if (amount > PROMO_CREDITS_MAX_TOPUP_KSH) {
+      Alert.alert('Amount too high', `Maximum top up is ${formatKsh(PROMO_CREDITS_MAX_TOPUP_KSH)}.`);
+      return;
+    }
+    if (amount % PROMO_CREDITS_KES_PER_CREDIT !== 0) {
+      Alert.alert('Invalid amount', `Top up amount must be a multiple of KSh ${PROMO_CREDITS_KES_PER_CREDIT}.`);
+      return;
+    }
 
     if (!Number.isFinite(amount) || amount <= 0) {
       Alert.alert('Amount required', 'Enter a valid top up amount.');
       return;
     }
 
-    if (!/^[A-Z0-9]{10}$/.test(receiptCode)) {
-      Alert.alert('Receipt required', 'Paste the M-Pesa receipt code you received by SMS (e.g. QRTSITS25S).');
+    if (!topupPhone.trim() || !isLikelyKenyaPhone(topupPhone)) {
+      Alert.alert('Invalid phone', 'Enter a Kenya phone number (e.g. 07XXXXXXXX or 2547XXXXXXXX).');
       return;
     }
 
     setTopupSubmitting(true);
     try {
-      const firebaseToken = await user.getIdToken();
-      await promoCreditsSubmitPaybillReceipt({
-        firebaseToken,
+      const firebaseToken = await user.getIdToken(true);
+
+      const credits = Math.round(amount / PROMO_CREDITS_KES_PER_CREDIT);
+      if (!Number.isFinite(credits) || credits <= 0) throw new Error('Top up amount is too low');
+
+      setTopupStatus(null);
+      setTopupDocId(null);
+      setTopupCheckoutRequestId(null);
+
+      try {
+        await AsyncStorage.setItem(MPESA_PHONE_CACHE_KEY, topupPhone.trim());
+      } catch {
+        // ignore
+      }
+
+      const topupRef = await addDoc(collection(db, PROMO_CREDITS_TOPUPS_COLLECTION), {
+        userId: user.uid,
+        phone: topupPhone.trim(),
         amountKsh: amount,
-        receiptCode,
+        credits,
+        status: 'initiated',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      } as any);
+
+      setTopupDocId(topupRef.id);
+
+      const stk = await mpesaMarketplaceStkPush({
+        firebaseToken,
+        phone: topupPhone.trim(),
+        amount,
+        accountReference: `promo-${topupRef.id}`,
+        transactionDesc: 'Promo credits top up',
       });
 
-      setTopupReceiptCode('');
-      Alert.alert(
-        'Receipt submitted',
-        `We received your receipt code. Promo credits will be added after confirmation.\n\nPaybill: ${PAYBILL_NUMBER}\nAccount/Business No: ${PAYBILL_ACCOUNT}`
-      );
+      setTopupCheckoutRequestId(stk.checkoutRequestId ?? null);
+      setTopupStatus(stk.customerMessage ?? 'STK push sent. Enter your M-Pesa PIN then tap “Check status”.');
+
+      await updateDoc(topupRef, {
+        merchantRequestId: stk.merchantRequestId ?? null,
+        checkoutRequestId: stk.checkoutRequestId ?? null,
+        customerMessage: stk.customerMessage ?? null,
+        status: 'stk_sent',
+        updatedAt: serverTimestamp(),
+      } as any);
+
+      Alert.alert('Check your phone', stk.customerMessage ?? 'Enter your M-Pesa PIN prompt then tap “Check status”.');
     } catch (err: any) {
       console.error('[marketplace] credits topup start failed', err);
-      Alert.alert('Top up failed', err?.message || 'Unable to submit receipt right now.');
+      Alert.alert('Top up failed', err?.message || 'Unable to start top up right now.');
     } finally {
       setTopupSubmitting(false);
     }
-  }, [PAYBILL_ACCOUNT, PAYBILL_NUMBER, router, topupAmountKsh, topupReceiptCode, topupSubmitting, user]);
+  }, [MPESA_PHONE_CACHE_KEY, PROMO_CREDITS_KES_PER_CREDIT, PROMO_CREDITS_MAX_TOPUP_KSH, PROMO_CREDITS_MIN_TOPUP_KSH, PROMO_CREDITS_TOPUPS_COLLECTION, isLikelyKenyaPhone, router, topupAmountKsh, topupPhone, topupSubmitting, user]);
+
+  const checkTopupStatus = useCallback(async (opts?: { silent?: boolean }) => {
+    if (topupChecking || topupSubmitting) return;
+    if (!user?.uid) {
+      Alert.alert('Sign in required', 'Please sign in to check your top up.');
+      return;
+    }
+    if (!topupDocId) {
+      Alert.alert('Missing request', 'Start top up first to get an STK prompt.');
+      return;
+    }
+    if (!topupCheckoutRequestId) {
+      Alert.alert('Missing request', 'Waiting for CheckoutRequestID. Start the top up again.');
+      return;
+    }
+
+    setTopupChecking(true);
+    try {
+      const firebaseToken = await user.getIdToken(true);
+
+      const res = await darajaStkQuery({ firebaseToken, checkoutRequestId: topupCheckoutRequestId });
+      const resultCode = String(res?.resultCode ?? '').trim();
+      const desc = res?.resultDesc || (resultCode ? `Result code: ${resultCode}` : 'Status unavailable');
+      setTopupStatus(desc);
+
+      if (resultCode !== '0') {
+        await updateDoc(doc(db, PROMO_CREDITS_TOPUPS_COLLECTION, topupDocId), {
+          status: 'failed',
+          resultCode: resultCode || null,
+          resultDesc: desc ? String(desc) : null,
+          raw: res?.raw ?? null,
+          updatedAt: serverTimestamp(),
+        } as any).catch(() => {});
+
+        if (!opts?.silent) Alert.alert('Not confirmed yet', desc);
+        return;
+      }
+
+      const confirmResult = await runTransaction(db, async (tx) => {
+        const topupRef = doc(db, PROMO_CREDITS_TOPUPS_COLLECTION, topupDocId);
+        const topupSnap = await tx.get(topupRef);
+        if (!topupSnap.exists()) throw new Error('Top up not found');
+
+        const topup = topupSnap.data() as any;
+        if (String(topup?.userId ?? '').trim() !== user.uid) throw new Error('Not allowed');
+
+        const status = String(topup?.status ?? '').toLowerCase();
+        const creditsToCredit = Math.max(0, Math.round(Number(topup?.credits ?? 0)));
+        const amountKsh = Math.max(0, Math.round(Number(topup?.amountKsh ?? 0)));
+
+        const accountRef = doc(db, PROMO_CREDITS_ACCOUNTS_COLLECTION, user.uid);
+        const accountSnap = await tx.get(accountRef);
+        const account = (accountSnap.exists() ? accountSnap.data() : {}) as any;
+        const before = Math.max(0, Math.round(Number(account?.availableCredits ?? 0)));
+
+        if (status === 'confirmed') {
+          return { alreadyProcessed: true, availableCredits: before };
+        }
+        if (creditsToCredit <= 0 || amountKsh <= 0) throw new Error('Invalid top up record');
+
+        const after = before + creditsToCredit;
+
+        const promoTxRef = doc(collection(db, PROMO_CREDITS_TRANSACTIONS_COLLECTION));
+        tx.set(promoTxRef, {
+          userId: user.uid,
+          type: 'topup',
+          direction: 'credit',
+          credits: creditsToCredit,
+          balanceAfter: after,
+          amountKsh,
+          reference: {
+            topupDocId,
+            checkoutRequestId: topupCheckoutRequestId,
+          },
+          createdAt: serverTimestamp(),
+        } as any);
+
+        tx.set(
+          accountRef,
+          {
+            userId: user.uid,
+            availableCredits: after,
+            lifetimeIn: Number(account?.lifetimeIn ?? 0) + creditsToCredit,
+            lifetimeOut: Number(account?.lifetimeOut ?? 0),
+            updatedAt: serverTimestamp(),
+            ...(accountSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+          },
+          { merge: true }
+        );
+
+        tx.set(
+          topupRef,
+          {
+            status: 'confirmed',
+            confirmedAt: serverTimestamp(),
+            resultCode: resultCode || null,
+            resultDesc: desc ? String(desc) : null,
+            raw: res?.raw ?? null,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        return { alreadyProcessed: false, availableCredits: after };
+      });
+
+      await reloadCredits();
+      Alert.alert(
+        'Top up confirmed',
+        `Credits updated. New balance: ${formatCredits(Number((confirmResult as any)?.availableCredits ?? creditsBalance))}.`
+      );
+    } catch (err: any) {
+      console.error('[marketplace] credits topup check failed', err);
+      if (!opts?.silent) Alert.alert('Check failed', err?.message || 'Unable to check top up status right now.');
+    } finally {
+      setTopupChecking(false);
+    }
+  }, [PROMO_CREDITS_ACCOUNTS_COLLECTION, PROMO_CREDITS_TOPUPS_COLLECTION, PROMO_CREDITS_TRANSACTIONS_COLLECTION, creditsBalance, darajaStkQuery, formatCredits, reloadCredits, topupChecking, topupCheckoutRequestId, topupDocId, topupSubmitting, user]);
 
   const handlePromote = async () => {
     if (!user?.uid) {
@@ -350,13 +685,12 @@ export default function PromoteScreen() {
 
     setSubmitting(true);
     try {
-      const firebaseToken = await user.getIdToken();
-      const res = await marketplacePromoteWithCredits({
-        firebaseToken,
+      const res = await promoteWithCreditsLocal({
         productIds: selectedProducts,
         placement,
         durationUnit,
         durationValue,
+        mode: 'purchase',
       });
 
       await reloadCredits();
@@ -463,7 +797,7 @@ export default function PromoteScreen() {
                   </View>
 
                   <Text style={styles.walletHint}>
-                    Pay via M-Pesa Paybill {PAYBILL_NUMBER} (Account/Business No: {PAYBILL_ACCOUNT}).
+                    Enter your phone number to receive an STK prompt.
                     {'\n'}Tip: Top up amounts must be a multiple of KSh 10.
                   </Text>
 
@@ -475,19 +809,22 @@ export default function PromoteScreen() {
                     keyboardType="number-pad"
                     value={topupAmountKsh}
                     onChangeText={(t) => setTopupAmountKsh(t.replace(/[^0-9]/g, ''))}
-                    editable={!topupSubmitting}
+                    editable={!topupSubmitting && !topupChecking}
                   />
 
-                  <Text style={styles.inputLabel}>M-Pesa receipt code</Text>
+                  <Text style={styles.inputLabel}>Phone number</Text>
                   <TextInput
                     style={styles.input}
-                    placeholder="QRTSITS25S"
+                    placeholder="07XXXXXXXX"
                     placeholderTextColor="rgba(255,255,255,0.5)"
-                    autoCapitalize="characters"
-                    value={topupReceiptCode}
-                    onChangeText={(t) => setTopupReceiptCode(t.replace(/[^0-9a-zA-Z]/g, '').toUpperCase())}
-                    editable={!topupSubmitting}
+                    keyboardType="phone-pad"
+                    value={topupPhone}
+                    onChangeText={(t) => setTopupPhone(t)}
+                    editable={!topupSubmitting && !topupChecking}
                   />
+
+                  {!!topupCheckoutRequestId && <Text style={styles.mutedNote}>CheckoutRequestID: {topupCheckoutRequestId}</Text>}
+                  {!!topupStatus && <Text style={styles.mutedNote}>{topupStatus}</Text>}
 
                   <View style={styles.quickAmountsRow}>
                     {[200, 500, 1000, 2000].map((amt) => (
@@ -505,12 +842,24 @@ export default function PromoteScreen() {
                   <TouchableOpacity
                     style={[styles.primaryWalletBtn, topupSubmitting && { opacity: 0.7 }]}
                     onPress={startTopup}
-                    disabled={topupSubmitting}
+                    disabled={topupSubmitting || topupChecking}
                   >
                     {topupSubmitting ? (
                       <ActivityIndicator color="#fff" />
                     ) : (
-                      <Text style={styles.primaryWalletBtnText}>Submit receipt</Text>
+                      <Text style={styles.primaryWalletBtnText}>Top up via M-Pesa</Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.secondaryBtn, (topupChecking || !topupDocId || !topupCheckoutRequestId) && { opacity: 0.7 }]}
+                    onPress={() => void checkTopupStatus()}
+                    disabled={topupChecking || !topupDocId || !topupCheckoutRequestId}
+                  >
+                    {topupChecking ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.secondaryBtnText}>Check status</Text>
                     )}
                   </TouchableOpacity>
                 </View>
@@ -926,6 +1275,11 @@ const styles = StyleSheet.create({
   },
   walletHint: {
     color: 'rgba(255,255,255,0.65)',
+    marginTop: 10,
+    fontWeight: '700',
+  },
+  mutedNote: {
+    color: 'rgba(255,255,255,0.72)',
     marginTop: 10,
     fontWeight: '700',
   },

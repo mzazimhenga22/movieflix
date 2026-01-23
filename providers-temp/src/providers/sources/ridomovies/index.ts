@@ -79,7 +79,7 @@ export const ridooMoviesScraper = makeSourcerer({
   name: 'RidoMovies',
   rank: 210,
   flags: [],
-  disabled: true,
+  disabled: false,
   scrapeMovie: universalScraper,
   scrapeShow: universalScraper,
 });

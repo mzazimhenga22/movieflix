@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, StyleSheet, Alert } from 'react-native';
 import MediaPicker from './components/post-review/MediaPicker';
 // eslint-disable-next-line import/namespace, import/no-named-as-default, import/no-named-as-default-member
@@ -13,18 +13,11 @@ import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/fires
 import { firestore } from '../constants/firebase';
 import ScreenWrapper from '../components/ScreenWrapper';
 import { notifyPush } from '../lib/pushApi';
-
-if (typeof atob === 'undefined') {
-  // @ts-ignore
-  global.atob = decode;
-}
-if (typeof btoa === 'undefined') {
-  // @ts-ignore
-  global.btoa = (str: string) => encode(str);
-}
+import { getPersistedCache, deletePersistedCache } from '../lib/persistedCache';
 
 export default function PostReviewScreen() {
   const [media, setMedia] = useState<{ uri: string; type: 'image' | 'video' } | null>(null);
+  const [draftData, setDraftData] = useState<any | null>(null);
   const router = useRouter();
   const { user } = useUser();
   const fallbackUser = { uid: 'dev-user' }; // allow uploads in Expo Go when not authenticated
@@ -33,6 +26,16 @@ export default function PostReviewScreen() {
   const handleMediaPick = (uri: string, type: 'image' | 'video') => {
     setMedia({ uri, type });
   };
+
+  useEffect(() => {
+    void (async () => {
+      const cached = await getPersistedCache<any>('__movieflix_review_draft_v1');
+      if (cached?.value) {
+        setDraftData(cached.value);
+        if (cached.value.media) setMedia(cached.value.media);
+      }
+    })();
+  }, []);
 
   const handlePost = async (reviewData: any) => {
     if (!media) {
@@ -69,7 +72,14 @@ export default function PostReviewScreen() {
       }
 
       let finalUri = media.uri;
-      let contentType = media.type === 'image' ? 'image/jpeg' : 'video/mp4';
+      let contentType = (() => {
+        if (media.type === 'image') return 'image/jpeg';
+        const lower = String(media.uri || '').toLowerCase();
+        if (lower.endsWith('.mov')) return 'video/quicktime';
+        if (lower.endsWith('.m4v')) return 'video/x-m4v';
+        if (lower.endsWith('.webm')) return 'video/webm';
+        return 'video/mp4';
+      })();
 
       // Optimize images before upload
       if (media.type === 'image' && media.uri.startsWith('file://')) {
@@ -91,42 +101,53 @@ export default function PostReviewScreen() {
         await FileSystem.deleteAsync(tempUri, { idempotent: true });
       }
 
-      // Read file as Base64 and prepare binary payload for Supabase
-      const readLocalFile = async (uri: string) => {
-        const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-        const binary = atob(base64Data);
-        return Uint8Array.from(binary, (c) => c.charCodeAt(0)).buffer;
-      };
-
-      const fetchRemoteFile = async (uri: string) => {
-        const res = await fetch(uri);
-        const buf = await res.arrayBuffer();
-        // try to infer content-type if available
-        const ct = res.headers.get('content-type');
-        return { buffer: buf, contentType: ct || contentType };
-      };
-
-      let fileBuffer: ArrayBuffer;
-      if (finalUri.startsWith('http')) {
-        const remote = await fetchRemoteFile(finalUri);
-        fileBuffer = remote.buffer;
-        contentType = remote.contentType || contentType;
-      } else {
-        fileBuffer = await readLocalFile(finalUri);
-      }
-
       const rawName = finalUri.split('/').pop() || `upload-${Date.now()}`;
       const fileName = `${effectiveUser.uid}/${Date.now()}-${rawName}`.replace(/\s+/g, '_');
 
-      // Upload directly to Supabase Storage (feeds bucket)
-      const { data, error } = await supabase.storage
-        .from('feeds')
-        .upload(fileName, fileBuffer, {
-          contentType,
-          upsert: true,
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+      const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+      if (!supabaseUrl || !supabaseAnonKey) {
+        throw new Error('Missing Supabase env vars. Set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY.');
+      }
+
+      const safePath = fileName
+        .split('/')
+        .map((segment) => encodeURIComponent(segment))
+        .join('/');
+
+      // Large videos can OOM if base64-encoded; upload the file directly.
+      if (!finalUri.startsWith('http')) {
+        const uploadUrl = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/feeds/${safePath}`;
+
+        // Prefer the current auth token; fall back to anon key for dev.
+        const { data: sessionData } = await supabase.auth.getSession();
+        const token = sessionData?.session?.access_token || supabaseAnonKey;
+
+        const result = await (FileSystem as any).uploadAsync(uploadUrl, finalUri, {
+          httpMethod: 'POST',
+          uploadType: (FileSystem as any).FileSystemUploadType?.BINARY_CONTENT,
+          headers: {
+            'content-type': contentType,
+            authorization: `Bearer ${token}`,
+            apikey: supabaseAnonKey,
+            'x-upsert': 'true',
+          },
         });
 
-      if (error) throw error;
+        if (!result || (typeof result.status === 'number' && result.status >= 300)) {
+          throw new Error(`Upload failed (status ${result?.status ?? 'unknown'})`);
+        }
+      } else {
+        // Remote uri fallback (should be rare for feed picker).
+        const res = await fetch(finalUri);
+        const buf = await res.arrayBuffer();
+        const ct = res.headers.get('content-type');
+        const { error } = await supabase.storage.from('feeds').upload(fileName, buf, {
+          contentType: ct || contentType,
+          upsert: true,
+        });
+        if (error) throw error;
+      }
 
       // Get public URL (if bucket is public)
       const { data: publicUrl } = supabase.storage.from('feeds').getPublicUrl(fileName);
@@ -141,6 +162,9 @@ export default function PostReviewScreen() {
           review: reviewData.review ?? '',
           title: reviewData.title ?? '',
           rating: reviewData.rating ?? 0,
+          movieId: typeof reviewData.movieId === 'number' ? reviewData.movieId : null,
+          moviePosterUrl: reviewData.moviePosterUrl ?? null,
+          movieReleaseYear: reviewData.movieReleaseYear ?? null,
           mediaUrl: publicUrl.publicUrl,
           type: media.type,
           videoUrl: media.type === 'video' ? publicUrl.publicUrl : null,
@@ -164,7 +188,7 @@ export default function PostReviewScreen() {
             .filter((id) => !blocked.includes(id));
 
           for (const followerId of recipients) {
-            await addDoc(collection(firestore, 'notifications'), {
+            const ref = await addDoc(collection(firestore, 'notifications'), {
               type: 'new_post',
               scope: 'social',
               channel: 'community',
@@ -178,6 +202,8 @@ export default function PostReviewScreen() {
               read: false,
               createdAt: serverTimestamp(),
             });
+
+            void notifyPush({ kind: 'notification', notificationId: ref.id });
           }
         }
       } catch (metaError: any) {
@@ -187,8 +213,8 @@ export default function PostReviewScreen() {
       }
 
       Alert.alert('Success', 'Your review has been posted.');
-      console.log('Uploaded file:', data);
       console.log('Public URL:', publicUrl.publicUrl);
+      void deletePersistedCache('__movieflix_review_draft_v1');
     } catch (error: any) {
       console.error('Upload error:', error);
       Alert.alert('Upload failed', error.message || 'Please try again.');
@@ -214,6 +240,7 @@ export default function PostReviewScreen() {
               setMedia(null);
               router.back();
             }}
+            initialReviewData={draftData?.reviewData}
           />
         )}
       </View>

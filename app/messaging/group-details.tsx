@@ -11,6 +11,8 @@ import {
   Platform,
   Alert,
   Share,
+  Modal,
+  TextInput,
 } from 'react-native'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { LinearGradient } from 'expo-linear-gradient'
@@ -18,18 +20,26 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Ionicons } from '@expo/vector-icons'
 
 import ScreenWrapper from '../../components/ScreenWrapper'
+import { firestore } from '../../constants/firebase'
 import {
   onConversationUpdate,
   Conversation,
+  onAuthChange,
   onUserProfileUpdate,
   Profile,
   addGroupAdmin,
   removeGroupAdmin,
+  addGroupMember,
   removeGroupMember,
   leaveGroup,
   generateGroupInviteLink,
-  updateGroupSettings
+  updateGroupSettings,
+  findOrCreateConversation,
+  sendMessage,
+  getProfilesByIds,
 } from './controller'
+import { useMessagingSettings } from '@/hooks/useMessagingSettings'
+import { doc, getDoc } from 'firebase/firestore'
 
 const ACCENT = '#e50914'
 
@@ -52,15 +62,38 @@ export default function GroupDetailsScreen() {
   const insets = useSafeAreaInsets()
   const { conversationId } = useLocalSearchParams<{ conversationId?: string }>()
 
+  const { settings } = useMessagingSettings()
+
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [members, setMembers] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
+
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
+
+  // Add people UI
+  const [addPeopleOpen, setAddPeopleOpen] = useState(false)
+  const [peopleQuery, setPeopleQuery] = useState('')
+  const [peopleLoading, setPeopleLoading] = useState(false)
+  const [people, setPeople] = useState<Profile[]>([])
+  const [followingIds, setFollowingIds] = useState<string[]>([])
+  const [followerIds, setFollowerIds] = useState<string[]>([])
+  const [inviteCode, setInviteCode] = useState<string | null>(null)
+  const requestedIdsRef = useRef<Set<string>>(new Set())
 
   // subtle header entrance
   const headerFade = useRef(new Animated.Value(0)).current
   useEffect(() => {
     Animated.timing(headerFade, { toValue: 1, duration: 450, useNativeDriver: true }).start()
   }, [headerFade])
+
+  useEffect(() => {
+    const unsub = onAuthChange((u) => setCurrentUserId(u?.uid ?? null))
+    return () => {
+      try {
+        unsub()
+      } catch {}
+    }
+  }, [])
 
   useEffect(() => {
     if (!conversationId) {
@@ -112,9 +145,9 @@ export default function GroupDetailsScreen() {
 
   const stats = useMemo(() => {
     const total = members.length
-    const online = members.filter((m) => (m as any)?.status === 'online').length
+    const online = settings.hibernate ? 0 : members.filter((m) => (m as any)?.status === 'online').length
     return { total, online }
-  }, [members])
+  }, [members, settings.hibernate])
 
   const groupTitle = conversation?.name || 'Group Chat'
   const groupAvatarUrl = (conversation as any)?.avatarUrl || (conversation as any)?.photoURL || null
@@ -124,7 +157,7 @@ export default function GroupDetailsScreen() {
     // router.push({ pathname: '/profile/[id]', params: { id: member.id } })
   }
 
-  const isCurrentUserAdmin = conversation?.admins?.includes('currentUserId') || false // TODO: Get actual user ID
+  const isCurrentUserAdmin = Boolean(currentUserId && conversation?.admins?.includes(currentUserId))
 
   const handleInvite = async () => {
     if (!conversationId) return
@@ -139,6 +172,137 @@ export default function GroupDetailsScreen() {
       })
     } catch (error) {
       Alert.alert('Error', 'Failed to generate invite link')
+    }
+  }
+
+  const loadAddPeople = async () => {
+    if (!conversationId) return
+    if (!currentUserId) {
+      Alert.alert('Please sign in', 'Sign in to add people.')
+      return
+    }
+    if (!isCurrentUserAdmin) {
+      Alert.alert('Admins only', 'Only group admins can add people.')
+      return
+    }
+
+    setPeopleLoading(true)
+    try {
+      // Generate/reuse invite code for request messages
+      if (!inviteCode) {
+        const code = await generateGroupInviteLink(conversationId)
+        setInviteCode(code)
+      }
+
+      const userSnap = await getDoc(doc(firestore, 'users', currentUserId))
+      const data = userSnap.exists() ? (userSnap.data() as any) : {}
+      const following: string[] = Array.isArray(data.following) ? data.following.map(String) : []
+      const followers: string[] = Array.isArray(data.followers) ? data.followers.map(String) : []
+      setFollowingIds(following)
+      setFollowerIds(followers)
+
+      const existingMembers = new Set((conversation?.members || []).map(String))
+      const union = Array.from(new Set([...following, ...followers].map(String).filter(Boolean)))
+        .filter((id) => id !== currentUserId)
+        .filter((id) => !existingMembers.has(id))
+
+      const profiles = await getProfilesByIds(union)
+
+      const followerSet = new Set(followers)
+      const followingSet = new Set(following)
+      const ranked = profiles
+        .filter((p) => p?.id)
+        .sort((a, b) => {
+          const ra = followerSet.has(a.id) ? 0 : followingSet.has(a.id) ? 1 : 2
+          const rb = followerSet.has(b.id) ? 0 : followingSet.has(b.id) ? 1 : 2
+          if (ra !== rb) return ra - rb
+          return (a.displayName || '').localeCompare(b.displayName || '')
+        })
+
+      setPeople(ranked)
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Unable to load people right now.')
+    } finally {
+      setPeopleLoading(false)
+    }
+  }
+
+  const openAddPeople = async () => {
+    if (!currentUserId) {
+      Alert.alert('Please sign in', 'Sign in to add people.')
+      return
+    }
+    if (!isCurrentUserAdmin) {
+      Alert.alert('Admins only', 'Only group admins can add people.')
+      return
+    }
+    setPeopleQuery('')
+    setAddPeopleOpen(true)
+    await loadAddPeople()
+  }
+
+  const relationLabel = useMemo(() => {
+    const followerSet = new Set(followerIds)
+    const followingSet = new Set(followingIds)
+    return (id: string) => {
+      if (followerSet.has(id) && followingSet.has(id)) return 'Mutual'
+      if (followerSet.has(id)) return 'Follows you'
+      if (followingSet.has(id)) return 'You follow'
+      return ''
+    }
+  }, [followerIds, followingIds])
+
+  const canAddDirect = useMemo(() => {
+    const followerSet = new Set(followerIds)
+    return (id: string) => followerSet.has(id)
+  }, [followerIds])
+
+  const filteredPeople = useMemo(() => {
+    const q = peopleQuery.trim().toLowerCase()
+    if (!q) return people
+    return people.filter((p) => {
+      const hay = `${p.displayName || ''} ${p.id || ''}`.toLowerCase()
+      return hay.includes(q)
+    })
+  }, [people, peopleQuery])
+
+  const handleAddPerson = async (person: Profile) => {
+    if (!conversationId) return
+    if (!currentUserId) {
+      Alert.alert('Please sign in', 'Sign in to add people.')
+      return
+    }
+    if (!isCurrentUserAdmin) {
+      Alert.alert('Admins only', 'Only group admins can add people.')
+      return
+    }
+    if (!person?.id) return
+
+    const alreadyRequested = requestedIdsRef.current.has(person.id)
+    if (alreadyRequested) return
+
+    try {
+      if (canAddDirect(person.id)) {
+        await addGroupMember(conversationId, person.id)
+        Alert.alert('Added', `${person.displayName || 'User'} added to the group.`)
+        // Refresh candidates list to remove newly added member
+        await loadAddPeople()
+        return
+      }
+
+      // Not following back -> send as message request
+      const code = inviteCode || (await generateGroupInviteLink(conversationId))
+      if (!inviteCode) setInviteCode(code)
+      const inviteUrl = `https://yourapp.com/join/${code}`
+
+      const dmId = await findOrCreateConversation(person)
+      await sendMessage(dmId, {
+        text: `Join my group "${groupTitle}": ${inviteUrl}`,
+      })
+      requestedIdsRef.current.add(person.id)
+      Alert.alert('Request sent', `Sent an invite request to ${person.displayName || 'this user'}.`)
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Unable to add this person right now.')
     }
   }
 
@@ -294,7 +458,7 @@ export default function GroupDetailsScreen() {
               Group info
             </Text>
 
-            <TouchableOpacity style={styles.iconBtn} onPress={handleInvite}>
+            <TouchableOpacity style={styles.iconBtn} onPress={openAddPeople}>
               <Ionicons name="person-add" size={20} color="#fff" />
             </TouchableOpacity>
           </View>
@@ -315,7 +479,9 @@ export default function GroupDetailsScreen() {
                   {groupTitle}
                 </Text>
                 <Text style={styles.groupSub}>
-                  {stats.total} member{stats.total === 1 ? '' : 's'} • {stats.online} online
+                  {settings.hibernate
+                    ? `${stats.total} member${stats.total === 1 ? '' : 's'}`
+                    : `${stats.total} member${stats.total === 1 ? '' : 's'} • ${stats.online} online`}
                 </Text>
               </View>
             </View>
@@ -324,6 +490,11 @@ export default function GroupDetailsScreen() {
               <TouchableOpacity style={styles.actionBtn} onPress={handleInvite}>
                 <Ionicons name="add-circle-outline" size={18} color="#fff" />
                 <Text style={styles.actionText}>Invite</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.actionBtn} onPress={openAddPeople}>
+                <Ionicons name="people-outline" size={18} color="#fff" />
+                <Text style={styles.actionText}>Add people</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={styles.actionBtn} onPress={handleMute}>
@@ -339,6 +510,95 @@ export default function GroupDetailsScreen() {
           </View>
         </Animated.View>
 
+        <Modal
+          visible={addPeopleOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setAddPeopleOpen(false)}
+        >
+          <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setAddPeopleOpen(false)} />
+          <View style={[styles.sheet, { paddingBottom: insets.bottom + 14 }]}>
+            <View style={styles.sheetHeader}>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.sheetTitle}>Add people</Text>
+                <Text style={styles.sheetSubtitle}>Followers can be added directly. Others get a message request.</Text>
+              </View>
+              <TouchableOpacity style={styles.sheetCloseBtn} onPress={() => setAddPeopleOpen(false)}>
+                <Ionicons name="close" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.searchRow}>
+              <Ionicons name="search" size={16} color="rgba(255,255,255,0.7)" />
+              <TextInput
+                value={peopleQuery}
+                onChangeText={setPeopleQuery}
+                placeholder="Search people"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                style={styles.searchInput}
+              />
+              {peopleQuery ? (
+                <TouchableOpacity onPress={() => setPeopleQuery('')}>
+                  <Ionicons name="close-circle" size={18} color="rgba(255,255,255,0.75)" />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
+            {peopleLoading ? (
+              <View style={styles.sheetLoading}>
+                <ActivityIndicator />
+                <Text style={styles.mutedText}>Loading people…</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredPeople}
+                keyExtractor={(item) => item.id}
+                ItemSeparatorComponent={() => <View style={styles.sep} />}
+                contentContainerStyle={{ paddingTop: 10, paddingBottom: 4 }}
+                ListEmptyComponent={
+                  <Text style={styles.mutedText}>No people found.</Text>
+                }
+                renderItem={({ item }) => {
+                  const rel = relationLabel(item.id)
+                  const direct = canAddDirect(item.id)
+                  const requested = requestedIdsRef.current.has(item.id)
+
+                  return (
+                    <View style={styles.pickRow}>
+                      <View style={styles.pickLeft}>
+                        {item.photoURL ? (
+                          <Image source={{ uri: item.photoURL }} style={styles.pickAvatar} />
+                        ) : (
+                          <View style={styles.pickAvatarFallback}>
+                            <Text style={styles.pickAvatarInitials}>{initialsFromName(item.displayName)}</Text>
+                          </View>
+                        )}
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.pickName} numberOfLines={1}>
+                            {item.displayName || 'Unknown'}
+                          </Text>
+                          {rel ? <Text style={styles.pickMeta}>{rel}</Text> : null}
+                        </View>
+                      </View>
+
+                      <TouchableOpacity
+                        style={[styles.pickBtn, !direct && styles.pickBtnOutline, requested && styles.pickBtnDisabled]}
+                        onPress={() => handleAddPerson(item)}
+                        disabled={requested}
+                        activeOpacity={0.85}
+                      >
+                        <Text style={[styles.pickBtnText, !direct && styles.pickBtnTextOutline]}>
+                          {requested ? 'Sent' : direct ? 'Add' : 'Request'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )
+                }}
+              />
+            )}
+          </View>
+        </Modal>
+
         {/* Members */}
         <View style={styles.content}>
           <View style={styles.sectionHeader}>
@@ -353,10 +613,10 @@ export default function GroupDetailsScreen() {
               paddingBottom: Platform.OS === 'ios' ? insets.bottom + 24 : insets.bottom + 18,
             }}
             renderItem={({ item }) => {
-              const statusLabel = safeStatus(item)
-              const isOnline = (item as any)?.status === 'online'
+              const statusLabel = settings.hibernate ? null : safeStatus(item)
+              const isOnline = !settings.hibernate && (item as any)?.status === 'online'
               const isAdmin = conversation?.admins?.includes(item.id)
-              const isCurrentUser = item.id === 'currentUserId' // TODO: Get actual user ID
+              const isCurrentUser = Boolean(currentUserId && item.id === currentUserId)
 
               return (
                 <TouchableOpacity
@@ -373,7 +633,9 @@ export default function GroupDetailsScreen() {
                         <Text style={styles.avatarInitials}>{initialsFromName(item.displayName)}</Text>
                       </View>
                     )}
-                    <View style={[styles.presenceDot, isOnline ? styles.dotOnline : styles.dotOffline]} />
+                    {!settings.hibernate ? (
+                      <View style={[styles.presenceDot, isOnline ? styles.dotOnline : styles.dotOffline]} />
+                    ) : null}
                     {isAdmin && (
                       <View style={styles.adminBadge}>
                         <Ionicons name="shield-checkmark" size={12} color="#fff" />
@@ -391,7 +653,7 @@ export default function GroupDetailsScreen() {
                       )}
                     </View>
                     <Text style={styles.memberSub} numberOfLines={1}>
-                      {statusLabel ? statusLabel : '—'}
+                      {settings.hibernate ? '—' : statusLabel ? statusLabel : '—'}
                     </Text>
                   </View>
 
@@ -506,11 +768,13 @@ const styles = StyleSheet.create({
 
   actionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
     marginTop: 12,
   },
   actionBtn: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: '48%',
     height: 40,
     borderRadius: 999,
     alignItems: 'center',
@@ -655,6 +919,149 @@ const styles = StyleSheet.create({
 
   sep: {
     height: 10,
+  },
+
+  modalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#0b0c16',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    maxHeight: '78%',
+    borderTopWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingBottom: 10,
+  },
+  sheetTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  sheetSubtitle: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  sheetCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    height: 42,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  pickRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  pickLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+  pickAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  pickAvatarFallback: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  pickAvatarInitials: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: 13,
+  },
+  pickName: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  pickMeta: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  pickBtn: {
+    height: 34,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: ACCENT,
+  },
+  pickBtnOutline: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.20)',
+  },
+  pickBtnDisabled: {
+    opacity: 0.55,
+  },
+  pickBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  pickBtnTextOutline: {
+    color: '#fff',
+  },
+  sheetLoading: {
+    paddingVertical: 18,
+    alignItems: 'center',
   },
 
   title: {

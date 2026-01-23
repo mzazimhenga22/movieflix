@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, InteractionManager, StyleSheet, Text, View } from 'react-native';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Animated, Easing, FlatList, InteractionManager, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { API_BASE_URL, API_KEY } from '@/constants/api';
 import { getAccentFromPosterPath } from '@/constants/theme';
@@ -10,7 +10,69 @@ import { useTvAccent } from '../components/TvAccentContext';
 import TvGlassPanel from '../components/TvGlassPanel';
 import TvPosterCard from '../components/TvPosterCard';
 import { TvFocusable } from '../components/TvSpatialNavigation';
+import AmbientGlow from '../components/AmbientGlow';
 import { useRouter } from 'expo-router';
+
+const GenreChip = memo(function GenreChip({
+  item,
+  active,
+  onToggle,
+  index,
+}: {
+  item: Genre;
+  active: boolean;
+  onToggle: (id: number) => void;
+  index: number;
+}) {
+  const scaleAnim = useRef(new Animated.Value(0.9)).current;
+  const opacityAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 8,
+        tension: 70,
+        useNativeDriver: true,
+        delay: index * 40,
+      }),
+      Animated.timing(opacityAnim, {
+        toValue: 1,
+        duration: 300,
+        delay: index * 40,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [index, opacityAnim, scaleAnim]);
+
+  return (
+    <Animated.View style={{ opacity: opacityAnim, transform: [{ scale: scaleAnim }] }}>
+      <TvFocusable
+        onPress={() => onToggle(item.id)}
+        isTVSelectable={true}
+        accessibilityLabel={item.name}
+        style={({ focused }: any) => [
+          styles.genreChip,
+          active ? styles.genreChipActive : null,
+          focused ? styles.genreChipFocused : null,
+        ]}
+      >
+        {active && (
+          <LinearGradient
+            colors={['rgba(229,9,20,0.55)', 'rgba(229,9,20,0.25)']}
+            style={[StyleSheet.absoluteFill, { borderRadius: 999 }]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+          />
+        )}
+        <Text style={[styles.genreText, active ? styles.genreTextActive : null]}>
+          {item.name}
+        </Text>
+      </TvFocusable>
+    </Animated.View>
+  );
+});
 
 export default function CategoriesTv() {
   const router = useRouter();
@@ -43,7 +105,8 @@ export default function CategoriesTv() {
     let alive = true;
     setGenresLoading(true);
 
-    const handle = InteractionManager.runAfterInteractions(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const runFetch = () => {
       void fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`)
         .then((r) => r.json())
         .then((json) => {
@@ -57,12 +120,20 @@ export default function CategoriesTv() {
         .finally(() => {
           if (alive) setGenresLoading(false);
         });
-    });
+    };
+
+    // On web, `InteractionManager.runAfterInteractions` can fail to fire.
+    const handle = Platform.OS === 'web' ? null : InteractionManager.runAfterInteractions(runFetch);
+    if (Platform.OS === 'web') timeoutId = setTimeout(runFetch, 0);
 
     return () => {
       alive = false;
       // @ts-ignore - cancel exists at runtime on InteractionManager handle
       handle?.cancel?.();
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     };
   }, []);
 
@@ -128,13 +199,16 @@ export default function CategoriesTv() {
         end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
+      <AmbientGlow color={accent} intensity={0.2} />
 
       <View style={styles.shell}>
-        <TvGlassPanel accent={accent} style={styles.panel}>
+        <TvGlassPanel accent={accent} style={styles.panel} glowIntensity="medium">
           <View style={styles.panelInner}>
             <View style={styles.topBar}>
               <View style={styles.titleRow}>
-                <Ionicons name="grid" size={20} color="#fff" />
+                <View style={styles.iconWrap}>
+                  <Ionicons name="grid" size={22} color="#fff" />
+                </View>
                 <View style={styles.titleStack}>
                   <Text style={styles.title}>Categories</Text>
                   <Text style={styles.subtitle} numberOfLines={1}>
@@ -147,7 +221,7 @@ export default function CategoriesTv() {
             <View style={styles.genreRowWrap}>
               {genresLoading ? (
                 <View style={styles.genreLoading}>
-                  <ActivityIndicator color="#fff" />
+                  <ActivityIndicator color="#e50914" size="large" />
                   <Text style={styles.genreLoadingText}>Loading genres…</Text>
                 </View>
               ) : (
@@ -157,23 +231,14 @@ export default function CategoriesTv() {
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.genreRow}
-                  renderItem={({ item }) => {
-                    const active = selected === item.id;
-                    return (
-                      <TvFocusable
-                        onPress={() => toggle(item.id)}
-                        style={({ focused }: any) => [
-                          styles.genreChip,
-                          active ? styles.genreChipActive : null,
-                          focused ? styles.genreChipFocused : null,
-                        ]}
-                      >
-                        <Text style={[styles.genreText, active ? styles.genreTextActive : null]}>
-                          {item.name}
-                        </Text>
-                      </TvFocusable>
-                    );
-                  }}
+                  renderItem={({ item, index }) => (
+                    <GenreChip
+                      item={item}
+                      active={selected === item.id}
+                      onToggle={toggle}
+                      index={index}
+                    />
+                  )}
                 />
               )}
             </View>
@@ -181,18 +246,30 @@ export default function CategoriesTv() {
             <View style={styles.body}>
               {itemsLoading ? (
                 <View style={styles.center}>
-                  <ActivityIndicator color="#fff" />
+                  <ActivityIndicator color="#fff" size="large" />
                   <Text style={styles.centerText}>Loading titles…</Text>
                 </View>
               ) : !selected ? (
                 <View style={styles.center}>
+                  <Ionicons name="apps-outline" size={48} color="rgba(255,255,255,0.4)" />
                   <Text style={styles.centerTitle}>Pick a genre</Text>
                   <Text style={styles.centerText}>Use the row above to filter.</Text>
                 </View>
               ) : items.length === 0 ? (
                 <View style={styles.center}>
+                  <Ionicons name="film-outline" size={48} color="rgba(255,255,255,0.4)" />
                   <Text style={styles.centerTitle}>No titles</Text>
                   <Text style={styles.centerText}>Try another category.</Text>
+                  <TvFocusable
+                    onPress={() => setSelected(null)}
+                    tvPreferredFocus
+                    isTVSelectable={true}
+                    accessibilityLabel="Clear selection"
+                    style={({ focused }: any) => [styles.clearSelectionBtn, focused && styles.clearSelectionBtnFocused]}
+                  >
+                    <Ionicons name="arrow-back-outline" size={18} color="#fff" />
+                    <Text style={styles.clearSelectionBtnText}>Pick another genre</Text>
+                  </TvFocusable>
                 </View>
               ) : (
                 <FlatList
@@ -241,35 +318,86 @@ export default function CategoriesTv() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  shell: { flex: 1, paddingLeft: 0, paddingRight: 34, paddingTop: 22, paddingBottom: 22, alignItems: 'center' },
-  panel: { flex: 1, width: '100%', maxWidth: 1520 },
-  panelInner: { flex: 1, padding: 18 },
-  topBar: { paddingHorizontal: 6, paddingBottom: 14 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  titleStack: { flex: 1, minWidth: 0 },
-  title: { color: '#fff', fontSize: 18, fontWeight: '900' },
-  subtitle: { color: 'rgba(255,255,255,0.68)', fontSize: 13, fontWeight: '800', marginTop: 2 },
-  genreRowWrap: { paddingHorizontal: 6, paddingBottom: 10 },
-  genreRow: { gap: 12, paddingRight: 24 },
-  genreChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    backgroundColor: 'rgba(0,0,0,0.18)',
+  container: { flex: 1, backgroundColor: '#030408' },
+  shell: { flex: 1, paddingLeft: 108, paddingRight: 40, paddingTop: 28, paddingBottom: 28, alignItems: 'center' },
+  panel: { flex: 1, width: '100%', maxWidth: 1560 },
+  panelInner: { flex: 1, padding: 22 },
+  topBar: { paddingHorizontal: 8, paddingBottom: 18 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  iconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(229,9,20,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  genreChipActive: { backgroundColor: 'rgba(229,9,20,0.45)', borderColor: 'rgba(229,9,20,0.9)' },
-  genreChipFocused: { transform: [{ scale: 1.05 }], borderColor: '#fff' },
-  genreText: { color: 'rgba(255,255,255,0.8)', fontWeight: '900', fontSize: 14 },
+  titleStack: { flex: 1, minWidth: 0 },
+  title: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  subtitle: { color: 'rgba(255,255,255,0.65)', fontSize: 14, fontWeight: '700', marginTop: 4 },
+  genreRowWrap: { paddingHorizontal: 6, paddingBottom: 12 },
+  genreRow: { gap: 14, paddingRight: 28 },
+  genreChip: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(15,18,30,0.65)',
+    overflow: 'hidden',
+  },
+  genreChipActive: { borderColor: 'rgba(229,9,20,0.8)' },
+  genreChipFocused: { transform: [{ scale: 1.06 }], borderColor: '#fff' },
+  genreText: { color: 'rgba(255,255,255,0.75)', fontWeight: '900', fontSize: 15 },
   genreTextActive: { color: '#fff' },
-  genreLoading: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6 },
-  genreLoadingText: { color: 'rgba(255,255,255,0.75)', fontSize: 15, fontWeight: '800' },
+  genreLoading: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 10 },
+  genreLoadingText: { color: 'rgba(255,255,255,0.7)', fontSize: 16, fontWeight: '700' },
   body: { flex: 1, paddingHorizontal: 6, paddingBottom: 10 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  centerTitle: { color: '#fff', fontSize: 26, fontWeight: '900', marginBottom: 8 },
-  centerText: { color: 'rgba(255,255,255,0.75)', fontSize: 16, fontWeight: '700' },
-  grid: { paddingTop: 10, paddingBottom: 20 },
-  gridRow: { gap: 14 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  centerTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '900',
+    marginTop: 12,
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+  },
+  centerText: { color: 'rgba(255,255,255,0.7)', fontSize: 17, fontWeight: '600' },
+  clearSelectionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: 'rgba(229,9,20,0.8)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  clearSelectionBtnFocused: {
+    transform: [{ scale: 1.08 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  clearSelectionBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  grid: { paddingTop: 12, paddingBottom: 24 },
+  gridRow: { gap: 16, marginBottom: 16 },
 });

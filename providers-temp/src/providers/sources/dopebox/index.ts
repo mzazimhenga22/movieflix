@@ -82,7 +82,7 @@ export const dopeboxScraper = makeSourcerer({
   id: 'dopebox',
   name: 'Dopebox',
   rank: 197,
-  disabled: true,
+  disabled: false,
   flags: [flags.CORS_ALLOWED],
   scrapeMovie: comboScraper,
   scrapeShow: comboScraper,

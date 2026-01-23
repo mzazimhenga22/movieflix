@@ -1,5 +1,6 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { TvFocusable } from '../../app/components/TvSpatialNavigation';
 
 export default function NativeAdCard({
   product,
@@ -11,7 +12,7 @@ export default function NativeAdCard({
   if (!product) return null;
   const title = String(product?.title ?? product?.name ?? 'Sponsored');
   return (
-    <Pressable onPress={onPress} style={({ focused }: any) => [styles.card, focused ? styles.focused : null]}>
+    <TvFocusable onPress={onPress} style={({ focused }: any) => [styles.card, focused ? styles.focused : null]}>
       <Text style={styles.badge}>Sponsored</Text>
       <Text style={styles.title} numberOfLines={2}>
         {title}
@@ -19,7 +20,7 @@ export default function NativeAdCard({
       <View style={styles.ctaRow}>
         <Text style={styles.cta}>View</Text>
       </View>
-    </Pressable>
+    </TvFocusable>
   );
 }
 

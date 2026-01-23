@@ -6,7 +6,7 @@ import { SourcererOutput, makeSourcerer } from '@/providers/base';
 import { MovieScrapeContext, ShowScrapeContext } from '@/utils/context';
 import { NotFoundError } from '@/utils/errors';
 
-const zoeBase = 'https://zoechip.org';
+const zoeBase = 'https://zoechip.cc';
 
 function createSlug(title: string): string {
   return title
@@ -208,8 +208,8 @@ async function comboScraper(ctx: MovieScrapeContext | ShowScrapeContext): Promis
 export const zoechipScraper = makeSourcerer({
   id: 'zoechip',
   name: 'ZoeChip',
-  rank: 170,
-  disabled: true,
+  rank: 171,
+  disabled: false,
   flags: [],
   scrapeMovie: comboScraper,
   scrapeShow: comboScraper,

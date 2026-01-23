@@ -34,7 +34,8 @@ export async function persistDownloadRecord(record: Partial<DownloadItem>): Prom
     ...record,
   } as DownloadItem;
   try {
-    await AsyncStorage.setItem(key, JSON.stringify([entry, ...existing]));
+    const next = [entry, ...existing.filter((it) => it && String(it.id) !== String(entry.id))];
+    await AsyncStorage.setItem(key, JSON.stringify(next));
   } catch (err) {
     console.error('Failed to persist downloads list', err);
     throw err;

@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons'
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import { BlurView } from 'expo-blur'
 import { decode } from 'base64-arraybuffer'
 import * as FileSystem from 'expo-file-system/legacy'
 import * as ImagePicker from 'expo-image-picker'
@@ -15,11 +16,12 @@ import {
     onSnapshot,
     orderBy,
     query,
+    setDoc,
     serverTimestamp,
     updateDoc,
     type Unsubscribe
 } from 'firebase/firestore'
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     ActivityIndicator,
     Alert,
@@ -42,9 +44,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import ScreenWrapper from '../components/ScreenWrapper'
 import { authPromise, firestore } from '../constants/firebase'
 import { supabase, supabaseConfigured } from '../constants/supabase'
+import { useNavigationGuard } from '../hooks/use-navigation-guard'
 import { getLastAuthUid as getLastAuthUidStored, setLastAuthUid as setLastAuthUidStored } from '../lib/profileStorage'
-import { useSubscription } from '../providers/SubscriptionProvider'
 import { useAccent } from './components/AccentContext'
+import { useSubscription } from '../providers/SubscriptionProvider'
 
 type PlanTier = 'free' | 'plus' | 'premium'
 
@@ -80,11 +83,141 @@ const PLAN_PRICES: Record<PlanTier, number> = {
 const palette = ['#e50914', '#ff914d', '#2ec4b6', '#6c5ce7', '#ff6bcb', '#00b8d9']
 const PROFILES_BUCKET = 'profiles'
 
+const ProfileCard = memo(function ProfileCard({
+  item,
+  index,
+  locked,
+  accentColor,
+  onPress,
+  onEdit,
+  onDelete,
+}: {
+  item: HouseholdProfile
+  index: number
+  locked: boolean
+  accentColor: string
+  onPress: () => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const scaleAnim = useRef(new Animated.Value(0.9)).current
+  const opacityAnim = useRef(new Animated.Value(0)).current
+  const glowAnim = useRef(new Animated.Value(0)).current
+  const [focused, setFocused] = useState(false)
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 8,
+        tension: 65,
+        useNativeDriver: true,
+        delay: index * 80,
+      }),
+      Animated.timing(opacityAnim, {
+        toValue: 1,
+        duration: 350,
+        delay: index * 80,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start()
+  }, [index, opacityAnim, scaleAnim])
+
+  useEffect(() => {
+    Animated.timing(glowAnim, {
+      toValue: focused ? 1 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start()
+  }, [focused, glowAnim])
+
+  const animatedBorderColor = glowAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['rgba(255,255,255,0.08)', item.avatarColor || accentColor],
+  })
+
+  return (
+    <Animated.View
+      style={[
+        styles.profileCardOuter,
+        {
+          opacity: opacityAnim,
+          transform: [{ scale: scaleAnim }],
+        },
+      ]}
+    >
+      <TouchableOpacity
+        style={[styles.profileCard, locked && { opacity: 0.55 }]}
+        activeOpacity={0.9}
+        onPressIn={() => setFocused(true)}
+        onPressOut={() => setFocused(false)}
+        onPress={onPress}
+      >
+        <Animated.View style={[styles.profileCardGlow, { borderColor: animatedBorderColor }]} />
+        {focused && !locked && (
+          <LinearGradient
+            colors={[`${item.avatarColor || accentColor}30`, 'transparent']}
+            style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
+            start={{ x: 0.5, y: 0 }}
+            end={{ x: 0.5, y: 1 }}
+          />
+        )}
+
+        {!locked && (
+          <View style={styles.profileActions} pointerEvents="box-none">
+            <TouchableOpacity style={styles.actionButton} onPress={onEdit}>
+              <Ionicons name="pencil" size={16} color={accentColor} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton} onPress={onDelete}>
+              <Ionicons name="trash" size={16} color={accentColor} />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <View style={[styles.avatar, !item.photoURL && { backgroundColor: `${item.avatarColor || '#222'}55` }]}>
+          {item.photoURL ? (
+            <Image source={{ uri: item.photoURL }} style={styles.avatarImage} />
+          ) : (
+            <>
+              <LinearGradient
+                colors={[item.avatarColor || '#e50914', `${item.avatarColor || '#e50914'}88`]}
+                style={[StyleSheet.absoluteFill, { borderRadius: 20 }]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+              />
+              <Text style={styles.avatarInitial}>{item.name.charAt(0).toUpperCase()}</Text>
+            </>
+          )}
+        </View>
+
+        <Text style={styles.profileName} numberOfLines={1}>
+          {item.name}
+        </Text>
+
+        {item.isKids && (
+          <View style={styles.kidsPillWrap}>
+            <Text style={styles.kidsPill}>Kids</Text>
+          </View>
+        )}
+
+        {locked && (
+          <View style={styles.lockOverlay}>
+            <Ionicons name="lock-closed" size={16} color="#fff" />
+            <Text style={styles.lockText}>Upgrade</Text>
+          </View>
+        )}
+      </TouchableOpacity>
+    </Animated.View>
+  )
+})
+
 const SelectProfileScreen = () => {
   const router = useRouter()
   const insets = useSafeAreaInsets()
   const { accentColor } = useAccent()
-  const { refresh: refreshSubscription } = useSubscription()
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 })
 
   const [authChecked, setAuthChecked] = useState(false)
   const [currentUser, setCurrentUser] = useState<User | null>(null)
@@ -93,9 +226,7 @@ const SelectProfileScreen = () => {
 
   const effectiveUid = currentUser?.uid ?? lastAuthUid
 
-  // Plan + offline cache
-  const [planTier, setPlanTier] = useState<PlanTier>('free')
-  const [planHydrated, setPlanHydrated] = useState(false)
+  const { currentPlan: planTier, refresh: refreshSubscription } = useSubscription()
 
   // Profiles + offline cache
   const [profiles, setProfiles] = useState<HouseholdProfile[]>([])
@@ -121,7 +252,7 @@ const SelectProfileScreen = () => {
   const gradientFade = React.useRef(new Animated.Value(0)).current
   const [gradientIndex, setGradientIndex] = useState(0)
 
-  const gradientPalettes = useMemo(() => {
+  const gradientPalettes = useMemo((): [string, string, string][] => {
     const accent = accentColor || '#e50914'
     return [
       [accent, '#150a1f', '#050509'],
@@ -146,7 +277,6 @@ const SelectProfileScreen = () => {
   const isEditing = Boolean(editingProfile)
 
   const profileCacheKey = effectiveUid ? `profileCache:${effectiveUid}` : null
-  const planCacheKey = effectiveUid ? `planCache:${effectiveUid}` : null
 
   useEffect(() => {
     let mounted = true
@@ -201,56 +331,13 @@ const SelectProfileScreen = () => {
   }, [gradientFade, gradientPalettes.length])
 
   const handleUpgrade = useCallback(() => {
-    router.push('/premium?source=profiles')
-  }, [router])
+    deferNav(() => router.push('/premium?source=profiles'))
+  }, [deferNav, router])
 
   const isLockedIndex = useCallback(
     (index: number) => planTier === 'free' && index >= 1,
     [planTier],
   )
-
-  // Load plan: cache first → network fallback
-  const loadPlanTier = useCallback(async () => {
-    if (!effectiveUid) {
-      setPlanTier('free')
-      setPlanHydrated(true)
-      return
-    }
-
-    let resolved: PlanTier = 'free'
-
-    if (planCacheKey) {
-      try {
-        const cached = await AsyncStorage.getItem(planCacheKey)
-        if (cached === 'free' || cached === 'plus' || cached === 'premium') {
-          resolved = cached
-        }
-      } catch {}
-    }
-
-    setPlanTier(resolved)
-
-    if (!currentUser) {
-      setPlanHydrated(true)
-      return
-    }
-
-    try {
-      const userDocRef = doc(firestore, 'users', currentUser.uid)
-      const snap = await getDoc(userDocRef)
-      const raw = (snap.data()?.planTier as string | undefined ?? 'free').toLowerCase().trim()
-      const fresh: PlanTier = raw === 'premium' || raw === 'plus' || raw === 'free' ? raw : 'free'
-
-      setPlanTier(fresh)
-      if (planCacheKey) {
-        await AsyncStorage.setItem(planCacheKey, fresh)
-      }
-    } catch {
-      // offline → keep cached
-    } finally {
-      setPlanHydrated(true)
-    }
-  }, [currentUser, effectiveUid, planCacheKey])
 
   // Auth
   useEffect(() => {
@@ -283,9 +370,9 @@ const SelectProfileScreen = () => {
 
   useEffect(() => {
     if (authChecked && lastAuthUidLoaded && !currentUser && !effectiveUid) {
-      router.replace('/(auth)/login')
+      deferNav(() => router.replace('/(auth)/login'))
     }
-  }, [authChecked, currentUser, effectiveUid, lastAuthUidLoaded, router])
+  }, [authChecked, currentUser, deferNav, effectiveUid, lastAuthUidLoaded, router])
 
   // Hydrate profiles from cache immediately
   useEffect(() => {
@@ -319,11 +406,9 @@ const SelectProfileScreen = () => {
   }, [profileCacheKey])
 
   // Load plan on mount + focus
-  useEffect(() => {
-    void loadPlanTier()
-  }, [loadPlanTier])
-
-  useFocusEffect(useCallback(() => void loadPlanTier(), [loadPlanTier]))
+  useFocusEffect(useCallback(() => {
+    void refreshSubscription()
+  }, [refreshSubscription]))
 
   // Firestore subscription – updates when online, never overrides cache on error
   useEffect(() => {
@@ -348,6 +433,14 @@ const SelectProfileScreen = () => {
             pin: typeof data.pin === 'string' && data.pin.length > 0 ? data.pin : null,
           }
         })
+
+        // Firestore JS SDK in React Native doesn't persist a local cache across restarts.
+        // On a cold start while offline, `onSnapshot` may emit an empty `fromCache` snapshot,
+        // which would otherwise overwrite our AsyncStorage-backed offline cache.
+        const fromCache = Boolean(snap.metadata?.fromCache)
+        if (fromCache && next.length === 0) {
+          return
+        }
 
         setProfiles(next)
         setErrorCopy(null)
@@ -392,12 +485,30 @@ const SelectProfileScreen = () => {
             planTier,
           }),
         )
-        router.replace(currentUser ? '/movies' : '/downloads')
+
+        // Keep the chat identity in sync (so messaging shows the selected profile photo/name).
+        // Fire-and-forget to avoid blocking navigation while offline.
+        if (currentUser?.uid) {
+          void setDoc(
+            doc(firestore, 'users', currentUser.uid),
+            {
+              displayName: profile.name,
+              ...(profile.photoURL ? { photoURL: profile.photoURL } : {}),
+              activeProfileId: profile.id,
+              activeProfileUpdatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          ).catch((err) => {
+            console.warn('[select-profile] failed to sync active profile (offline?)', err)
+          })
+        }
+
+        deferNav(() => router.replace('/(tabs)/movies'))
       } catch (err) {
         Alert.alert('Error', 'Unable to select this profile.')
       }
     },
-    [planTier, profiles, handleUpgrade, currentUser],
+    [planTier, profiles, handleUpgrade, currentUser, deferNav, router],
   )
 
   const resetForm = () => {
@@ -427,8 +538,13 @@ const SelectProfileScreen = () => {
   }
 
   const handleDeleteProfile = (profile: HouseholdProfile) => {
+    if (!authChecked) {
+      Alert.alert('Please wait', 'Loading your account…')
+      return
+    }
+
     if (!currentUser) {
-      Alert.alert('Offline', 'Connect to the internet to manage profiles.')
+      Alert.alert('Sign in required', 'Please sign in to manage profiles.')
       return
     }
 
@@ -631,79 +747,54 @@ const SelectProfileScreen = () => {
   const handleChoosePlan = (tier: PlanTier) => {
     if (tier === planTier) return
     // Redirect to the Premium screen which handles upgrades/cancellations
-    router.push(`/premium?source=profiles&requested=${tier}`)
+    deferNav(() => router.push(`/premium?source=profiles&requested=${tier}`))
   }
 
   // Subscription handling moved to `premium.tsx`.
 
   const profileData = useMemo(() => profiles, [profiles])
 
-  const renderProfile = ({ item, index }: { item: HouseholdProfile; index: number }) => {
-    const locked = isLockedIndex(index)
+  const handleProfileCardPress = useCallback(
+    (item: HouseholdProfile, index: number) => {
+      if (isLockedIndex(index)) {
+        Alert.alert(
+          'Upgrade required',
+          'Free plan supports 1 profile. Upgrade to use multiple profiles.',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Upgrade', onPress: handleUpgrade },
+          ],
+        )
+        return
+      }
+      setSelectedProfile(item)
+      setPinEntry('')
+      setPinError(null)
+      setSheetVisible(true)
+      Animated.timing(sheetTranslateY, {
+        toValue: 0,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start()
+    },
+    [handleUpgrade, isLockedIndex, sheetTranslateY],
+  )
 
-    return (
-      <TouchableOpacity
-        style={[styles.profileCard, locked && { opacity: 0.55 }]}
-        activeOpacity={0.9}
-        onPress={() => {
-          if (locked) {
-            Alert.alert(
-              'Upgrade required',
-              'Free plan supports 1 profile. Upgrade to use multiple profiles.',
-              [
-                { text: 'Not now', style: 'cancel' },
-                { text: 'Upgrade', onPress: handleUpgrade },
-              ],
-            )
-            return
-          }
-          // Open bottom sheet with details instead of immediate selection
-          setSelectedProfile(item)
-          setPinEntry('')
-          setPinError(null)
-          setSheetVisible(true)
-          Animated.timing(sheetTranslateY, {
-            toValue: 0,
-            duration: 260,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
-          }).start()
-        }}
-      >
-        {!locked && (
-          <View style={styles.profileActions} pointerEvents="box-none">
-            <TouchableOpacity style={styles.actionButton} onPress={() => startEditingProfile(item)}>
-              <Ionicons name="pencil" size={16} color={accentColor} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton} onPress={() => handleDeleteProfile(item)}>
-              <Ionicons name="trash" size={16} color={accentColor} />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        <View style={[styles.avatar, !item.photoURL && { backgroundColor: item.avatarColor || '#222' }]}>
-          {item.photoURL ? (
-            <Image source={{ uri: item.photoURL }} style={styles.avatarImage} />
-          ) : (
-            <Text style={styles.avatarInitial}>{item.name.charAt(0).toUpperCase()}</Text>
-          )}
-        </View>
-
-        <Text style={styles.profileName} numberOfLines={1}>
-          {item.name}
-        </Text>
-
-        {item.isKids && <Text style={styles.kidsPill}>Kids</Text>}
-
-        {locked && (
-          <View style={styles.lockOverlay}>
-            <Ionicons name="lock-closed" size={16} color="#fff" />
-            <Text style={styles.lockText}>Upgrade</Text>
-          </View>
-        )}
-      </TouchableOpacity>
-    )
-  }
+  const renderProfile = useCallback(
+    ({ item, index }: { item: HouseholdProfile; index: number }) => (
+      <ProfileCard
+        item={item}
+        index={index}
+        locked={isLockedIndex(index)}
+        accentColor={accentColor}
+        onPress={() => handleProfileCardPress(item, index)}
+        onEdit={() => startEditingProfile(item)}
+        onDelete={() => handleDeleteProfile(item)}
+      />
+    ),
+    [accentColor, handleDeleteProfile, handleProfileCardPress, isLockedIndex, startEditingProfile],
+  )
 
   const paletteCount = gradientPalettes.length || 1
   const nextGradientIndex = (gradientIndex + 1) % paletteCount
@@ -727,16 +818,22 @@ const SelectProfileScreen = () => {
             />
           </Animated.View>
           <LinearGradient
-            colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+            colors={[`${accentColor}35`, 'rgba(255,255,255,0)']}
             start={{ x: 0.1, y: 0 }}
             end={{ x: 0.9, y: 1 }}
             style={styles.bgOrbPrimary}
           />
           <LinearGradient
-            colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
+            colors={['rgba(95,132,255,0.18)', 'rgba(255,255,255,0)']}
             start={{ x: 0.8, y: 0 }}
             end={{ x: 0.2, y: 1 }}
             style={styles.bgOrbSecondary}
+          />
+          <LinearGradient
+            colors={[`${accentColor}20`, 'rgba(255,255,255,0)']}
+            start={{ x: 0.5, y: 0 }}
+            end={{ x: 0.5, y: 1 }}
+            style={styles.bgOrbTertiary}
           />
         </View>
         <KeyboardAvoidingView
@@ -790,7 +887,7 @@ const SelectProfileScreen = () => {
         ) : (
           <FlatList
             data={profileData}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item, index) => `${String((item as any)?.id ?? 'profile')}-${index}`}
             renderItem={renderProfile}
             numColumns={2}
             contentContainerStyle={[
@@ -993,6 +1090,47 @@ const SelectProfileScreen = () => {
 
               <View style={styles.sheetActions}>
                 <TouchableOpacity
+                  style={[styles.sheetButton, styles.sheetButtonDanger]}
+                  onPress={() => {
+                    Alert.alert('Delete profile', `Delete ${selectedProfile.name}?`, [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: () => {
+                        handleDeleteProfile(selectedProfile)
+                        Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                          setSheetVisible(false)
+                          setSelectedProfile(null)
+                          setPinEntry('')
+                          setPinError(null)
+                        })
+                      } }
+                    ])
+                  }}
+                >
+                  <Text style={[styles.sheetButtonText, { color: '#fff' }]}>Delete</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.sheetButton, styles.sheetButtonOutline]}
+                  onPress={() => {
+                    // Edit: open create/edit form and close sheet
+                    setEditingProfile(selectedProfile)
+                    setNewProfileName(selectedProfile.name)
+                    setSelectedColor(selectedProfile.avatarColor || palette[0])
+                    setIsKidsProfile(selectedProfile.isKids ?? false)
+                    setProfilePin(selectedProfile.pin ?? '')
+                    setShowCreateCard(true)
+                    Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                      setSheetVisible(false)
+                      setSelectedProfile(null)
+                      setPinEntry('')
+                      setPinError(null)
+                    })
+                  }}
+                >
+                  <Text style={[styles.sheetButtonText, { color: accentColor }]}>Edit</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
                   style={[styles.sheetButton, { backgroundColor: accentColor }]}
                   onPress={async () => {
                     if (selectedProfile.pin) {
@@ -1020,47 +1158,6 @@ const SelectProfileScreen = () => {
                 >
                   <Text style={styles.sheetButtonText}>Use profile</Text>
                 </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.sheetButton, styles.sheetButtonOutline]}
-                  onPress={() => {
-                    // Edit: open create/edit form and close sheet
-                    setEditingProfile(selectedProfile)
-                    setNewProfileName(selectedProfile.name)
-                    setSelectedColor(selectedProfile.avatarColor || palette[0])
-                    setIsKidsProfile(selectedProfile.isKids ?? false)
-                    setProfilePin(selectedProfile.pin ?? '')
-                    setShowCreateCard(true)
-                    Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
-                      setSheetVisible(false)
-                      setSelectedProfile(null)
-                      setPinEntry('')
-                      setPinError(null)
-                    })
-                  }}
-                >
-                  <Text style={[styles.sheetButtonText, { color: accentColor }]}>Edit</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.sheetButton, styles.sheetButtonDanger]}
-                  onPress={() => {
-                    Alert.alert('Delete profile', `Delete ${selectedProfile.name}?`, [
-                      { text: 'Cancel', style: 'cancel' },
-                      { text: 'Delete', style: 'destructive', onPress: () => {
-                        handleDeleteProfile(selectedProfile)
-                        Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
-                          setSheetVisible(false)
-                          setSelectedProfile(null)
-                          setPinEntry('')
-                          setPinError(null)
-                        })
-                      } }
-                    ])
-                  }}
-                >
-                  <Text style={[styles.sheetButtonText, { color: '#fff' }]}>Delete</Text>
-                </TouchableOpacity>
               </View>
             </Animated.View>
           </>
@@ -1081,28 +1178,45 @@ const styles = StyleSheet.create({
   },
   bgOrbPrimary: {
     position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    top: -60,
-    left: -40,
-    opacity: 0.5,
+    width: 350,
+    height: 350,
+    borderRadius: 175,
+    top: -80,
+    left: -60,
+    opacity: 0.55,
     transform: [{ rotate: '12deg' }],
   },
   bgOrbSecondary: {
     position: 'absolute',
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    bottom: -80,
-    right: -30,
-    opacity: 0.45,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    bottom: -100,
+    right: -50,
+    opacity: 0.5,
     transform: [{ rotate: '-14deg' }],
   },
+  bgOrbTertiary: {
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    top: '40%',
+    right: -30,
+    opacity: 0.3,
+  },
   container: { flex: 1, padding: 20 },
-  header: { marginBottom: 12 },
-  title: { fontSize: 28, fontWeight: '700', color: '#fff', marginBottom: 4 },
-  subtitle: { color: 'rgba(255,255,255,0.7)', fontSize: 14 },
+  header: { marginBottom: 14 },
+  title: {
+    fontSize: 30,
+    fontWeight: '800',
+    color: '#fff',
+    marginBottom: 6,
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 8,
+  },
+  subtitle: { color: 'rgba(255,255,255,0.75)', fontSize: 15, fontWeight: '500' },
 
   offlineHint: {
     marginTop: 8,
@@ -1140,18 +1254,35 @@ const styles = StyleSheet.create({
   loaderText: { color: 'rgba(255,255,255,0.8)', marginLeft: 12 },
   errorText: { color: '#ff7675', textAlign: 'center', marginTop: 20 },
 
-  profileGrid: { flexGrow: 1, paddingVertical: 12 },
+  profileGrid: { flexGrow: 1, paddingVertical: 14 },
   profileGridEmpty: { justifyContent: 'center' },
 
-  profileCard: {
+  profileCardOuter: {
     flex: 1,
-    alignItems: 'center',
-    paddingVertical: 18,
     marginHorizontal: 8,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 16,
-    borderWidth: 1,
+    marginBottom: 16,
+  },
+
+  profileCard: {
+    alignItems: 'center',
+    paddingVertical: 20,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(15,18,30,0.65)',
+    borderRadius: 18,
+    borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 6,
+  },
+
+  profileCardGlow: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 18,
+    borderWidth: 2,
   },
 
   profileActions: {
@@ -1163,82 +1294,121 @@ const styles = StyleSheet.create({
   },
 
   actionButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
   },
 
   avatar: {
-    width: 68,
-    height: 68,
-    borderRadius: 20,
+    width: 72,
+    height: 72,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
+    overflow: 'hidden',
   },
-  avatarImage: { width: '100%', height: '100%', borderRadius: 20 },
-  avatarInitial: { fontSize: 26, fontWeight: '800', color: '#fff' },
+  avatarImage: { width: '100%', height: '100%', borderRadius: 22 },
+  avatarInitial: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#fff',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
 
-  profileName: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  profileName: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  kidsPillWrap: {
+    marginTop: 8,
+  },
 
   kidsPill: {
-    marginTop: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 2,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
     color: '#fff',
     fontSize: 11,
-    letterSpacing: 0.5,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    overflow: 'hidden',
   },
 
   lockOverlay: {
-    marginTop: 10,
+    marginTop: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderRadius: 999,
-    backgroundColor: 'rgba(229,9,20,0.25)',
+    backgroundColor: 'rgba(229,9,20,0.3)',
     borderWidth: 1,
-    borderColor: 'rgba(229,9,20,0.5)',
+    borderColor: 'rgba(229,9,20,0.6)',
   },
   lockText: { color: '#fff', fontSize: 12, fontWeight: '800' },
 
   emptyCard: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: 18,
+    padding: 28,
+    backgroundColor: 'rgba(15,18,30,0.7)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 8,
   },
   emptyTitle: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-    marginTop: 10,
-    marginBottom: 4,
+    fontSize: 20,
+    fontWeight: '800',
+    marginTop: 14,
+    marginBottom: 6,
     textAlign: 'center',
   },
-  emptySubtitle: { color: 'rgba(255,255,255,0.68)', textAlign: 'center', fontSize: 13, lineHeight: 18 },
+  emptySubtitle: {
+    color: 'rgba(255,255,255,0.7)',
+    textAlign: 'center',
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '500',
+  },
 
-  actions: { marginTop: 12 },
+  actions: { marginTop: 14 },
 
   addButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#fff',
+    paddingVertical: 15,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    shadowColor: '#e50914',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 5,
   },
-  addButtonDisabled: { opacity: 0.4 },
-  addButtonText: { fontWeight: '700', fontSize: 15, color: '#fff', marginLeft: 8 },
+  addButtonDisabled: { opacity: 0.45 },
+  addButtonText: { fontWeight: '800', fontSize: 15, color: '#fff', marginLeft: 8 },
 
   createCard: {
     marginTop: 16,
@@ -1345,34 +1515,52 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
   sheet: {
     position: 'absolute',
     left: 12,
     right: 12,
     bottom: 24,
-    borderRadius: 16,
-    padding: 16,
-    backgroundColor: 'rgba(6,6,10,0.95)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-    elevation: 20,
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: 'rgba(12,14,28,0.97)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -10 },
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    elevation: 24,
   },
   sheetHandle: {
-    width: 48,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    width: 52,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.12)',
     alignSelf: 'center',
-    marginBottom: 12,
+    marginBottom: 14,
   },
-  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  sheetAvatar: { width: 72, height: 72, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  sheetAvatarImage: { width: '100%', height: '100%', borderRadius: 16 },
-  sheetInitial: { color: '#fff', fontSize: 28, fontWeight: '800' },
-  sheetName: { color: '#fff', fontSize: 18, fontWeight: '800' },
-  sheetPill: { marginTop: 6, color: 'rgba(255,255,255,0.8)', fontSize: 12 },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  sheetAvatar: {
+    width: 76,
+    height: 76,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  sheetAvatarImage: { width: '100%', height: '100%', borderRadius: 20 },
+  sheetInitial: {
+    color: '#fff',
+    fontSize: 30,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  sheetName: { color: '#fff', fontSize: 19, fontWeight: '800' },
+  sheetPill: { marginTop: 6, color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: '600' },
   pinEntryBlock: { marginBottom: 12 },
   pinEntryLabel: { color: 'rgba(255,255,255,0.8)', fontWeight: '600', marginBottom: 6 },
   pinEntryInput: {

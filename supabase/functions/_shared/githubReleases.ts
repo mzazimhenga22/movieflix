@@ -70,7 +70,9 @@ function pickAsset(release: GithubRelease, args: { assetName?: string | null; as
 
   const name = String(args.assetName ?? '').trim();
   if (name) {
-    return assets.find((a) => String(a?.name ?? '').trim() === name) ?? null;
+    const exact = assets.find((a) => String(a?.name ?? '').trim() === name) ?? null;
+    if (exact) return exact;
+    // Fallback to regex selection (default *.apk) if the exact name wasn't uploaded.
   }
 
   const regexRaw = String(args.assetRegex ?? '').trim();

@@ -33,32 +33,30 @@ serve(async (req: Request) => {
   }
 
   const explicitLatestVersion = (Deno.env.get('APP_LATEST_VERSION') ?? '').trim();
-  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim();
+  const githubRepo = (Deno.env.get('GITHUB_RELEASES_REPO') ?? '').trim() || 'mzazimhenga22/movieflix';
 
   let latestVersion = explicitLatestVersion || '1.0.0';
-  if (githubRepo) {
-    try {
-      const token = (Deno.env.get('GITHUB_TOKEN') ?? '').trim() || null;
-      const tag = (Deno.env.get('GITHUB_RELEASE_TAG') ?? '').trim() || null;
-      const assetName = (Deno.env.get('APK_GITHUB_ASSET_NAME') ?? Deno.env.get('GITHUB_RELEASE_ASSET_NAME') ?? '').trim() || null;
-      const assetRegex = (Deno.env.get('APK_GITHUB_ASSET_REGEX') ?? Deno.env.get('GITHUB_RELEASE_ASSET_REGEX') ?? '').trim() || null;
-      const cacheTtlMs = Number(Deno.env.get('GITHUB_RELEASE_CACHE_TTL_MS') ?? '60000') || 60_000;
+  try {
+    const token = (Deno.env.get('GITHUB_TOKEN') ?? '').trim() || null;
+    const tag = (Deno.env.get('GITHUB_RELEASE_TAG') ?? '').trim() || null;
+    const assetName = (Deno.env.get('APK_GITHUB_ASSET_NAME') ?? Deno.env.get('GITHUB_RELEASE_ASSET_NAME') ?? '').trim() || null;
+    const assetRegex = (Deno.env.get('APK_GITHUB_ASSET_REGEX') ?? Deno.env.get('GITHUB_RELEASE_ASSET_REGEX') ?? '').trim() || null;
+    const cacheTtlMs = Number(Deno.env.get('GITHUB_RELEASE_CACHE_TTL_MS') ?? '60000') || 60_000;
 
-      const { release } = await resolveGithubReleaseAsset({
-        repo: githubRepo,
-        tag,
-        token,
-        assetName,
-        assetRegex,
-        cacheTtlMs,
-      });
+    const { release } = await resolveGithubReleaseAsset({
+      repo: githubRepo,
+      tag,
+      token,
+      assetName,
+      assetRegex,
+      cacheTtlMs,
+    });
 
-      if (release?.tag_name) {
-        latestVersion = String(release.tag_name).trim() || latestVersion;
-      }
-    } catch {
-      // Keep env fallback if GitHub is unavailable.
+    if (release?.tag_name) {
+      latestVersion = String(release.tag_name).trim() || latestVersion;
     }
+  } catch {
+    // Keep env fallback if GitHub is unavailable.
   }
   const mandatory = parseBool(Deno.env.get('APP_UPDATE_MANDATORY') ?? undefined, false);
   const message =
@@ -67,7 +65,9 @@ serve(async (req: Request) => {
 
   // Prefer an explicit URL; otherwise default to the sibling download function.
   const explicitUrl = (Deno.env.get('APP_UPDATE_URL') ?? '').trim();
-  const downloadUrl = explicitUrl || `${new URL(req.url).origin}/functions/v1/download-apk`;
+  const envBase = (Deno.env.get('SUPABASE_URL') ?? '').trim();
+  const base = (envBase || new URL(req.url).origin).replace(/^http:/i, 'https:').replace(/\/$/, '');
+  const downloadUrl = explicitUrl || `${base}/functions/v1/download-apk`;
 
   return jsonResponse({
     latestVersion,

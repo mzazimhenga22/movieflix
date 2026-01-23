@@ -19,6 +19,8 @@ export type CallParticipant = {
   mutedAudio?: boolean;
   mutedVideo?: boolean;
   joinedAt?: Timestamp;
+  /** Client heartbeat to help detect reconnecting participants. */
+  lastSeenAt?: Timestamp;
   leftAt?: Timestamp;
 };
 
@@ -51,6 +53,8 @@ export type CallSession = {
   status: CallStatus;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+  /** When the call became active (first answered). */
+  activeAt?: Timestamp;
   /** Optional: if set, the call should be considered expired after this time unless already active. */
   ringTimeoutAt?: Timestamp;
   endedAt?: Timestamp;

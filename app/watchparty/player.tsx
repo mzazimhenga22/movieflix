@@ -2,20 +2,33 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
 import { decode as base64Decode } from 'base-64';
-import { AVPlaybackSource, AVPlaybackStatusSuccess, ResizeMode, Video } from 'expo-av';
+import {
+  Audio,
+  AVPlaybackSource,
+  AVPlaybackStatusSuccess,
+  InterruptionModeAndroid,
+  InterruptionModeIOS,
+  ResizeMode,
+  Video,
+} from 'expo-av';
 import * as Brightness from 'expo-brightness';
+import { activateKeepAwakeAsync, deactivateKeepAwake, isAvailableAsync } from 'expo-keep-awake';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, limit } from 'firebase/firestore';
+import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Animated,
+  Easing,
   FlatList,
   Image,
   PanResponder,
+  Pressable,
+  Share,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -23,11 +36,46 @@ import {
   TextInput,
   TouchableOpacity,
   useWindowDimensions,
-  View
+  View,
 } from 'react-native';
+import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
+
+// Animated section wrapper
+const AnimatedSection = memo(function AnimatedSection({ children, delay = 0, style }: { children: React.ReactNode; delay?: number; style?: any }) {
+  const translateY = useRef(new Animated.Value(40)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.delay(delay),
+      Animated.parallel([
+        Animated.spring(translateY, {
+          toValue: 0,
+          friction: 10,
+          tension: 50,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 400,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [delay]);
+
+  return (
+    <Animated.View style={[style, { opacity, transform: [{ translateY }] }]}>
+      {children}
+    </Animated.View>
+  );
+});
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { firestore } from '../../constants/firebase';
 import { useUser } from '../../hooks/use-user';
+import { useAccent } from '../components/AccentContext';
 import { logInteraction } from '../../lib/algo';
+import { joinWatchPartyAsParticipant, leaveWatchPartyAsParticipant, updateWatchPartyEpisode, updateWatchPartyPlayback, type WatchPartyEpisode } from '@/lib/watchparty/controller';
 import { syncMovieMatchProfile } from '../../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../../lib/profileStorage';
 import { usePStream } from '../../src/pstream/usePStream';
@@ -762,10 +810,84 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
 // Main Video Player Component
 // ============================================================================
 
+const FloatingEmoji = memo(({ emoji, x }: { emoji: string; x: number }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: 1,
+      duration: 3500 + Math.random() * 1000,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [anim]);
+
+  const translateY = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [windowHeight, -100],
+  });
+
+  const translateX = anim.interpolate({
+    inputRange: [0, 0.25, 0.5, 0.75, 1],
+    outputRange: [0, 20, -20, 20, 0],
+  });
+
+  const opacity = anim.interpolate({
+    inputRange: [0, 0.1, 0.8, 1],
+    outputRange: [0, 1, 1, 0],
+  });
+
+  const scale = anim.interpolate({
+    inputRange: [0, 0.2, 1],
+    outputRange: [0.5, 1.5, 1.2],
+  });
+
+  return (
+    <Animated.View
+      style={{
+        position: 'absolute',
+        left: x * windowWidth,
+        transform: [{ translateY }, { translateX }, { scale }],
+        opacity,
+        zIndex: 9999,
+      }}
+      pointerEvents="none"
+    >
+      <Text style={{ fontSize: 32 }}>{emoji}</Text>
+    </Animated.View>
+  );
+});
+
+const FaceCam = memo(({ stream, label, isLocal }: { stream: any; label: string; isLocal?: boolean }) => {
+  if (!stream) return null;
+  return (
+    <View style={styles.faceCamContainer}>
+      <RTCView
+        streamURL={stream.toURL()}
+        style={styles.faceCamView}
+        objectFit="cover"
+        mirror={isLocal}
+      />
+      <View style={styles.faceCamLabel}>
+        <Text style={styles.faceCamLabelText} numberOfLines={1}>{label}</Text>
+      </View>
+    </View>
+  );
+});
+
 const WatchPartyPlayerScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
+  const { accentColor } = useAccent();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+
+  const appStateRef = useRef(AppState.currentState);
+  const [appIsActive, setAppIsActive] = useState(appStateRef.current === 'active');
+  const pendingAudioFocusRetryRef = useRef(false);
+  const keepAwakeAvailableRef = useRef<boolean | null>(null);
+  const keepAwakeActiveRef = useRef(false);
 
   // Parse route params
   const roomCode = typeof params.roomCode === 'string' ? params.roomCode : undefined;
@@ -927,6 +1049,7 @@ const WatchPartyPlayerScreen = () => {
   }, [displayTitle]);
 
   const [isPlaying, setIsPlaying] = useState(true);
+  const isPlayingRef = useRef(true);
   const [showControls, setShowControls] = useState(true);
   const [controlsSession, setControlsSession] = useState(0);
   const lastSurfaceTapRef = useRef(0);
@@ -934,12 +1057,112 @@ const WatchPartyPlayerScreen = () => {
   const [positionMillis, setPositionMillis] = useState(0);
   const positionMillisRef = useRef(0);
   const [durationMillis, setDurationMillis] = useState(0);
+  const [bufferedMillis, setBufferedMillis] = useState(0);
+  const bufferedMillisRef = useRef(0);
+  const uiProgressUpdateRef = useRef({ lastTs: 0, lastPos: 0 });
   const [seekPosition, setSeekPosition] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
 
   const [brightness, setBrightness] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [volume, setVolume] = useState(1);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (keepAwakeAvailableRef.current !== null) return;
+      try {
+        const available = await isAvailableAsync();
+        if (!cancelled) keepAwakeAvailableRef.current = available;
+      } catch {
+        if (!cancelled) keepAwakeAvailableRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const tag = 'MovieFlixWatchPartyPlayer';
+    return () => {
+      keepAwakeActiveRef.current = false;
+      void deactivateKeepAwake(tag).catch(() => {});
+    };
+  }, []);
+
+  const ensurePlaybackAudioMode = useCallback(async () => {
+    try {
+      await Audio.setIsEnabledAsync(true);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      const isActive = nextState === 'active';
+      setAppIsActive(isActive);
+
+      if (isActive && pendingAudioFocusRetryRef.current) {
+        pendingAudioFocusRetryRef.current = false;
+        const video = videoRef.current;
+        if (!video) return;
+        if (!isPlayingRef.current) return;
+        void (async () => {
+          await ensurePlaybackAudioMode();
+          try {
+            await video.playAsync();
+          } catch {
+            // ignore
+          }
+        })();
+      }
+    });
+
+    return () => sub.remove();
+  }, [ensurePlaybackAudioMode]);
+
+  useEffect(() => {
+    if (appIsActive) {
+      void ensurePlaybackAudioMode();
+    }
+  }, [appIsActive, ensurePlaybackAudioMode]);
+
+  useEffect(() => {
+    const tag = 'MovieFlixWatchPartyPlayer';
+    const available = keepAwakeAvailableRef.current;
+    if (!available) return;
+
+    const shouldKeepAwake = appIsActive && isPlaying;
+
+    if (!shouldKeepAwake) {
+      if (keepAwakeActiveRef.current) {
+        keepAwakeActiveRef.current = false;
+        void deactivateKeepAwake(tag).catch(() => {});
+      }
+      return;
+    }
+
+    if (!keepAwakeActiveRef.current) {
+      keepAwakeActiveRef.current = true;
+      void activateKeepAwakeAsync(tag).catch(() => {});
+    }
+  }, [appIsActive, isPlaying]);
 
   const { user } = useUser();
 
@@ -949,10 +1172,273 @@ const WatchPartyPlayerScreen = () => {
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
   const [showChat, setShowChat] = useState(true);
+  const [reactions, setReactions] = useState<Array<{ id: string; emoji: string; x: number }>>([]);
+  const [activePoll, setActivePoll] = useState<any | null>(null);
+  const [hasVoted, setHasVoted] = useState(false);
+
+  // --- Face Cam Features (Surprise 3!) ---
+  const [faceCamEnabled, setFaceCamEnabled] = useState(false);
+  const [localCamStream, setLocalCamStream] = useState<any>(null);
+  const [remoteCamStreams, setRemoteCamStreams] = useState<Record<string, any>>({});
+  const pcsRef = useRef<Record<string, RTCPeerConnection>>({});
+
+  const startLocalCam = useCallback(async () => {
+    try {
+      const stream = await mediaDevices.getUserMedia({
+        audio: true,
+        video: {
+          width: { ideal: 320 },
+          height: { ideal: 180 },
+          frameRate: { ideal: 15 },
+          facingMode: 'user'
+        }
+      });
+      setLocalCamStream(stream);
+      return stream;
+    } catch (err) {
+      console.warn('FaceCam: Failed to start camera', err);
+      return null;
+    }
+  }, []);
+
+  const stopLocalCam = useCallback(() => {
+    if (localCamStream) {
+      localCamStream.getTracks().forEach((t: any) => t.stop());
+      setLocalCamStream(null);
+    }
+    // Close all peer connections
+    Object.values(pcsRef.current).forEach(pc => pc.close());
+    pcsRef.current = {};
+    setRemoteCamStreams({});
+  }, [localCamStream]);
+
+  const toggleFaceCam = useCallback(async () => {
+    if (faceCamEnabled) {
+      stopLocalCam();
+      setFaceCamEnabled(false);
+    } else {
+      const stream = await startLocalCam();
+      if (stream) setFaceCamEnabled(true);
+    }
+  }, [faceCamEnabled, startLocalCam, stopLocalCam]);
+
+  const getOrCreatePC = useCallback((targetUid: string) => {
+    if (pcsRef.current[targetUid]) return pcsRef.current[targetUid];
+
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    (pc as any).onicecandidate = (event: any) => {
+      if (event.candidate && roomCode && user?.uid) {
+        const ref = doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid, 'ice', Math.random().toString(36).slice(2));
+        void setDoc(ref, {
+          candidate: event.candidate.toJSON(),
+          targetUid,
+          createdAt: serverTimestamp()
+        });
+      }
+    };
+
+    (pc as any).ontrack = (event: any) => {
+      if (event.streams[0]) {
+        setRemoteCamStreams(prev => ({ ...prev, [targetUid]: event.streams[0] }));
+      }
+    };
+
+    if (localCamStream) {
+      localCamStream.getTracks().forEach((track: any) => {
+        pc.addTrack(track, localCamStream);
+      });
+    }
+
+    pcsRef.current[targetUid] = pc;
+    return pc;
+  }, [localCamStream, roomCode, user?.uid]);
+
+  // Signaling Effect
+  useEffect(() => {
+    if (!faceCamEnabled || !roomCode || !user?.uid || !localCamStream) return;
+
+    // 1. Broadcaster Intent
+    const mySignalingRef = doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid);
+    void setDoc(mySignalingRef, { active: true, updatedAt: serverTimestamp() });
+
+    // 2. Listen for Others
+    const signalingCol = collection(firestore, 'watchParties', roomCode, 'camSignaling');
+    const unsub = onSnapshot(signalingCol, async (snap) => {
+      for (const change of snap.docChanges()) {
+        const otherId = change.doc.id;
+        if (otherId === user.uid) continue;
+
+        if (change.type === 'added' || change.type === 'modified') {
+          const data = change.doc.data();
+          if (!data.active) continue;
+
+          // Lexicographical order to decide who is the initiator
+          if (user.uid > otherId) {
+            const pc = getOrCreatePC(otherId);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            void setDoc(doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid, 'offers', otherId), {
+              sdp: offer.sdp,
+              type: offer.type,
+              createdAt: serverTimestamp()
+            });
+          }
+        }
+      }
+    });
+
+    // 3. Listen for Offers/Answers
+    const offersRef = collection(firestore, 'watchParties', roomCode, 'camSignaling', 'OFFERS_HUB', 'items'); // Simplified hub or per-user
+    // Actually, per-user is better: camSignaling/{targetId}/offers/{senderId}
+    
+    return () => {
+      unsub();
+      void updateDoc(mySignalingRef, { active: false }).catch(() => {});
+    };
+  }, [faceCamEnabled, roomCode, user?.uid, localCamStream, getOrCreatePC]);
 
   const watchPartyRef = useMemo(() => (roomCode ? doc(firestore, 'watchParties', roomCode) : null), [roomCode]);
+
+  // Submit poll vote
+  const submitVote = useCallback(async (optionIndex: number) => {
+    if (!roomCode || !user?.uid || !activePoll || hasVoted) return;
+    setHasVoted(true);
+    const pollRef = doc(firestore, 'watchParties', roomCode, 'polls', activePoll.id);
+    await updateDoc(pollRef, {
+      [`votes.${optionIndex}`]: (activePoll.votes?.[optionIndex] || 0) + 1,
+    }).catch(() => setHasVoted(false));
+  }, [roomCode, user?.uid, activePoll, hasVoted]);
+
+  // Listen for active polls
+  useEffect(() => {
+    if (!roomCode) return;
+    const pollsRef = collection(firestore, 'watchParties', roomCode, 'polls');
+    const q = query(pollsRef, orderBy('createdAt', 'desc'), limit(1));
+    const unsub = onSnapshot(q, (snap) => {
+      if (!snap.empty) {
+        const poll = { id: snap.docs[0].id, ...snap.docs[0].data() as any };
+        const age = Date.now() - (poll.createdAt?.toMillis?.() ?? Date.now());
+        if (age < 120000) { // Poll active for 2 mins
+          setActivePoll(poll);
+          setHasVoted(false);
+        } else {
+          setActivePoll(null);
+        }
+      }
+    });
+    return () => unsub();
+  }, [roomCode]);
+
+  // Reaction broadcaster
+  const sendReaction = useCallback(async (emoji: string) => {
+    if (!roomCode || !user?.uid) return;
+    const reactionsRef = collection(firestore, 'watchParties', roomCode, 'reactions');
+    await addDoc(reactionsRef, {
+      emoji,
+      userId: user.uid,
+      x: Math.random() * 0.8 + 0.1, // 10% to 90% width
+      createdAt: serverTimestamp(),
+    });
+  }, [roomCode, user?.uid]);
+
+  // Listen for reactions
+  useEffect(() => {
+    if (!roomCode) return;
+    const reactionsRef = collection(firestore, 'watchParties', roomCode, 'reactions');
+    const q = query(reactionsRef, orderBy('createdAt', 'asc'));
+    
+    const unsub = onSnapshot(q, (snap) => {
+      snap.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const data = change.doc.data();
+          const id = change.doc.id;
+          // Only process new reactions (within last 5 seconds to avoid backlog burst)
+          const createdAt = data.createdAt?.toMillis?.() ?? Date.now();
+          if (Date.now() - createdAt < 5000) {
+            setReactions(prev => [...prev, { id, emoji: data.emoji, x: data.x }]);
+            // Auto-remove after animation
+            setTimeout(() => {
+              setReactions(prev => prev.filter(r => r.id !== id));
+            }, 4000);
+          }
+        }
+      });
+    });
+    return () => unsub();
+  }, [roomCode]);
+
   const [watchPartyHostId, setWatchPartyHostId] = useState<string | null>(null);
   const isWatchPartyHost = Boolean(roomCode && user?.uid && watchPartyHostId && user.uid === watchPartyHostId);
+  const [watchPartyParticipantsCount, setWatchPartyParticipantsCount] = useState<number>(0);
+  const joinedAsParticipantRef = useRef(false);
+  const didClosePartyOnFinishRef = useRef(false);
+
+  useEffect(() => {
+    joinedAsParticipantRef.current = false;
+    didClosePartyOnFinishRef.current = false;
+    setWatchPartyParticipantsCount(0);
+  }, [roomCode]);
+
+  useEffect(() => {
+    if (!roomCode) return;
+    if (!user?.uid) return;
+
+    let cancelled = false;
+    const participantsRef = collection(firestore, 'watchParties', roomCode, 'participants');
+    const q = query(participantsRef, orderBy('joinedAt', 'desc'));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        if (cancelled) return;
+        setWatchPartyParticipantsCount(snap.size);
+      },
+      () => {
+        if (cancelled) return;
+        setWatchPartyParticipantsCount(0);
+      },
+    );
+
+    if (!joinedAsParticipantRef.current) {
+      joinedAsParticipantRef.current = true;
+      void (async () => {
+        try {
+          const { status } = await joinWatchPartyAsParticipant({
+            code: roomCode,
+            userId: user.uid,
+            displayName: (user as any)?.displayName ?? null,
+            avatarUrl: (user as any)?.photoURL ?? null,
+          });
+
+          if (cancelled) return;
+
+          if (status === 'expired') {
+            Alert.alert('Party expired', 'This watch party has expired. Ask the host to create a new one.');
+            router.back();
+          } else if (status === 'closed') {
+            Alert.alert('Waiting for host', 'The host has not opened this watch party yet.');
+            router.back();
+          } else if (status === 'full') {
+            Alert.alert('Party is full', 'This watch party has reached the room limit.');
+            router.back();
+          } else if (status === 'not_found') {
+            Alert.alert('Invalid code', 'We couldn’t find a watch party with that code.');
+            router.back();
+          }
+        } catch {
+          // ignore (offline / rules)
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+      unsub();
+      void leaveWatchPartyAsParticipant({ code: roomCode, userId: user.uid }).catch(() => {});
+    };
+  }, [roomCode, router, user]);
 
   const playbackSourceRef = useRef<PlaybackSource | null>(playbackSource);
   useEffect(() => {
@@ -966,29 +1452,36 @@ const WatchPartyPlayerScreen = () => {
     updatedAtMillis: number;
   } | null>(null);
   const lastRemoteUpdatedAtRef = useRef(0);
+  const lastRemoteEpisodeUpdatedAtRef = useRef(0);
   const lastPlaybackPublishRef = useRef({ ts: 0, positionMillis: 0, isPlaying: false });
+
+  // Sync every 400ms for smoother playback synchronization
+  const SYNC_INTERVAL_MS = 400;
 
   const publishWatchPartyPlayback = useCallback(
     async (next: { isPlaying: boolean; positionMillis: number }, opts?: { force?: boolean }) => {
-      if (!watchPartyRef) return;
+      if (!roomCode) return;
       if (!isWatchPartyHost) return;
       if (!user?.uid) return;
 
       const now = Date.now();
-      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 900) return;
+      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < SYNC_INTERVAL_MS) return;
       lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
 
-      await updateDoc(watchPartyRef, {
-        isOpen: true,
-        playback: {
-          isPlaying: next.isPlaying,
-          positionMillis: Math.max(0, Math.floor(next.positionMillis)),
-          updatedBy: user.uid,
-          updatedAt: serverTimestamp(),
-        },
-      }).catch(() => {});
+      await updateWatchPartyPlayback(roomCode, next, user.uid).catch(() => {});
     },
-    [isWatchPartyHost, user?.uid, watchPartyRef],
+    [isWatchPartyHost, user?.uid, roomCode],
+  );
+
+  // Publish episode change to watch party (host only)
+  const publishWatchPartyEpisode = useCallback(
+    async (episode: Omit<WatchPartyEpisode, 'updatedAt'>) => {
+      if (!roomCode) return;
+      if (!isWatchPartyHost) return;
+
+      await updateWatchPartyEpisode(roomCode, episode).catch(() => {});
+    },
+    [isWatchPartyHost, roomCode],
   );
 
   const applyRemotePlayback = useCallback(
@@ -1032,6 +1525,9 @@ const WatchPartyPlayerScreen = () => {
     [durationMillis],
   );
 
+  // State for current episode in watch party (for guests to sync)
+  const [currentWatchPartyEpisode, setCurrentWatchPartyEpisode] = useState<WatchPartyEpisode | null>(null);
+
   useEffect(() => {
     if (!watchPartyRef) return;
     const unsub = onSnapshot(watchPartyRef, (snap) => {
@@ -1050,8 +1546,32 @@ const WatchPartyPlayerScreen = () => {
         setResolvedStreamType((prev) => prev ?? data.streamType);
       }
 
-      const playback = data.playback;
       const hostNow = Boolean(user?.uid && hostId && user.uid === hostId);
+
+      // Handle episode sync for TV shows (guests only)
+      const episode = data.episode;
+      if (!hostNow && episode && typeof episode === 'object') {
+        const episodeUpdatedAtMillis =
+          typeof episode.updatedAt?.toMillis === 'function'
+            ? episode.updatedAt.toMillis()
+            : typeof episode.updatedAt === 'number'
+              ? episode.updatedAt
+              : 0;
+
+        if (episodeUpdatedAtMillis && episodeUpdatedAtMillis > lastRemoteEpisodeUpdatedAtRef.current) {
+          lastRemoteEpisodeUpdatedAtRef.current = episodeUpdatedAtMillis;
+          setCurrentWatchPartyEpisode({
+            seasonNumber: episode.seasonNumber ?? null,
+            episodeNumber: episode.episodeNumber ?? null,
+            seasonTmdbId: episode.seasonTmdbId ?? null,
+            episodeTmdbId: episode.episodeTmdbId ?? null,
+            seasonTitle: episode.seasonTitle ?? null,
+            episodeTitle: episode.episodeTitle ?? null,
+          });
+        }
+      }
+
+      const playback = data.playback;
       if (hostNow) return;
       if (!playback || typeof playback !== 'object') return;
 
@@ -1072,6 +1592,86 @@ const WatchPartyPlayerScreen = () => {
     });
     return () => unsub();
   }, [applyRemotePlayback, parsedVideoHeaders, passedStreamType, passedVideoUrl, user?.uid, watchPartyRef]);
+
+  // Effect to scrape and load new episode when host changes episode (guests only)
+  useEffect(() => {
+    if (isWatchPartyHost) return;
+    if (!currentWatchPartyEpisode) return;
+    if (!isTvShow || !tmdbId) return;
+
+    const { seasonNumber, episodeNumber, seasonTmdbId, episodeTmdbId, seasonTitle: remoteSeasonTitle } = currentWatchPartyEpisode;
+    if (seasonNumber == null || episodeNumber == null) return;
+
+    // Skip if already on this episode
+    if (seasonNumber === seasonNumberParam && episodeNumber === episodeNumberParam) return;
+
+    let isCancelled = false;
+
+    const loadRemoteEpisode = async () => {
+      try {
+        const releaseYearForScrape = derivedReleaseYear ?? new Date().getFullYear();
+        const payload = {
+          type: 'show' as const,
+          title: displayTitle,
+          tmdbId: tmdbId,
+          imdbId: imdbId || undefined,
+          releaseYear: releaseYearForScrape,
+          season: {
+            number: seasonNumber,
+            tmdbId: seasonTmdbId ?? '',
+            title: remoteSeasonTitle ?? `Season ${seasonNumber}`,
+          },
+          episode: {
+            number: episodeNumber,
+            tmdbId: episodeTmdbId ?? '',
+          },
+        };
+
+        console.log('[WatchParty Guest] Scraping synced episode', payload);
+        const playback = await scrapeEpisode(payload);
+
+        if (isCancelled) return;
+        if (!playback.uri) throw new Error('Playback URI missing');
+
+        const newTitle = `S${seasonNumber}:E${episodeNumber} - ${displayTitle}`;
+        setActiveTitle(newTitle);
+
+        setPendingPlaybackSource(
+          createPlaybackSource({
+            uri: playback.uri as string,
+            headers: {
+              ...(playback.headers as Record<string, string> | undefined),
+              ...(playback.stream?.preferredHeaders as Record<string, string> | undefined),
+            },
+            streamType: playback.stream?.type,
+            captions: normalizeCaptions(playback.stream?.captions as any),
+            qualities: ((playback.stream as any)?.qualities as QualitiesMap | undefined) ?? undefined,
+            sourceId: playback.sourceId,
+            embedId: playback.embedId,
+          }),
+        );
+      } catch (err) {
+        console.error('[WatchParty Guest] Failed to load synced episode', err);
+      }
+    };
+
+    void loadRemoteEpisode();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    currentWatchPartyEpisode,
+    isWatchPartyHost,
+    isTvShow,
+    tmdbId,
+    imdbId,
+    displayTitle,
+    derivedReleaseYear,
+    seasonNumberParam,
+    episodeNumberParam,
+    scrapeEpisode,
+  ]);
 
   useEffect(() => {
     if (!watchPartyRef) return;
@@ -1096,6 +1696,11 @@ const WatchPartyPlayerScreen = () => {
   useEffect(() => {
     resumeAppliedRef.current = false;
   }, [playbackSource?.uri, resumeMillisParam, tmdbId, seasonNumberParam, episodeNumberParam]);
+
+  useEffect(() => {
+    bufferedMillisRef.current = 0;
+    setBufferedMillis(0);
+  }, [videoReloadKey]);
 
   // Watch history entry
   const watchHistoryEntry = useMemo<Media | null>(() => {
@@ -1191,9 +1796,13 @@ const WatchPartyPlayerScreen = () => {
   const autoDowngradeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevPositionRef = useRef<number>(0);
   const lastAdvanceTsRef = useRef<number>(Date.now());
+  const statusLogRef = useRef<{ lastTs: number; lastKey: string }>({ lastTs: 0, lastKey: '' });
+  const lastPlayPauseIntentTsRef = useRef(0);
 
   const hlsProxyRetryRef = useRef(false);
   const hlsVariantRetryRef = useRef(false);
+  const triedVariantUrisRef = useRef<Set<string>>(new Set());
+  const hlsWarmupRef = useRef<{ key: string; seen: Set<string> }>({ key: '', seen: new Set() });
 
   // Stream preloading state (best-effort). This doesn't guarantee the native player will reuse
   // fetched bytes, but it helps warm DNS/TLS and some CDNs/hosts.
@@ -1862,12 +2471,16 @@ const WatchPartyPlayerScreen = () => {
   // Loader state
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
   const isResolvingPendingPlayback = !!pendingPlaybackSource;
+  
+  // Only show MovieFlixLoader for blocking operations (not buffering)
   const shouldShowMovieFlixLoader =
     !!qualityLoadingId ||
     isFetchingStream ||
     isInitialStreamPending ||
-    isResolvingPendingPlayback ||
-    (videoPlaybackSource && showBufferingOverlay && !scrapeError);
+    isResolvingPendingPlayback;
+
+  // Show buffering pill separately (non-blocking)
+  const shouldShowBufferingPill = videoPlaybackSource && showBufferingOverlay && !scrapeError && !shouldShowMovieFlixLoader;
 
   let loaderMessage = 'Fetching hang on tight...';
   if (qualityLoadingId) {
@@ -1882,8 +2495,6 @@ const WatchPartyPlayerScreen = () => {
     loaderMessage = 'Preparing stream...';
   } else if (isResolvingPendingPlayback) {
     loaderMessage = nextSourceBusy ? 'Switching source...' : 'Preparing stream...';
-  } else if (videoPlaybackSource && showBufferingOverlay) {
-    loaderMessage = 'Buffering stream...';
   }
 
   const isBlockingLoader = Boolean(qualityLoadingId || isFetchingStream || isInitialStreamPending || isResolvingPendingPlayback);
@@ -2238,6 +2849,40 @@ const WatchPartyPlayerScreen = () => {
 
         if (shouldRemove) {
           await AsyncStorage.setItem(watchHistoryKey, JSON.stringify(filtered));
+
+          if (user?.uid) {
+            const profileId = activeProfile?.id ?? 'default';
+            const mediaTypeForDoc = (baseEntry.media_type || 'movie') as string;
+            const docId = `${profileId}_${mediaTypeForDoc}_${String(baseEntry.id)}`;
+            void setDoc(
+              doc(firestore, 'users', user.uid, 'watchHistory', docId),
+              {
+                userId: user.uid,
+                profileId,
+                tmdbId: baseEntry.id,
+                mediaType: mediaTypeForDoc,
+                title: baseEntry.title || baseEntry.name || null,
+                posterPath: baseEntry.poster_path ?? null,
+                backdropPath: baseEntry.backdrop_path ?? null,
+                genreIds: baseEntry.genre_ids ?? null,
+                voteAverage: baseEntry.vote_average ?? null,
+                seasonNumber: (baseEntry as any)?.seasonNumber ?? null,
+                episodeNumber: (baseEntry as any)?.episodeNumber ?? null,
+                seasonTitle: (baseEntry as any)?.seasonTitle ?? null,
+                watchProgress: {
+                  positionMillis: positionValue,
+                  durationMillis: durationValue,
+                  progress: progressValue,
+                  updatedAtMs: now,
+                },
+                completed: true,
+                completedAtMs: now,
+                updatedAtMs: now,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true },
+            ).catch(() => {});
+          }
           return;
         }
 
@@ -2253,6 +2898,39 @@ const WatchPartyPlayerScreen = () => {
 
         const next = [enriched, ...filtered].slice(0, 40);
         await AsyncStorage.setItem(watchHistoryKey, JSON.stringify(next));
+
+        if (user?.uid) {
+          const profileId = activeProfile?.id ?? 'default';
+          const mediaTypeForDoc = (enriched.media_type || 'movie') as string;
+          const docId = `${profileId}_${mediaTypeForDoc}_${String(enriched.id)}`;
+          void setDoc(
+            doc(firestore, 'users', user.uid, 'watchHistory', docId),
+            {
+              userId: user.uid,
+              profileId,
+              tmdbId: enriched.id,
+              mediaType: mediaTypeForDoc,
+              title: enriched.title || enriched.name || null,
+              posterPath: enriched.poster_path ?? null,
+              backdropPath: enriched.backdrop_path ?? null,
+              genreIds: enriched.genre_ids ?? null,
+              voteAverage: enriched.vote_average ?? null,
+              seasonNumber: (enriched as any)?.seasonNumber ?? null,
+              episodeNumber: (enriched as any)?.episodeNumber ?? null,
+              seasonTitle: (enriched as any)?.seasonTitle ?? null,
+              watchProgress: {
+                positionMillis: positionValue,
+                durationMillis: durationValue,
+                progress: progressValue,
+                updatedAtMs: now,
+              },
+              completed: false,
+              updatedAtMs: now,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true },
+          ).catch(() => {});
+        }
 
         if (progressValue >= 0.7 && user?.uid) {
           const profileName =
@@ -2283,7 +2961,7 @@ const WatchPartyPlayerScreen = () => {
           });
 
           try {
-            void logInteraction({ type: 'watch', actorId: user.uid, targetId: enriched.id, meta: { progress: progressValue } });
+            void logInteraction({ type: 'view', actorId: user.uid, targetId: enriched.id, meta: { progress: progressValue } });
           } catch { }
         }
       } catch (err) {
@@ -2325,7 +3003,26 @@ const WatchPartyPlayerScreen = () => {
 
     const playingNow = Boolean(status.isPlaying);
     const bufferingNow = Boolean(status.isBuffering);
-    setIsPlaying(playingNow);
+    const now = Date.now();
+
+    if (__DEV__) {
+      const positionLabel = Math.round((status.positionMillis || 0) / 1000);
+      const key = `${playingNow ? 'play' : 'pause'}|${bufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
+      if (now - statusLogRef.current.lastTs > 2000 || statusLogRef.current.lastKey !== key) {
+        console.log('[WatchParty] Status update', {
+          playing: playingNow,
+          buffering: bufferingNow,
+          positionMs: status.positionMillis || 0,
+          durationMs: status.durationMillis || null,
+        });
+        statusLogRef.current = { lastTs: now, lastKey: key };
+      }
+    }
+
+    // Prevent UI flicker by ignoring status updates right after user intent
+    if (now - lastPlayPauseIntentTsRef.current > 300) {
+      setIsPlaying(playingNow);
+    }
 
     const currentPos = status.positionMillis || 0;
 
@@ -2379,12 +3076,26 @@ const WatchPartyPlayerScreen = () => {
 
     const currentPosition = status.positionMillis || 0;
     if (!isSeeking) {
-      setSeekPosition(currentPosition);
+      const lastUi = uiProgressUpdateRef.current;
+      const shouldUpdateUi =
+        now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250;
+      if (shouldUpdateUi) {
+        uiProgressUpdateRef.current = { lastTs: now, lastPos: currentPosition };
+        setSeekPosition(currentPosition);
+        setPositionMillis(currentPosition);
+      }
     }
-    setPositionMillis(currentPosition);
+
+    const playable = (status as any)?.playableDurationMillis;
+    if (typeof playable === 'number' && Number.isFinite(playable)) {
+      const nextBuffered = Math.max(currentPosition, playable);
+      if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
+        bufferedMillisRef.current = nextBuffered;
+        setBufferedMillis(nextBuffered);
+      }
+    }
 
     if (roomCode && isWatchPartyHost && !applyingRemotePlaybackRef.current) {
-      const now = Date.now();
       const last = lastPlaybackPublishRef.current;
       const shouldSyncWhilePlaying =
         playingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
@@ -2407,6 +3118,27 @@ const WatchPartyPlayerScreen = () => {
         markComplete: status.didJustFinish,
       });
     }
+
+    if (
+      status.didJustFinish &&
+      roomCode &&
+      isWatchPartyHost &&
+      watchPartyRef &&
+      user?.uid &&
+      !didClosePartyOnFinishRef.current
+    ) {
+      didClosePartyOnFinishRef.current = true;
+      void updateDoc(watchPartyRef, {
+        isOpen: false,
+        endedAt: serverTimestamp(),
+        playback: {
+          isPlaying: false,
+          positionMillis: Math.max(0, Math.floor(currentPosition)),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp(),
+        },
+      }).catch(() => {});
+    }
   }, [
     durationMillis,
     isSeeking,
@@ -2416,7 +3148,9 @@ const WatchPartyPlayerScreen = () => {
     persistWatchProgress,
     publishWatchPartyPlayback,
     resumeMillisParam,
+    user?.uid,
     roomCode,
+    watchPartyRef,
     selectedQualityId,
     showBufferingOverlay,
     updateActiveCaption,
@@ -2436,8 +3170,10 @@ const WatchPartyPlayerScreen = () => {
     const video = videoRef.current;
     if (!video) return;
     bumpControlsLife();
+    lastPlayPauseIntentTsRef.current = Date.now();
 
     const nextPlaying = !isPlaying;
+    setIsPlaying(nextPlaying); // Optimistic update to prevent UI flicker
     void publishWatchPartyPlayback(
       { isPlaying: nextPlaying, positionMillis: positionMillisRef.current },
       { force: true },
@@ -2448,12 +3184,14 @@ const WatchPartyPlayerScreen = () => {
         await video.pauseAsync();
         setShowControls(true);
       } else {
+        await ensurePlaybackAudioMode();
         await video.playAsync();
       }
     } catch (err: any) {
       console.warn('Playback failed', err);
       const msg = err?.message || String(err);
       if (msg.toLowerCase().includes('audiofocus') || msg.toLowerCase().includes('audio focus') || msg.includes('AudioFocusNotAcquiredException')) {
+        pendingAudioFocusRetryRef.current = true;
         Alert.alert('Playback blocked', 'This app is currently in the background, so audio focus could not be acquired. Please bring the app to the foreground and try again.');
       } else {
         Alert.alert('Playback error', msg);
@@ -2497,6 +3235,18 @@ const WatchPartyPlayerScreen = () => {
   const currentTimeLabel = formatTime(positionMillis);
   const totalTimeLabel = durationMillis ? formatTime(durationMillis) : '0:00';
 
+  const overlayPaddingStyle = useMemo(
+    () => ({
+      paddingTop: Math.max(18, insets.top + 10),
+      paddingBottom: Math.max(18, insets.bottom + 12),
+    }),
+    [insets.bottom, insets.top],
+  );
+
+  const durationForUi = Math.max(1, durationMillis || 1);
+  const playedPctForUi = Math.min(1, Math.max(0, seekPosition / durationForUi));
+  const bufferedPctForUi = Math.min(1, Math.max(0, bufferedMillis / durationForUi));
+
   // Close episode drawer for non-TV content
   useEffect(() => {
     if (!isTvShow) {
@@ -2504,7 +3254,32 @@ const WatchPartyPlayerScreen = () => {
     }
   }, [isTvShow]);
 
-  // Watch party chat subscription
+  useEffect(() => {
+    if (!isWatchPartyHost || !roomCode) return;
+    
+    const facts = [
+      "Did you know? The director improvised this scene!",
+      "Trivia: This movie took 3 years to animate.",
+      "Fun Fact: The lead actor did all their own stunts.",
+      "Vibe Check: How are we feeling about this plot twist?",
+      "Pro Tip: Watch the background for hidden easter eggs!",
+    ];
+
+    const interval = setInterval(() => {
+      const fact = facts[Math.floor(Math.random() * facts.length)];
+      const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
+      void addDoc(messagesRef, {
+        text: fact,
+        userId: 'system',
+        userDisplayName: 'MovieFlix Bot 🤖',
+        userAvatar: null,
+        createdAt: serverTimestamp(),
+      });
+    }, 180000); // Every 3 mins
+
+    return () => clearInterval(interval);
+  }, [isWatchPartyHost, roomCode]);
+
   useEffect(() => {
     if (!roomCode) return;
     const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
@@ -2888,6 +3663,18 @@ const WatchPartyPlayerScreen = () => {
       setEpisodeQueue((prev) => prev.slice(index + 1));
       setSeekPosition(0);
       setPositionMillis(0);
+
+      // Publish episode change to watch party (host only)
+      if (isWatchPartyHost && roomCode) {
+        void publishWatchPartyEpisode({
+          seasonNumber: normalizedSeasonNumber,
+          episodeNumber: normalizedEpisodeNumber,
+          seasonTmdbId: episode.seasonTmdbId?.toString() ?? null,
+          episodeTmdbId: episode.episodeTmdbId?.toString() ?? null,
+          seasonTitle: nextSeasonTitle,
+          episodeTitle: episode.title ?? null,
+        });
+      }
     } catch (err: any) {
       console.error('[VideoPlayer] Episode scrape failed', err);
       Alert.alert('Episode unavailable', err?.message || 'Unable to load this episode.');
@@ -2939,27 +3726,22 @@ const WatchPartyPlayerScreen = () => {
 
       const hasPlayback = Boolean(playbackSource?.uri);
 
-      if (hasPlayback && isHlsSource && !hlsVariantRetryRef.current && qualityOptions.length) {
-        hlsVariantRetryRef.current = true;
+      // Try fallback to another HLS variant if current one failed
+      if (hasPlayback && isHlsSource && qualityOptions.length) {
         const baseUri = qualityOverrideUri ?? playbackSource!.uri;
-        const headers = playbackSource!.headers;
-        void (async () => {
-          for (const option of qualityOptions) {
-            if (!option?.uri || option.uri === baseUri) continue;
-            try {
-              await preloadQualityVariant(option.uri, headers);
-              pendingSeekAfterReloadRef.current = positionMillisRef.current;
-              pendingShouldPlayAfterReloadRef.current = isPlaying;
-              setQualityOverrideUri(option.uri);
-              setSelectedQualityId(option.id);
-              setVideoReloadKey((prev) => prev + 1);
-              return;
-            } catch {
-              // try next variant
-            }
-          }
-        })();
-        return;
+        triedVariantUrisRef.current.add(baseUri);
+
+        const ordered = orderQualityOptionsForCompatibility(qualityOptions);
+        const next = ordered.find((opt) => opt?.uri && !triedVariantUrisRef.current.has(opt.uri));
+        if (next?.uri) {
+          console.log('[WatchParty] Trying next HLS variant:', next.id);
+          pendingSeekAfterReloadRef.current = positionMillisRef.current;
+          pendingShouldPlayAfterReloadRef.current = isPlaying;
+          setQualityOverrideUri(next.uri);
+          setSelectedQualityId(next.id);
+          setVideoReloadKey((prev) => prev + 1);
+          return;
+        }
       }
 
       if (
@@ -3018,20 +3800,75 @@ const WatchPartyPlayerScreen = () => {
   return (
     <View style={styles.container}>
       <StatusBar hidden />
-      <TouchableOpacity activeOpacity={1} style={styles.touchLayer} onPress={handleSurfacePress}>
+      <View style={styles.touchLayer}>
+        {/* Surprise Feature 3: Face Cam Row (Zoom-like) */}
+        {faceCamEnabled && (
+          <View style={styles.faceCamRow}>
+            <FaceCam stream={localCamStream} label="You" isLocal />
+            {Object.entries(remoteCamStreams).map(([uid, stream]) => (
+              <FaceCam key={uid} stream={stream} label={uid.slice(0, 4)} />
+            ))}
+          </View>
+        )}
+
+        {/* Surprise Feature 1: Shared Reactions Layer */}
+        {reactions.map((r) => (
+          <FloatingEmoji key={r.id} emoji={r.emoji} x={r.x} />
+        ))}
+
+        {/* Surprise Feature 2: Active Poll Card */}
+        {activePoll && (
+          <AnimatedSection delay={0} style={styles.pollCardContainer}>
+            <View style={styles.pollCard}>
+              <View style={styles.pollHeader}>
+                <Ionicons name="stats-chart" size={16} color="#fff" />
+                <Text style={styles.pollTitle}>Live Poll</Text>
+              </View>
+              <Text style={styles.pollQuestion}>{activePoll.question}</Text>
+              {activePoll.options.map((option: string, idx: number) => {
+                const totalVotes = Object.values(activePoll.votes || {}).reduce((a: any, b: any) => a + b, 0) as number;
+                const votes = (activePoll.votes?.[idx] || 0) as number;
+                const percent = totalVotes > 0 ? (votes / totalVotes) * 100 : 0;
+                return (
+                  <TouchableOpacity
+                    key={idx}
+                    onPress={() => submitVote(idx)}
+                    disabled={hasVoted}
+                    style={styles.pollOption}
+                  >
+                    <View style={[styles.pollProgress, { width: `${percent}%`, backgroundColor: accentColor + '40' }]} />
+                    <Text style={styles.pollOptionText}>{option}</Text>
+                    <Text style={styles.pollPercent}>{Math.round(percent)}%</Text>
+                  </TouchableOpacity>
+                );
+              })}
+              {hasVoted && <Text style={styles.votedHint}>Vote cast! Waiting for others...</Text>}
+            </View>
+          </AnimatedSection>
+        )}
+
         {videoPlaybackSource ? (
-          <Video
-            key={videoReloadKey}
-            ref={videoRef}
-            source={videoPlaybackSource}
-            style={styles.video}
-            resizeMode={ResizeMode.CONTAIN}
-            shouldPlay
-            useNativeControls={false}
-            onPlaybackStatusUpdate={handleStatusUpdate}
-            onError={handleVideoError}
-            onLoad={handleVideoLoad}
-          />
+          <>
+            <Video
+              key={videoReloadKey}
+              ref={videoRef}
+              source={videoPlaybackSource}
+              style={styles.video}
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay={isPlaying}
+              useNativeControls={false}
+              onPlaybackStatusUpdate={handleStatusUpdate}
+              onError={handleVideoError}
+              onLoad={handleVideoLoad}
+            />
+
+            {/* Surface tap handler sits behind controls so it never steals button presses. */}
+            <Pressable style={styles.surfacePressLayer} onPress={handleSurfacePress} />
+
+            {!showControls && !isLocked ? (
+              <Pressable style={styles.touchCatcher} onPress={handleSurfacePress} />
+            ) : null}
+          </>
         ) : (
           <View style={styles.videoFallback}>
             {shouldShowMovieFlixLoader ? null : (
@@ -3086,22 +3923,32 @@ const WatchPartyPlayerScreen = () => {
 
         {shouldShowMovieFlixLoader && (
           <MovieFlixLoader
-            message={loaderMessage === 'Buffering stream...' ? '' : loaderMessage}
+            message={loaderMessage}
             variant={loaderVariant}
           />
         )}
 
-        {showControls && (
-          <View style={styles.overlay}>
+        {/* Buffering Pill - non-blocking indicator */}
+        {shouldShowBufferingPill && (
+          <View pointerEvents="none" style={styles.bufferPillWrap}>
+            <View style={styles.bufferPill}>
+              <ActivityIndicator size="small" color="#fff" style={{ marginRight: 10 }} />
+              <Text style={styles.bufferPillText}>Buffering...</Text>
+            </View>
+          </View>
+        )}
+
+        {showControls && videoPlaybackSource && (
+          <View style={[styles.overlay, overlayPaddingStyle]}>
             {/* Top fade */}
             <LinearGradient
               colors={['rgba(0,0,0,0.8)', 'transparent']}
-              style={styles.topGradient}
+              style={[styles.topGradient, { height: 140 + insets.top }]}
             />
             {/* Bottom fade */}
             <LinearGradient
               colors={['transparent', 'rgba(0,0,0,0.9)']}
-              style={styles.bottomGradient}
+              style={[styles.bottomGradient, { height: 180 + insets.bottom }]}
             />
 
             {/* TOP BAR */}
@@ -3116,18 +3963,35 @@ const WatchPartyPlayerScreen = () => {
                 <View style={styles.titleWrap}>
                   <Text style={styles.title}>{activeTitle}</Text>
                   {roomCode ? (
-                    <Text style={styles.roomCodeBadge}>Party #{roomCode}</Text>
+                    <Text style={styles.roomCodeBadge}>
+                      Party #{roomCode} • {watchPartyParticipantsCount || 0} in room
+                    </Text>
                   ) : null}
                 </View>
               </View>
               <View style={styles.topRight}>
+                <TouchableOpacity
+                  style={[styles.roundButton, faceCamEnabled && { backgroundColor: '#19c37d' }]}
+                  onPress={toggleFaceCam}
+                >
+                  <Ionicons name={faceCamEnabled ? "videocam" : "videocam-outline"} size={20} color="#fff" />
+                </TouchableOpacity>
                 <TouchableOpacity style={styles.roundButton}>
                   <MaterialCommunityIcons name="thumb-down-outline" size={22} color="#fff" />
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.roundButton}>
                   <MaterialCommunityIcons name="thumb-up-outline" size={22} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.roundButton}>
+                <TouchableOpacity
+                  style={styles.roundButton}
+                  onPress={() => {
+                    if (!roomCode) return;
+                    void Share.share({
+                      message: `Join my MovieFlix Watch Party. Code: ${roomCode}`,
+                    }).catch(() => {});
+                  }}
+                  disabled={!roomCode}
+                >
                   <MaterialCommunityIcons name="monitor-share" size={22} color="#fff" />
                 </TouchableOpacity>
                 {roomCode ? (
@@ -3151,6 +4015,19 @@ const WatchPartyPlayerScreen = () => {
                   </TouchableOpacity>
                 ) : null}
               </View>
+            </View>
+
+            {/* Reaction Toolbar (Surprise Feature!) */}
+            <View style={styles.reactionToolbar}>
+              {['🔥', '😂', '❤️', '😮', '🍿', '💯'].map((emoji) => (
+                <TouchableOpacity
+                  key={emoji}
+                  onPress={() => sendReaction(emoji)}
+                  style={styles.reactionButton}
+                >
+                  <Text style={styles.reactionEmojiText}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             {/* MIDDLE CONTROLS + CHAT */}
@@ -3495,30 +4372,45 @@ const WatchPartyPlayerScreen = () => {
                   <Text style={styles.timeText}>{totalTimeLabel}</Text>
                 </View>
                 <View style={styles.progressContainerNoCard}>
-                  <Slider
-                    style={styles.progressBar}
-                    minimumValue={0}
-                    maximumValue={durationMillis || 1}
-                    value={seekPosition}
-                    onSlidingStart={() => {
-                      setIsSeeking(true);
-                      bumpControlsLife();
-                    }}
-                    onValueChange={val => {
-                      setSeekPosition(val);
-                      bumpControlsLife();
-                    }}
-                    onSlidingComplete={async val => {
-                      setIsSeeking(false);
-                      await videoRef.current?.setPositionAsync(val);
-                      // Snap captions immediately after a seek.
-                      updateActiveCaption(val, true);
-                      bumpControlsLife();
-                    }}
-                    minimumTrackTintColor="#ff5f6d"
-                    maximumTrackTintColor="rgba(255,255,255,0.2)"
-                    thumbTintColor="#fff"
-                  />
+                  <View style={styles.progressTrackWrap}>
+                    <View style={styles.progressTrackBase} />
+                    <View
+                      style={[
+                        styles.progressTrackBuffered,
+                        { width: `${Math.round(bufferedPctForUi * 1000) / 10}%` },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        styles.progressTrackPlayed,
+                        { width: `${Math.round(playedPctForUi * 1000) / 10}%` },
+                      ]}
+                    />
+                    <Slider
+                      style={styles.progressBarOverlay}
+                      minimumValue={0}
+                      maximumValue={durationForUi}
+                      value={seekPosition}
+                      onSlidingStart={() => {
+                        setIsSeeking(true);
+                        bumpControlsLife();
+                      }}
+                      onValueChange={(val) => {
+                        setSeekPosition(val);
+                        bumpControlsLife();
+                      }}
+                      onSlidingComplete={async (val) => {
+                        setIsSeeking(false);
+                        await videoRef.current?.setPositionAsync(val);
+                        // Snap captions immediately after a seek.
+                        updateActiveCaption(val, true);
+                        bumpControlsLife();
+                      }}
+                      minimumTrackTintColor="transparent"
+                      maximumTrackTintColor="transparent"
+                      thumbTintColor="#fff"
+                    />
+                  </View>
                 </View>
               </View>
               {/* Bottom actions */}
@@ -3571,7 +4463,7 @@ const WatchPartyPlayerScreen = () => {
             <Text style={styles.subtitleText}>{activeCaptionText}</Text>
           </View>
         ) : null}
-      </TouchableOpacity>
+      </View>
     </View>
   );
 };
@@ -3854,6 +4746,29 @@ function formatBandwidth(bandwidth: number): string {
   }
   return `${Math.round(kbpsValue)} kbps`;
 }
+
+// Order quality options for fallback compatibility - prefer h264 (avc1) over HEVC
+function getCodecPriority(codec?: string): number {
+  const value = codec?.toLowerCase() ?? '';
+  if (!value) return 1;
+  if (value.includes('avc1')) return 0; // h264 - most compatible
+  if (value.includes('hvc1') || value.includes('hev1') || value.includes('dvhe') || value.includes('dvh1')) return 2; // HEVC
+  return 1;
+}
+
+function orderQualityOptionsForCompatibility(options: QualityOption[]): QualityOption[] {
+  return [...options].sort((a, b) => {
+    // Prefer h264 over HEVC for compatibility
+    const aCodecPriority = getCodecPriority((a as any).codec);
+    const bCodecPriority = getCodecPriority((b as any).codec);
+    if (aCodecPriority !== bCodecPriority) return aCodecPriority - bCodecPriority;
+
+    // Then prefer higher resolution
+    const aHeight = getResolutionHeight(a.resolution) ?? 0;
+    const bHeight = getResolutionHeight(b.resolution) ?? 0;
+    return bHeight - aHeight;
+  });
+}
 function resolveRelativeUrl(target: string, base: string): string {
   try {
     return new URL(target, base).toString();
@@ -4110,6 +5025,14 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  surfacePressLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
+  touchCatcher: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+  },
   video: {
     width: '100%',
     height: '100%',
@@ -4145,6 +5068,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 18,
     justifyContent: 'space-between',
+    zIndex: 3,
   },
   topGradient: {
     position: 'absolute',
@@ -4426,10 +5350,47 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 32,
   },
+  progressBarOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: '100%',
+    height: 32,
+  },
   progressContainerNoCard: {
     width: '100%',
     marginTop: 8,
     paddingHorizontal: 6,
+  },
+  progressTrackWrap: {
+    width: '100%',
+    height: 32,
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  progressTrackBase: {
+    width: '100%',
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  progressTrackBuffered: {
+    position: 'absolute',
+    left: 0,
+    top: 13,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.30)',
+  },
+  progressTrackPlayed: {
+    position: 'absolute',
+    left: 0,
+    top: 13,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#ff5f6d',
   },
   progressLabels: {
     flexDirection: 'row',
@@ -4726,6 +5687,177 @@ ccIconWrap: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
+  },
+  // Buffering pill styles
+  bufferPillWrap: {
+    position: 'absolute',
+    top: 16,
+    alignSelf: 'center',
+    zIndex: 40,
+  },
+  bufferPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 24,
+    backgroundColor: 'rgba(15,18,35,0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  bufferPillText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  // New Styles for Surprise Features
+  reactionToolbar: {
+    position: 'absolute',
+    bottom: 140,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    gap: 12,
+    zIndex: 100,
+  },
+  reactionButton: {
+    padding: 2,
+  },
+  reactionEmojiText: {
+    fontSize: 24,
+  },
+  pollCardContainer: {
+    position: 'absolute',
+    top: 80,
+    left: 20,
+    zIndex: 200,
+  },
+  pollCard: {
+    width: 260,
+    backgroundColor: 'rgba(15,18,35,0.92)',
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.15)',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 15,
+    elevation: 10,
+  },
+  pollHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  pollTitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  pollQuestion: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  pollOption: {
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  pollProgress: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+  },
+  pollOptionText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+    zIndex: 1,
+  },
+  pollPercent: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 12,
+    fontWeight: '700',
+    zIndex: 1,
+  },
+  votedHint: {
+    color: '#4ade80',
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  participantPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(229,9,20,0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(229,9,20,0.4)',
+    marginRight: 10,
+  },
+  participantCount: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  faceCamRow: {
+    position: 'absolute',
+    top: 10,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    paddingHorizontal: 10,
+    gap: 10,
+    zIndex: 1000,
+  },
+  faceCamContainer: {
+    width: 100,
+    height: 70,
+    borderRadius: 12,
+    backgroundColor: '#000',
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  faceCamView: {
+    flex: 1,
+  },
+  faceCamLabel: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  faceCamLabelText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });
 

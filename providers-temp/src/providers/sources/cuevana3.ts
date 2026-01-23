@@ -1,6 +1,5 @@
 import { load } from 'cheerio';
 
-import { flags } from '@/entrypoint/utils/targets';
 import { SourcererOutput, makeSourcerer } from '@/providers/base';
 import { MovieScrapeContext, ShowScrapeContext } from '@/utils/context';
 import { NotFoundError } from '@/utils/errors';
@@ -219,19 +218,19 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
       stream: [
         directStream.type === 'hls'
           ? {
-              id: 'primary',
-              type: 'hls',
-              flags: [],
-              playlist: directStream.url,
-              captions: [],
-            }
+            id: 'primary',
+            type: 'hls',
+            flags: [],
+            playlist: directStream.url,
+            captions: [],
+          }
           : {
-              id: 'primary',
-              type: 'file',
-              flags: [],
-              qualities: { unknown: { type: 'mp4', url: directStream.url } },
-              captions: [],
-            },
+            id: 'primary',
+            type: 'file',
+            flags: [],
+            qualities: { unknown: { type: 'mp4', url: directStream.url } },
+            captions: [],
+          },
       ],
     };
   }
@@ -274,42 +273,42 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
       if (mediaType === 'movie') {
         const movieData = jsonData.props.pageProps.thisMovie as MovieData;
         if (movieData?.videos) {
-        const extracted = await extractVideos(ctx, movieData.videos);
-        embeds = extracted.embeds ?? [];
-        directStream = extracted.directStream;
+          const extracted = await extractVideos(ctx, movieData.videos);
+          embeds = extracted.embeds ?? [];
+          directStream = extracted.directStream;
         }
       } else {
         const episodeData = jsonData.props.pageProps.episode as EpisodeData;
         if (episodeData?.videos) {
-        const extracted = await extractVideos(ctx, episodeData.videos);
-        embeds = extracted.embeds ?? [];
-        directStream = extracted.directStream;
+          const extracted = await extractVideos(ctx, episodeData.videos);
+          embeds = extracted.embeds ?? [];
+          directStream = extracted.directStream;
         }
       }
     }
 
-  if (embeds.length === 0 && directStream) {
-    return {
-      embeds: [],
-      stream: [
-        directStream.type === 'hls'
-          ? {
+    if (embeds.length === 0 && directStream) {
+      return {
+        embeds: [],
+        stream: [
+          directStream.type === 'hls'
+            ? {
               id: 'primary',
               type: 'hls',
               flags: [],
               playlist: directStream.url,
               captions: [],
             }
-          : {
+            : {
               id: 'primary',
               type: 'file',
               flags: [],
               qualities: { unknown: { type: 'mp4', url: directStream.url } },
               captions: [],
             },
-      ],
-    };
-  }
+        ],
+      };
+    }
   }
 
   if (embeds.length === 0) {
@@ -322,9 +321,9 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
 export const cuevana3Scraper = makeSourcerer({
   id: 'cuevana3',
   name: 'Cuevana3',
-  rank: 80,
-  disabled: false,
-  flags: [flags.CORS_ALLOWED],
+  rank: 160,
+  disabled: true,
+  flags: [],
   scrapeMovie: comboScraper,
   scrapeShow: comboScraper,
 });

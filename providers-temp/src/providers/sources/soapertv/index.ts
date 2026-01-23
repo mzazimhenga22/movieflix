@@ -8,8 +8,8 @@ import { MovieScrapeContext, ShowScrapeContext } from '@/utils/context';
 import { NotFoundError } from '@/utils/errors';
 import { convertPlaylistsToDataUrls } from '@/utils/playlist';
 
-import { InfoResponse } from './types';
 import { SourcererOutput, makeSourcerer } from '../../base';
+import { InfoResponse } from './types';
 
 const baseUrl = 'https://soaper.cc';
 
@@ -129,19 +129,19 @@ const universalScraper = async (ctx: MovieScrapeContext | ShowScrapeContext): Pr
       },
       ...(streamResJson.val_bak
         ? [
-            {
-              id: 'backup',
-              playlist: await convertPlaylistsToDataUrls(
-                ctx.proxiedFetcher,
-                `${baseUrl}/${streamResJson.val_bak}`,
-                headers,
-              ),
-              type: 'hls',
-              flags: [flags.CORS_ALLOWED],
-              proxyDepth: 2,
-              captions,
-            } as Stream,
-          ]
+          {
+            id: 'backup',
+            playlist: await convertPlaylistsToDataUrls(
+              ctx.proxiedFetcher,
+              `${baseUrl}/${streamResJson.val_bak}`,
+              headers,
+            ),
+            type: 'hls',
+            flags: [flags.CORS_ALLOWED],
+            proxyDepth: 2,
+            captions,
+          } as Stream,
+        ]
         : []),
     ],
   };
@@ -151,7 +151,7 @@ export const soaperTvScraper = makeSourcerer({
   id: 'soapertv',
   name: 'SoaperTV',
   rank: 130,
-  disabled: true,
+  disabled: false,
   flags: [flags.CORS_ALLOWED],
   scrapeMovie: universalScraper,
   scrapeShow: universalScraper,

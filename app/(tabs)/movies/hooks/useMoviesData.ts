@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from 'expo-router';
+import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { InteractionManager } from 'react-native';
-import { scrapeImdbTrailer } from '../../../../src/providers/scrapeImdbTrailer';
 import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../../constants/api';
 import { authPromise, firestore } from '../../../../constants/firebase';
+import { runInBackground } from '../../../../lib/backgroundScheduler';
 import { buildProfileScopedKey } from '../../../../lib/profileStorage';
-import { Media, Genre } from '../../../../types/index';
-import { shuffleArray, KIDS_GENRE_IDS } from '../utils/constants';
-import { useFocusEffect } from 'expo-router';
+import { scrapeImdbTrailer } from '../../../../src/providers/scrapeImdbTrailer';
+import { searchClipCafe } from '../../../../src/providers/shortclips';
+import { Genre, Media } from '../../../../types/index';
+// import { KIDS_GENRE_IDS, shuffleArray } from '../utils/constants'; // Fix relative import
+import { KIDS_GENRE_IDS, shuffleArray } from '../../movies/utils/constants';
+
 
 const HOME_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -177,26 +182,100 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
 
   const loadWatchHistory = useCallback(() => {
     let isActive = true;
-    const run = async () => {
-      if (!profileReady) {
-        if (isActive) {
+
+    runInBackground(async () => {
+      if (!profileReady || !isActive) {
+        if (isActive && !profileReady) {
           setContinueWatching([]);
           setLastWatched(null);
         }
         return;
       }
+
       try {
         const key = buildProfileScopedKey('watchHistory', activeProfileId);
+        const mergedByKey = new Map<string, Media>();
+
+        // 1. Read from AsyncStorage (fastest)
         const stored = await AsyncStorage.getItem(key);
-        if (!isActive) return;
         if (stored) {
           const parsed: Media[] = JSON.parse(stored);
-          setContinueWatching(parsed);
-          setLastWatched(parsed[0] || null);
-        } else {
-          setContinueWatching([]);
-          setLastWatched(null);
+          parsed.forEach((entry) => {
+            const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie');
+            const id = entry?.id ?? (entry as any)?.tmdbId ?? entry?.title ?? entry?.name;
+            if (id == null) return;
+            mergedByKey.set(`${mediaType}:${String(id)}`, entry);
+          });
         }
+
+        // 2. Sync from Firestore (slower)
+        try {
+          const auth = await authPromise;
+          const uid = auth?.currentUser?.uid;
+          if (uid) {
+            const profileId = activeProfileId ?? 'default';
+            // Use runInTransaction for read consistency if needed, but simple get is fine here
+            const ref = collection(firestore, 'users', uid, 'watchHistory');
+            // Limit to 40 for performance
+            const q = query(ref, orderBy('updatedAtMs', 'desc'), limit(40));
+            const snap = await getDocs(q);
+
+            snap.docs.forEach((docSnap) => {
+              const data = docSnap.data() as any;
+              if (data?.profileId && data.profileId !== profileId) return;
+              if (data?.completed === true) return;
+
+              const tmdbId = data?.tmdbId;
+              if (!tmdbId) return;
+              const mediaType = String(data?.mediaType || 'movie');
+              const entryKey = `${mediaType}:${String(tmdbId)}`;
+
+              const existing = mergedByKey.get(entryKey);
+              const existingTs = existing?.watchProgress?.updatedAt ?? 0;
+              const incomingTs = data?.watchProgress?.updatedAtMs ?? data?.updatedAtMs ?? 0;
+              if (existing && existingTs >= incomingTs) return;
+
+              mergedByKey.set(entryKey, {
+                id: tmdbId,
+                title: data?.title ?? undefined,
+                name: data?.title ?? undefined,
+                media_type: mediaType,
+                poster_path: data?.posterPath ?? undefined,
+                backdrop_path: data?.backdropPath ?? undefined,
+                genre_ids: Array.isArray(data?.genreIds) ? data.genreIds : undefined,
+                vote_average: typeof data?.voteAverage === 'number' ? data.voteAverage : undefined,
+                seasonNumber: typeof data?.seasonNumber === 'number' ? data.seasonNumber : undefined,
+                episodeNumber: typeof data?.episodeNumber === 'number' ? data.episodeNumber : undefined,
+                seasonTitle: typeof data?.seasonTitle === 'string' ? data.seasonTitle : undefined,
+                watchProgress: {
+                  positionMillis: data?.watchProgress?.positionMillis ?? 0,
+                  durationMillis: data?.watchProgress?.durationMillis ?? 0,
+                  progress: data?.watchProgress?.progress ?? 0,
+                  updatedAt: incomingTs || Date.now(),
+                },
+              } as Media);
+            });
+          }
+        } catch {
+          // best-effort only, ignore network errors
+        }
+
+        if (!isActive) return;
+
+        // Process final list
+        const merged = [...mergedByKey.values()]
+          .filter((entry) => (entry.watchProgress?.progress ?? 0) < 0.985) // Filter out completed
+          .sort((a, b) => (b.watchProgress?.updatedAt ?? 0) - (a.watchProgress?.updatedAt ?? 0))
+          .slice(0, 30); // Keep top 30 locally
+
+        setContinueWatching(merged);
+        setLastWatched(merged[0] || null);
+
+        // Update local cache
+        if (merged.length > 0) {
+          void AsyncStorage.setItem(key, JSON.stringify(merged)).catch(() => { });
+        }
+
       } catch (err) {
         if (isActive) {
           console.error('Failed to load watch history', err);
@@ -204,8 +283,8 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
           setLastWatched(null);
         }
       }
-    };
-    run();
+    }, { delay: 2500 }); // Delay 2.5s to let initial feed render 
+
     return () => {
       isActive = false;
     };
@@ -300,55 +379,77 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
           console.warn('[MovieTrailers] Failed to read cache', err);
         }
 
-        InteractionManager.runAfterInteractions(() => {
-          void (async () => {
-            const concurrency = 2;
-            const results: (Media & { trailerUrl: string })[] = [];
-            const queue = movies.slice(0, 6);
-            let index = 0;
+        runInBackground(async () => {
+          const concurrency = 2;
+          const results: (Media & { trailerUrl: string })[] = [];
+          const queue = movies.slice(0, 6);
+          let index = 0;
 
-            const worker = async () => {
-              while (true) {
-                const i = index++;
-                if (i >= queue.length) return;
-                const movie = queue[i];
-                try {
-                  let imdbId = movie.imdb_id;
-                  if (!imdbId && movie.id) {
-                    const externalIdsUrl = `${API_BASE_URL}/movie/${movie.id}/external_ids?api_key=${API_KEY}`;
-                    const externalRes = await fetch(externalIdsUrl);
-                    if (externalRes.ok) {
-                      const externalData = await externalRes.json();
-                      imdbId = externalData.imdb_id;
-                    }
+          const worker = async () => {
+            while (true) {
+              const i = index++;
+              if (i >= queue.length) return;
+              const movie = queue[i];
+              try {
+                let imdbId = movie.imdb_id;
+                if (!imdbId && movie.id) {
+                  const externalIdsUrl = `${API_BASE_URL}/movie/${movie.id}/external_ids?api_key=${API_KEY}`;
+                  const externalRes = await fetch(externalIdsUrl);
+                  if (externalRes.ok) {
+                    const externalData = await externalRes.json();
+                    imdbId = externalData.imdb_id;
                   }
-
-                  if (imdbId) {
-                    const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
-                    if (trailer?.url) {
-                      results.push({ ...movie, imdb_id: imdbId, trailerUrl: trailer.url });
-                      setMovieTrailers([...results]);
-                    }
-                  }
-                } catch (err) {
-                  console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
                 }
+
+                let trailerUrl: string | null = null;
+
+                // Try IMDB first
+                if (imdbId) {
+                  const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
+                  if (trailer?.url) {
+                    trailerUrl = trailer.url;
+                    console.log('[MovieTrailers] IMDB Found:', movie?.title);
+                  }
+                }
+
+                // Fallback to ClipCafe if IMDB fails
+                if (!trailerUrl) {
+                  const year = movie.release_date ? movie.release_date.substring(0, 4) : undefined;
+                  const clip = await searchClipCafe(movie.title || '', year);
+                  if (clip?.url) {
+                    trailerUrl = clip.url;
+                    console.log('[MovieTrailers] ClipCafe Found:', movie?.title);
+                  }
+                }
+
+                if (trailerUrl) {
+                  results.push({ ...movie, imdb_id: imdbId, trailerUrl });
+                  setMovieTrailers((prev) => {
+                    // Dedup updates
+                    const next = [...prev];
+                    const exists = next.find(m => m.id === movie.id);
+                    if (!exists) next.push({ ...movie, imdb_id: imdbId, trailerUrl });
+                    return next;
+                  });
+                }
+              } catch (err) {
+                console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
               }
-            };
-
-            const workers = [] as Promise<void>[];
-            for (let w = 0; w < concurrency; w++) workers.push(worker());
-            await Promise.all(workers);
-
-            try {
-              await AsyncStorage.setItem(cacheKey, JSON.stringify(results));
-            } catch (err) {
-              console.warn('[MovieTrailers] Failed to persist cache', err);
             }
+          };
 
-            console.log('[MovieTrailers] Completed, found:', results.length);
-          })();
-        });
+          const workers = [] as Promise<void>[];
+          for (let w = 0; w < concurrency; w++) workers.push(worker());
+          await Promise.all(workers);
+
+          try {
+            await AsyncStorage.setItem(cacheKey, JSON.stringify(results));
+          } catch (err) {
+            console.warn('[MovieTrailers] Failed to persist cache', err);
+          }
+
+          console.log('[MovieTrailers] Completed, found:', results.length);
+        }, { delay: 1000 });
       } catch (err) {
         console.error('[MovieTrailers] Unexpected error:', err);
       }
@@ -383,22 +484,35 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
       const cached = await AsyncStorage.getItem(homeFeedCacheKey);
       if (!cached) return { applied: false, fresh: false };
 
-      const parsed = JSON.parse(cached) as HomeFeedCacheEnvelope | HomeFeedCachePayload;
-      const envelope: HomeFeedCacheEnvelope = (parsed as HomeFeedCacheEnvelope)?.payload
-        ? (parsed as HomeFeedCacheEnvelope)
-        : { payload: parsed as HomeFeedCachePayload, updatedAt: 0 };
+      // Defer parsing to next tick to avoid frame drop
+      return new Promise((resolve) => {
+        InteractionManager.runAfterInteractions(() => {
+          try {
+            const parsed = JSON.parse(cached) as HomeFeedCacheEnvelope | HomeFeedCachePayload;
+            const envelope: HomeFeedCacheEnvelope = (parsed as HomeFeedCacheEnvelope)?.payload
+              ? (parsed as HomeFeedCacheEnvelope)
+              : { payload: parsed as HomeFeedCachePayload, updatedAt: 0 };
 
-      if (!envelope.payload) return { applied: false, fresh: false };
+            if (!envelope.payload) {
+              resolve({ applied: false, fresh: false });
+              return;
+            }
 
-      const derived = deriveFeedState(envelope.payload);
-      applyDerivedState(derived);
-      setLoading(false);
+            const derived = deriveFeedState(envelope.payload);
+            applyDerivedState(derived);
+            setLoading(false);
 
-      const fresh = envelope.updatedAt
-        ? Date.now() - envelope.updatedAt < HOME_FEED_CACHE_TTL_MS
-        : false;
+            const fresh = envelope.updatedAt
+              ? Date.now() - envelope.updatedAt < HOME_FEED_CACHE_TTL_MS
+              : false;
 
-      return { applied: true, fresh };
+            resolve({ applied: true, fresh });
+          } catch (e) {
+            console.error('Failed to parse home feed cache', e);
+            resolve({ applied: false, fresh: false });
+          }
+        });
+      });
     } catch (err) {
       console.error('Failed to load home feed cache', err);
       return { applied: false, fresh: false };
@@ -421,6 +535,8 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
           recommendedData,
           songsData,
           genresData,
+          tvPopularData,
+          tvTopRatedData,
         ] = await Promise.all([
           fetchProviderMovies(8),
           fetchProviderMovies(9),
@@ -432,17 +548,33 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
           fetchWithKids(`${API_BASE_URL}/movie/top_rated?api_key=${API_KEY}`, 'movie'),
           fetchWithKids(`${API_BASE_URL}/movie/popular?api_key=${API_KEY}`, 'movie'),
           fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`).then((r) => r.json()),
+          fetchWithKids(`${API_BASE_URL}/tv/popular?api_key=${API_KEY}`, 'tv'),
+          fetchWithKids(`${API_BASE_URL}/tv/top_rated?api_key=${API_KEY}`, 'tv'),
         ]);
+
+        // Interleave movies and TV shows in trending for better balance
+        const movieResults = (movieStoriesData?.results || []).map((m: any) => ({ ...m, media_type: 'movie' }));
+        const tvResults = (tvStoriesData?.results || []).map((t: any) => ({ ...t, media_type: 'tv' }));
+        const tvPopResults = (tvPopularData?.results || []).map((t: any) => ({ ...t, media_type: 'tv' }));
+        const tvTopResults = (tvTopRatedData?.results || []).map((t: any) => ({ ...t, media_type: 'tv' }));
+
+        // Merge and shuffle trending to get a good mix
+        const interleavedTrending = [] as any[];
+        const maxLen = Math.max(movieResults.length, tvResults.length);
+        for (let i = 0; i < maxLen; i++) {
+          if (i < movieResults.length) interleavedTrending.push(movieResults[i]);
+          if (i < tvResults.length) interleavedTrending.push(tvResults[i]);
+        }
 
         const payload: HomeFeedCachePayload = {
           netflix: netflixMovies || [],
           amazon: amazonMovies || [],
           hbo: hboMovies || [],
-          movieStoriesData,
-          tvStoriesData,
-          trendingData,
+          movieStoriesData: { results: shuffleArray(movieResults) },
+          tvStoriesData: { results: shuffleArray([...tvResults, ...tvPopResults.slice(0, 10)]) },
+          trendingData: { results: shuffleArray(interleavedTrending) },
           movieReelsData,
-          recommendedData,
+          recommendedData: { results: shuffleArray([...(recommendedData?.results || []), ...tvTopResults.slice(0, 8)]) },
           songsData,
           genresData,
         };
@@ -485,21 +617,33 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
     ]
   );
 
+  // Use refs to avoid re-triggering the effect when callbacks change
+  const fetchDataRef = useRef(fetchData);
+  const loadFromCacheRef = useRef(loadFromCache);
+
+  useEffect(() => {
+    fetchDataRef.current = fetchData;
+  }, [fetchData]);
+
+  useEffect(() => {
+    loadFromCacheRef.current = loadFromCache;
+  }, [loadFromCache]);
+
   useEffect(() => {
     if (!profileReady) return;
     let cancelled = false;
 
     const init = async () => {
-      const result = await loadFromCache();
+      const result = await loadFromCacheRef.current();
       if (cancelled) return;
 
       if (!result.applied) {
-        await fetchData();
+        await fetchDataRef.current();
         return;
       }
 
       if (!result.fresh) {
-        fetchData({ silent: true });
+        fetchDataRef.current({ silent: true });
       }
     };
 
@@ -508,7 +652,7 @@ export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boo
     return () => {
       cancelled = true;
     };
-  }, [fetchData, loadFromCache, profileReady]);
+  }, [profileReady, homeFeedCacheKey]);
 
   return {
     trending,

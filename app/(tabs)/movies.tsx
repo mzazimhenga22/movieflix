@@ -1,14 +1,16 @@
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { FlashList, type ListRenderItem } from '@shopify/flash-list';
+import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
-  Image,
   InteractionManager,
   PixelRatio,
   Platform,
@@ -18,26 +20,42 @@ import {
   TouchableOpacity,
   useWindowDimensions,
   View,
+  ViewToken
 } from 'react-native';
-import { FlashList, type ListRenderItem } from '@shopify/flash-list';
-import FeaturedMovie from '../../components/FeaturedMovie';
-import MovieList from '../../components/MovieList';
-import MovieTrailerCarousel from '../../components/MovieTrailerCarousel';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { type MovieTrailerCarouselHandle } from '../../components/MovieTrailerCarousel';
 import ScreenWrapper from '../../components/ScreenWrapper';
-import SongList from '../../components/SongList';
-import Story from '../../components/Story';
+
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
+import { getResponsiveCardDimensions } from '@/hooks/useResponsive';
+import AdBanner from '../../components/ads/AdBanner';
+import StoryCarousel from '../../components/Story';
 import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../constants/api';
 import { authPromise, firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
-import AdBanner from '../../components/ads/AdBanner';
 import { pushWithOptionalInterstitial } from '../../lib/ads/navigate';
+import { initBackgroundScheduler, onHeavyScreenFocus } from '../../lib/backgroundScheduler';
 import { getFavoriteGenre, type FavoriteGenre } from '../../lib/favoriteGenreStorage';
 import { buildProfileScopedKey } from '../../lib/profileStorage';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types/index';
 import { useAccent } from '../components/AccentContext';
+import FlixyAssistant from '../components/FlixyAssistant';
+import FlixyWalkthrough, { shouldShowWalkthrough } from '../components/FlixyWalkthrough';
+import SnowOverlay from '../messaging/components/SnowOverlay';
 import { onConversationsUpdate, type Conversation } from '../messaging/controller';
+import FireworksOverlay from './movies/components/FireworksOverlay';
+import FreshDropsOverlay from './movies/components/FreshDropsOverlay';
 import LoadingSkeleton from './movies/components/LoadingSkeleton';
+import {
+  BecauseYouWatchedSection,
+  ContinueWatchingSection,
+  FavoriteGenreSection,
+  FeaturedSection,
+  ProgressiveMovieSection,
+  SongsSection,
+  TrailersSection,
+} from './movies/components/MemoizedSections';
 import { useMoviesData } from './movies/hooks/useMoviesData';
 
 const PULSE_PALETTES: [string, string][] = [
@@ -45,6 +63,9 @@ const PULSE_PALETTES: [string, string][] = [
   ['#70e1f5', '#ffd194'],
   ['#c471f5', '#fa71cd'],
 ];
+
+import { FloatingParticles } from './movies/components/FloatingParticles';
+
 
 const FILTER_KEYS = ['All', 'TopRated', 'New', 'ForYou'] as const;
 const FILTER_LABELS: Record<(typeof FILTER_KEYS)[number], string> = {
@@ -54,16 +75,432 @@ const FILTER_LABELS: Record<(typeof FILTER_KEYS)[number], string> = {
   ForYou: 'For You',
 };
 
+const STICKY_HEADER_TOP = 25;
+
+const REELS_COLLAPSE_MS = 650;
+const PREFETCH_AHEAD_SECTIONS = 1;
+const PREFETCH_MAX_IMAGES = 12;
+
+type FilteredCollections = {
+  filteredTrending: Media[];
+  filteredRecommended: Media[];
+  filteredNetflix: Media[];
+  filteredAmazon: Media[];
+  filteredHbo: Media[];
+  filteredTrendingMoviesOnly: Media[];
+  filteredTrendingTvOnly: Media[];
+  filteredSongs: Media[];
+  filteredMovieReels: Media[];
+  actionPicks: Media[];
+  comedyPicks: Media[];
+  horrorPicks: Media[];
+  romancePicks: Media[];
+  sciFiPicks: Media[];
+  becauseYouWatched: Media[];
+};
+
+import { recommendContent } from '../../lib/algo';
+
+// ... (keep existing imports)
+
+function useFilteredCollections(params: {
+  activeFilter: 'All' | 'TopRated' | 'New' | 'ForYou';
+  activeGenreId: number | null;
+  recommended: Media[];
+  trending: Media[];
+  netflix: Media[];
+  amazon: Media[];
+  hbo: Media[];
+  trendingMoviesOnly: Media[];
+  trendingTvOnly: Media[];
+  songs: Media[];
+  movieReels: Media[];
+  lastWatched: Media | null;
+  userId: string | null;
+}): FilteredCollections {
+  const {
+    activeFilter,
+    activeGenreId,
+    recommended,
+    trending,
+    netflix,
+    amazon,
+    hbo,
+    trendingMoviesOnly,
+    trendingTvOnly,
+    songs,
+    movieReels,
+    lastWatched,
+    userId,
+  } = params;
+
+  // Internal state for algo-sorted recommended
+  const [algoRecommended, setAlgoRecommended] = useState<Media[]>([]);
+
+  useEffect(() => {
+    if (recommended.length > 0) {
+      void recommendContent(recommended, userId).then(setAlgoRecommended);
+    }
+  }, [recommended, userId]);
+
+  // Helper to filter/sort a single list
+  const getFilteredList = useCallback((items: Media[]) => {
+    if (!items || items.length === 0) return [];
+    let base = items;
+    if (activeGenreId != null) {
+      base = base.filter((m) => ((m.genre_ids || []) as number[]).includes(activeGenreId));
+    }
+    switch (activeFilter) {
+      case 'TopRated':
+        return [...base].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+      case 'New':
+        return [...base].sort((a, b) => {
+          const da = (a.release_date || a.first_air_date || '') as string;
+          const db = (b.release_date || b.first_air_date || '') as string;
+          return db.localeCompare(da);
+        });
+      case 'ForYou':
+        // Only apply algo sort if this is the "recommended" list, otherwise valid for all?
+        // Actually the original code applied it generally if 'ForYou' was selected,
+        // BUT it used 'algoRecommended' specifically for the 'ForYou' case in the switch.
+        // The original logic returned `algoRecommended` wholesale if activeFilter === 'ForYou'.
+        // This implies 'ForYou' overrides the list content entirely with `algoRecommended`?
+        // Let's look at the original code:
+        // case 'ForYou': return algoRecommended.length > 0 ? algoRecommended : base;
+        // This means ANY list passed to `applyFilter` would return `algoRecommended` if filter is ForYou.
+        // That seems wrong for lists like "Netflix", "Amazon".
+        // It likely only makes sense for the main feed?
+        // However, to maintain exact behavior:
+        return algoRecommended.length > 0 ? algoRecommended : base;
+      default:
+        return base;
+    }
+  }, [activeFilter, activeGenreId, algoRecommended]);
+
+  // However, the above logic for 'ForYou' replacing EVERYTHING with `algoRecommended` seems like a bug or very specific design.
+  // If I select "Netflix" section and filter "For You", should it show "Recommended" items instead of Netflix items?
+  // The original code:
+  // const filteredNetflix = applyFilter(netflix);
+  // -> if ForYou, returns algoRecommended.
+  // So yes, it replaces ALL lists with the recommended list.
+  // I will preserve this behavior for now to ensure "exact UI functionality", even if quirksome.
+
+  // OPTIMIZATION: defining the filter function inside useMemo was causing recreation.
+  // Now using useCallback. But `algoRecommended` changes often?
+  // Actually, we can split it.
+
+  const applyGenericFilter = useCallback((items: Media[]) => {
+    if (!items || items.length === 0) return [];
+    let base = items;
+    if (activeGenreId != null) {
+      base = base.filter((m) => ((m.genre_ids || []) as number[]).includes(activeGenreId));
+    }
+    if (activeFilter === 'TopRated') {
+      return [...base].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+    }
+    if (activeFilter === 'New') {
+      return [...base].sort((a, b) => {
+        const da = (a.release_date || a.first_air_date || '') as string;
+        const db = (b.release_date || b.first_air_date || '') as string;
+        return db.localeCompare(da);
+      });
+    }
+    // 'ForYou' is handled specifically below or just falls through if we treat it like 'All' for non-main lists
+    // BUT existing behavior replaced content.
+    return base;
+  }, [activeGenreId, activeFilter]);
+
+  // Memoize each list individually
+  const filteredTrending = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(trending);
+  }, [trending, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredRecommended = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(recommended);
+  }, [recommended, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredNetflix = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(netflix);
+  }, [netflix, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredAmazon = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(amazon);
+  }, [amazon, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredHbo = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(hbo);
+  }, [hbo, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredTrendingMoviesOnly = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(trendingMoviesOnly);
+  }, [trendingMoviesOnly, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredTrendingTvOnly = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(trendingTvOnly);
+  }, [trendingTvOnly, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredSongs = useMemo(() => {
+    // Songs probably shouldn't be replaced by movies in 'ForYou' mode, but preserving logic:
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(songs as any);
+  }, [songs, activeFilter, algoRecommended, applyGenericFilter]);
+
+  const filteredMovieReels = useMemo(() => {
+    if (activeFilter === 'ForYou' && algoRecommended.length > 0) return algoRecommended;
+    return applyGenericFilter(movieReels);
+  }, [movieReels, activeFilter, algoRecommended, applyGenericFilter]);
+
+  // Genre picks - only sorted, not filtered by activeGenreId again (redundant?)
+  // Original: ApplySortOnly(trendingMoviesOnly.filter(...))
+  // We can memoize the base filtered lists first
+
+  const actionMovies = useMemo(() => trendingMoviesOnly.filter(m => (m.genre_ids || []).includes(28)), [trendingMoviesOnly]);
+  const comedyMovies = useMemo(() => trendingMoviesOnly.filter(m => (m.genre_ids || []).includes(35)), [trendingMoviesOnly]);
+  const horrorMovies = useMemo(() => trendingMoviesOnly.filter(m => (m.genre_ids || []).includes(27)), [trendingMoviesOnly]);
+  const romanceMovies = useMemo(() => trendingMoviesOnly.filter(m => (m.genre_ids || []).includes(10749)), [trendingMoviesOnly]);
+  const sciFiMovies = useMemo(() => trendingMoviesOnly.filter(m => (m.genre_ids || []).includes(878)), [trendingMoviesOnly]);
+
+  const applySortOnly = useCallback((items: Media[]) => {
+    if (!items || items.length === 0) return [];
+    if (activeFilter === 'TopRated') {
+      return [...items].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+    }
+    if (activeFilter === 'New') {
+      return [...items].sort((a, b) => {
+        const da = (a.release_date || a.first_air_date || '') as string;
+        const db = (b.release_date || b.first_air_date || '') as string;
+        return db.localeCompare(da);
+      });
+    }
+    return items;
+  }, [activeFilter]);
+
+  const actionPicks = useMemo(() => applySortOnly(actionMovies), [actionMovies, applySortOnly]);
+  const comedyPicks = useMemo(() => applySortOnly(comedyMovies), [comedyMovies, applySortOnly]);
+  const horrorPicks = useMemo(() => applySortOnly(horrorMovies), [horrorMovies, applySortOnly]);
+  const romancePicks = useMemo(() => applySortOnly(romanceMovies), [romanceMovies, applySortOnly]);
+  const sciFiPicks = useMemo(() => applySortOnly(sciFiMovies), [sciFiMovies, applySortOnly]);
+
+  const becauseYouWatched = useMemo(() => {
+    if (!lastWatched || !recommended || recommended.length === 0) return [];
+    const lastGenres = (lastWatched.genre_ids || []) as number[];
+    if (!lastGenres.length) return [];
+    return recommended.filter((m) => {
+      const genres = (m.genre_ids || []) as number[];
+      return genres.some((g) => lastGenres.includes(g));
+    });
+  }, [lastWatched, recommended]);
+
+  return {
+    filteredTrending,
+    filteredRecommended,
+    filteredNetflix,
+    filteredAmazon,
+    filteredHbo,
+    filteredTrendingMoviesOnly,
+    filteredTrendingTvOnly,
+    filteredSongs,
+    filteredMovieReels,
+    actionPicks,
+    comedyPicks,
+    horrorPicks,
+    romancePicks,
+    sciFiPicks,
+    becauseYouWatched,
+  };
+}
+
+// Row entrance animation component
+const RowWrapper = memo(({ children, index }: { children: React.ReactNode; index: number }) => {
+  const rowAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(rowAnim, {
+      toValue: 1,
+      duration: 500,
+      delay: index * 60,
+      useNativeDriver: true,
+      easing: Easing.out(Easing.back(0.8)),
+    }).start();
+  }, [index, rowAnim]);
+
+  const opacity = rowAnim.interpolate({
+    inputRange: [0, 0.2, 1],
+    outputRange: [0, 0, 1],
+  });
+
+  const translateX = rowAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [40, 0],
+  });
+
+  const scale = rowAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.96, 1],
+  });
+
+  return (
+    <Animated.View style={{ opacity, transform: [{ translateX }, { scale }] }}>
+      {children}
+    </Animated.View>
+  );
+});
+
 const HomeScreen: React.FC = () => {
   const { currentPlan } = useSubscription();
-  const { width: screenWidth } = useWindowDimensions();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const fontScale = PixelRatio.getFontScale();
   const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
 
-  const [showPulseCards, setShowPulseCards] = useState(() => !isCompactLayout);
+  const responsiveCards = useMemo(() => getResponsiveCardDimensions(screenWidth), [screenWidth]);
+
+  const navHeight = isCompactLayout ? 64 : 72;
+  const fabBottomOffset = navHeight + Math.max(insets.bottom, Platform.OS === 'ios' ? 12 : 10) + 36;
+
+  const [stickyHeaderHeight, setStickyHeaderHeight] = useState(147);
+  const stickyHeaderSpacerHeight = useMemo(
+    () => Math.max(0, STICKY_HEADER_TOP + stickyHeaderHeight),
+    [stickyHeaderHeight],
+  );
+  const onStickyHeaderLayout = useCallback(
+    (e: any) => {
+      const next = e?.nativeEvent?.layout?.height;
+      if (typeof next !== 'number' || !Number.isFinite(next) || next <= 0) return;
+      if (Math.abs(next - stickyHeaderHeight) < 1) return;
+      setStickyHeaderHeight(next);
+    },
+    [stickyHeaderHeight],
+  );
+
+  const [showPulseCards, setShowPulseCards] = useState(false);
+  const [snowing, setSnowing] = useState(false);
+
+  const [fireworksKey, setFireworksKey] = useState(0);
+  const [freshDropsKey, setFreshDropsKey] = useState(0);
+
+  const trendingPillScale = useRef(new Animated.Value(1)).current;
+  const reelsPillScale = useRef(new Animated.Value(1)).current;
+  const dropsPillScale = useRef(new Animated.Value(1)).current;
+
+  const reelsCollapseAnim = useRef(new Animated.Value(0)).current;
+  const reelsCollapseRunningRef = useRef(false);
+  const [reelsCollapsing, setReelsCollapsing] = useState(false);
+
+  // Walkthrough state
+  const [showWalkthrough, setShowWalkthrough] = useState(false);
+  const [walkthroughChecked, setWalkthroughChecked] = useState(false);
+
   useEffect(() => {
-    if (isCompactLayout) setShowPulseCards(false);
-  }, [isCompactLayout]);
+    void (async () => {
+      try {
+        const shouldShow = await shouldShowWalkthrough();
+        setShowWalkthrough(shouldShow);
+      } catch {
+        // ignore
+      } finally {
+        setWalkthroughChecked(true);
+      }
+    })();
+  }, []);
+
+  // Initialize reels prefetch cache on app start
+  // Initialize background scheduler
+  useEffect(() => {
+    initBackgroundScheduler();
+  }, []);
+
+  // Mark this as a heavy screen to pause background work
+  useFocusEffect(
+    useCallback(() => {
+      onHeavyScreenFocus('movies');
+    }, [])
+  );
+
+  const bumpPill = useCallback((v: Animated.Value) => {
+    v.stopAnimation();
+    v.setValue(1);
+    Animated.sequence([
+      Animated.timing(v, { toValue: 1.08, duration: 120, useNativeDriver: true }),
+      Animated.timing(v, { toValue: 1, duration: 180, useNativeDriver: true }),
+    ]).start();
+  }, []);
+
+  const triggerReelsCollapse = useCallback(() => {
+    if (reelsCollapseRunningRef.current) return;
+    reelsCollapseRunningRef.current = true;
+    setReelsCollapsing(true);
+    reelsCollapseAnim.stopAnimation();
+    reelsCollapseAnim.setValue(0);
+    Animated.sequence([
+      // Phase 1: Quick shake before collapse
+      Animated.timing(reelsCollapseAnim, {
+        toValue: 0.15,
+        duration: 80,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(reelsCollapseAnim, {
+        toValue: 0.05,
+        duration: 60,
+        useNativeDriver: true,
+      }),
+      // Phase 2: Main collapse - TV turning off effect
+      Animated.timing(reelsCollapseAnim, {
+        toValue: 1,
+        duration: REELS_COLLAPSE_MS,
+        easing: Easing.bezier(0.4, 0, 0.2, 1),
+        useNativeDriver: true,
+      }),
+      // Phase 3: Hold at collapsed state briefly
+      Animated.delay(120),
+      // Phase 4: Explosive bounce back
+      Animated.spring(reelsCollapseAnim, {
+        toValue: 0,
+        speed: 12,
+        bounciness: 14,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      reelsCollapseRunningRef.current = false;
+      setReelsCollapsing(false);
+    });
+  }, [reelsCollapseAnim]);
+
+  const screenFxStyle = useMemo(() => {
+    // TV turn-off effect: shrinks vertically first, then horizontally to a line, then disappears
+    const scaleX = reelsCollapseAnim.interpolate({
+      inputRange: [0, 0.15, 0.5, 0.8, 1],
+      outputRange: [1, 1.02, 0.95, 0.3, 0.01]
+    });
+    const scaleY = reelsCollapseAnim.interpolate({
+      inputRange: [0, 0.15, 0.4, 0.7, 1],
+      outputRange: [1, 1.01, 0.15, 0.02, 0.002]
+    });
+    const rotate = reelsCollapseAnim.interpolate({
+      inputRange: [0, 0.1, 0.2, 1],
+      outputRange: ['0deg', '1deg', '-0.5deg', '0deg']
+    });
+    const translateY = reelsCollapseAnim.interpolate({
+      inputRange: [0, 0.5, 1],
+      outputRange: [0, 20, 0]
+    });
+    const opacity = reelsCollapseAnim.interpolate({
+      inputRange: [0, 0.7, 0.9, 1],
+      outputRange: [1, 1, 0.6, 0]
+    });
+    return {
+      transform: [{ translateY }, { rotate }, { scaleX }, { scaleY }],
+      opacity,
+    } as const;
+  }, [reelsCollapseAnim]);
 
   const [accountName, setAccountName] = useState('watcher');
   const [userId, setUserId] = useState<string | null>(null);
@@ -81,6 +518,11 @@ const HomeScreen: React.FC = () => {
   const previewTranslate = useRef(new Animated.Value(320)).current;
   const [storyIndex, setStoryIndex] = useState(0);
   const [unreadMessageCount, setUnreadMessageCount] = useState(0);
+  // const [isListScrolling, setIsListScrolling] = useState(false); // Removed
+
+  const showKidsBlocked = useCallback((feature: string) => {
+    Alert.alert('Kids profile', `${feature} isn\'t available on Kids profiles. Switch profiles to use it.`);
+  }, []);
 
   // Shared My List state (avoid AsyncStorage reads in every MovieList section)
   const [myListIds, setMyListIds] = useState<number[]>([]);
@@ -89,9 +531,14 @@ const HomeScreen: React.FC = () => {
   // Scroll interaction guard (prevents background timers from causing jank mid-scroll)
   const isListScrollingRef = useRef(false);
   const scrollEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trailerCarouselRef = useRef<MovieTrailerCarouselHandle>(null);
 
   const markListScrolling = useCallback(() => {
-    isListScrollingRef.current = true;
+    trailerCarouselRef.current?.setPaused(true);
+    if (!isListScrollingRef.current) {
+      isListScrollingRef.current = true;
+      // setIsListScrolling(true); // Removed to prevent re-render
+    }
     if (scrollEndTimerRef.current) {
       clearTimeout(scrollEndTimerRef.current);
       scrollEndTimerRef.current = null;
@@ -102,6 +549,8 @@ const HomeScreen: React.FC = () => {
     if (scrollEndTimerRef.current) clearTimeout(scrollEndTimerRef.current);
     scrollEndTimerRef.current = setTimeout(() => {
       isListScrollingRef.current = false;
+      // setIsListScrolling(false); // Removed to prevent re-render
+      trailerCarouselRef.current?.setPaused(false);
       scrollEndTimerRef.current = null;
     }, 180);
   }, []);
@@ -139,20 +588,7 @@ const HomeScreen: React.FC = () => {
 
   const router = useRouter();
 
-  const navInFlightRef = useRef(false);
-  const deferNav = useCallback((action: () => void) => {
-    if (navInFlightRef.current) return;
-    navInFlightRef.current = true;
-    requestAnimationFrame(() => {
-      InteractionManager.runAfterInteractions(() => {
-        try {
-          action();
-        } finally {
-          navInFlightRef.current = false;
-        }
-      });
-    });
-  }, []);
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
 
   const myListKey = useMemo(() => buildProfileScopedKey('myList', activeProfileId), [activeProfileId]);
   useEffect(() => {
@@ -204,7 +640,7 @@ const HomeScreen: React.FC = () => {
     [myListKey],
   );
 
-  
+
 
   useEffect(() => {
     let unsubAuth: (() => void) | null = null;
@@ -268,37 +704,43 @@ const HomeScreen: React.FC = () => {
       let alive = true;
       const unsub = onConversationsUpdate(
         (conversations: Conversation[]) => {
-        if (!alive) return;
-        const uid = userId;
-        if (!uid) {
-          setUnreadMessageCount(0);
-          return;
-        }
+          if (!alive) return;
+          const uid = userId;
+          if (!uid) {
+            InteractionManager.runAfterInteractions(() => {
+              if (!alive) return;
+              setUnreadMessageCount(0);
+            });
+            return;
+          }
 
-        const totalUnread = conversations.reduce((acc, c) => {
-          const hasLastMessage = Boolean(c.lastMessage);
-          const lastSenderIsNotMe = Boolean(c.lastMessageSenderId) && c.lastMessageSenderId !== uid;
+          const totalUnread = conversations.reduce((acc, c) => {
+            const hasLastMessage = Boolean(c.lastMessage);
+            const lastSenderIsNotMe = Boolean(c.lastMessageSenderId) && c.lastMessageSenderId !== uid;
 
-          const lastRead = (c as any)?.lastReadAtBy?.[uid];
-          const lastReadMs =
-            lastRead && typeof lastRead?.toMillis === 'function' ? lastRead.toMillis() : null;
+            const lastRead = (c as any)?.lastReadAtBy?.[uid];
+            const lastReadMs =
+              lastRead && typeof lastRead?.toMillis === 'function' ? lastRead.toMillis() : null;
 
-          const updatedAt = (c as any)?.updatedAt;
-          const updatedAtMs =
-            updatedAt && typeof updatedAt?.toMillis === 'function'
-              ? updatedAt.toMillis()
-              : typeof updatedAt === 'number'
-                ? updatedAt
-                : null;
+            const updatedAt = (c as any)?.updatedAt;
+            const updatedAtMs =
+              updatedAt && typeof updatedAt?.toMillis === 'function'
+                ? updatedAt.toMillis()
+                : typeof updatedAt === 'number'
+                  ? updatedAt
+                  : null;
 
-          const readCoversLatest =
-            lastReadMs && updatedAtMs ? lastReadMs >= updatedAtMs - 500 /* small clock skew */ : false;
+            const readCoversLatest =
+              lastReadMs && updatedAtMs ? lastReadMs >= updatedAtMs - 500 /* small clock skew */ : false;
 
-          const unread = hasLastMessage && lastSenderIsNotMe && (lastReadMs ? !readCoversLatest : true);
-          return acc + (unread ? 1 : 0);
-        }, 0);
+            const unread = hasLastMessage && lastSenderIsNotMe && (lastReadMs ? !readCoversLatest : true);
+            return acc + (unread ? 1 : 0);
+          }, 0);
 
-        setUnreadMessageCount(totalUnread);
+          InteractionManager.runAfterInteractions(() => {
+            if (!alive) return;
+            setUnreadMessageCount(totalUnread);
+          });
         },
         { uid: userId },
       );
@@ -408,14 +850,16 @@ const HomeScreen: React.FC = () => {
     };
   }, [favoriteGenre?.id, isKidsProfile, profileReady]);
 
-  
+
 
   const handleOpenDetails = useCallback(
     (item: Media) => {
-      const mediaType = (item.media_type || 'movie') as string;
-      router.push(`/details/${item.id}?mediaType=${mediaType}`);
+      deferNav(() => {
+        const mediaType = (item.media_type || 'movie') as string;
+        router.push(`/details/${item.id}?mediaType=${mediaType}`);
+      });
     },
-    [router]
+    [deferNav, router]
   );
 
   const handleResumePlayback = useCallback(
@@ -444,69 +888,48 @@ const HomeScreen: React.FC = () => {
             : undefined,
       };
 
-      pushWithOptionalInterstitial(
-        router as any,
-        currentPlan,
-        { pathname: '/video-player', params },
-        { placement: 'movies_resume', seconds: 30 },
-      );
+      deferNav(() => {
+        pushWithOptionalInterstitial(
+          router as any,
+          currentPlan,
+          { pathname: '/video-player', params },
+          { placement: 'movies_resume', seconds: 30 },
+        );
+      });
     },
-    [router, currentPlan],
+    [deferNav, router, currentPlan],
   );
-
-  const applyFilter = useCallback(
-    (items: Media[]): Media[] => {
-      if (!items || items.length === 0) return [];
-      // 1) Genre filter first (if any)
-      let base = items;
-      if (activeGenreId != null) {
-        base = base.filter((m) => {
-          const ids = (m.genre_ids || []) as number[];
-          return ids.includes(activeGenreId);
-        });
-      }
-
-      // 2) Sort / transform based on activeFilter
-      switch (activeFilter) {
-        case 'TopRated':
-          return [...base].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
-        case 'New':
-          return [...base].sort((a, b) => {
-            const da = (a.release_date || a.first_air_date || '') as string;
-            const db = (b.release_date || b.first_air_date || '') as string;
-            return db.localeCompare(da);
-          });
-        case 'ForYou':
-          return recommended && recommended.length > 0 ? recommended : base;
-        default:
-          return base;
-      }
-    },
-    [activeFilter, activeGenreId, recommended]
-  );
-
-  const filteredTrending = useMemo(() => applyFilter(trending), [applyFilter, trending]);
-  const filteredRecommended = useMemo(() => applyFilter(recommended), [applyFilter, recommended]);
-  const filteredNetflix = useMemo(() => applyFilter(netflix), [applyFilter, netflix]);
-  const filteredAmazon = useMemo(() => applyFilter(amazon), [applyFilter, amazon]);
-  const filteredHbo = useMemo(() => applyFilter(hbo), [applyFilter, hbo]);
-  const filteredTrendingMoviesOnly = useMemo(
-    () => applyFilter(trendingMoviesOnly),
-    [applyFilter, trendingMoviesOnly],
-  );
-  const filteredTrendingTvOnly = useMemo(() => applyFilter(trendingTvOnly), [applyFilter, trendingTvOnly]);
-  const filteredSongs = useMemo(() => applyFilter(songs as any), [applyFilter, songs]);
-  const filteredMovieReels = useMemo(() => applyFilter(movieReels), [applyFilter, movieReels]);
-
-  const becauseYouWatched = useMemo(() => {
-    if (!lastWatched || !recommended || recommended.length === 0) return [];
-    const lastGenres = (lastWatched.genre_ids || []) as number[];
-    if (!lastGenres.length) return [];
-    return recommended.filter((m) => {
-      const genres = (m.genre_ids || []) as number[];
-      return genres.some((g) => lastGenres.includes(g));
-    });
-  }, [lastWatched, recommended]);
+  const {
+    filteredTrending,
+    filteredRecommended,
+    filteredNetflix,
+    filteredAmazon,
+    filteredHbo,
+    filteredTrendingMoviesOnly,
+    filteredTrendingTvOnly,
+    filteredSongs,
+    filteredMovieReels,
+    actionPicks,
+    comedyPicks,
+    horrorPicks,
+    romancePicks,
+    sciFiPicks,
+    becauseYouWatched,
+  } = useFilteredCollections({
+    activeFilter,
+    activeGenreId,
+    recommended,
+    trending,
+    netflix,
+    amazon,
+    hbo,
+    trendingMoviesOnly,
+    trendingTvOnly,
+    songs,
+    movieReels,
+    lastWatched,
+    userId,
+  });
 
   const cinematicPulse = useMemo(() => {
     const stats = [
@@ -570,7 +993,7 @@ const HomeScreen: React.FC = () => {
     [genres],
   );
 
-  const handleShuffle = () => {
+  const handleShuffle = useCallback(() => {
     deferNav(() => {
       const allContent = [...trending, ...movieReels, ...recommended, ...netflix, ...amazon, ...hbo];
       if (allContent.length > 0) {
@@ -578,7 +1001,7 @@ const HomeScreen: React.FC = () => {
         router.push(`/details/${randomItem.id}?mediaType=${randomItem.media_type || 'movie'}`);
       }
     });
-  };
+  }, [amazon, deferNav, hbo, movieReels, netflix, recommended, router, trending]);
 
   const displayedStories = stories.slice(storyIndex, storyIndex + 4);
   const showStoriesSection = !isKidsProfile && stories.length > 0;
@@ -590,6 +1013,7 @@ const HomeScreen: React.FC = () => {
     () => getAccentFromPosterPath(featuredMovie?.poster_path),
     [featuredMovie?.poster_path]
   );
+  const fxEnabled = true;
 
   // Animation values for cinematic entrance
   const headerFadeAnim = React.useRef(new Animated.Value(0)).current;
@@ -599,68 +1023,48 @@ const HomeScreen: React.FC = () => {
   const storiesAnim = React.useRef(new Animated.Value(0)).current;
   const filtersAnim = React.useRef(new Animated.Value(0)).current;
   const sectionsAnim = React.useRef(new Animated.Value(0)).current;
+  const flixyAnim = React.useRef(new Animated.Value(0)).current;
 
-  // Start animations when data loads
+  // FAB animations (simplified)
+  const fabScaleAnim2 = useRef(new Animated.Value(1)).current;
+  const fabRotateAnim = useRef(new Animated.Value(0)).current;
+
+  // Start entrance animations when data loads
   React.useEffect(() => {
     if (profileReady && !loading) {
-      // Header content fade in
-      Animated.timing(headerFadeAnim, {
-        toValue: 1,
-        duration: 600,
-        delay: 200,
-        useNativeDriver: true,
-      }).start();
+      // Batch all entrance animations together for better performance
+      const startAnims = () => {
+        Animated.stagger(100, [
+          Animated.timing(headerFadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(metaRowAnim, { toValue: 1, duration: 350, useNativeDriver: true }),
+          Animated.spring(fabScaleAnim, { toValue: 1, tension: 50, friction: 8, useNativeDriver: true }),
+          Animated.timing(genreSectionAnim, { toValue: 1, duration: 350, useNativeDriver: true }),
+          Animated.timing(storiesAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(filtersAnim, { toValue: 1, duration: 350, useNativeDriver: true }),
+          Animated.timing(sectionsAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+          Animated.timing(flixyAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+        ]).start();
+      };
 
-      // Meta row slide up
-      Animated.timing(metaRowAnim, {
-        toValue: 1,
-        duration: 500,
-        delay: 400,
-        useNativeDriver: true,
-      }).start();
+      InteractionManager.runAfterInteractions(startAnims);
 
-      // FAB buttons scale in
-      Animated.spring(fabScaleAnim, {
-        toValue: 1,
-        tension: 50,
-        friction: 7,
-        delay: 600,
-        useNativeDriver: true,
-      }).start();
-
-      // Genre section slide up
-      Animated.timing(genreSectionAnim, {
-        toValue: 1,
-        duration: 500,
-        delay: 700,
-        useNativeDriver: true,
-      }).start();
-
-      // Stories section fade in
-      Animated.timing(storiesAnim, {
-        toValue: 1,
-        duration: 600,
-        delay: 800,
-        useNativeDriver: true,
-      }).start();
-
-      // Filters slide up
-      Animated.timing(filtersAnim, {
-        toValue: 1,
-        duration: 500,
-        delay: 900,
-        useNativeDriver: true,
-      }).start();
-
-      // Content sections stagger animation
-      Animated.timing(sectionsAnim, {
-        toValue: 1,
-        duration: 800,
-        delay: 1000,
-        useNativeDriver: true,
-      }).start();
+      // Safety fallback to ensure animations run even if interactions are heavy
+      const timer = setTimeout(startAnims, 1200);
+      return () => clearTimeout(timer);
     }
-  }, [profileReady, loading, headerFadeAnim, metaRowAnim, fabScaleAnim, genreSectionAnim, storiesAnim, filtersAnim, sectionsAnim]);
+  }, [profileReady, loading, headerFadeAnim, metaRowAnim, fabScaleAnim, genreSectionAnim, storiesAnim, filtersAnim, sectionsAnim, flixyAnim]);
+
+  // FAB press handler - simple and fast
+  const handleFabPress = useCallback(() => {
+    setFabExpanded((prev) => !prev);
+    Animated.parallel([
+      Animated.sequence([
+        Animated.timing(fabScaleAnim2, { toValue: 0.92, duration: 60, useNativeDriver: true }),
+        Animated.spring(fabScaleAnim2, { toValue: 1, tension: 400, friction: 12, useNativeDriver: true }),
+      ]),
+      Animated.spring(fabRotateAnim, { toValue: fabExpanded ? 0 : 1, tension: 300, friction: 12, useNativeDriver: true }),
+    ]).start();
+  }, [fabExpanded, fabScaleAnim2, fabRotateAnim]);
 
   useEffect(() => {
     if (featuredAccent) {
@@ -707,6 +1111,11 @@ const HomeScreen: React.FC = () => {
     | { key: 'hbo' }
     | { key: 'topMoviesToday' }
     | { key: 'topTvToday' }
+    | { key: 'actionPicks' }
+    | { key: 'comedyPicks' }
+    | { key: 'horrorPicks' }
+    | { key: 'romancePicks' }
+    | { key: 'sciFiPicks' }
     | { key: 'popularMovies' }
     | { key: 'upcomingTheaters' }
     | { key: 'topRatedMovies' };
@@ -733,271 +1142,456 @@ const HomeScreen: React.FC = () => {
     if (favoriteGenre && favoriteGenreMovies.length > 0) out.push({ key: 'favoriteGenre' });
     if (songs.length > 0) out.push({ key: 'songs' });
     if (movieTrailers.length > 0) out.push({ key: 'trailers' });
-    if (trending.length > 0) out.push({ key: 'trending' });
-    if (recommended.length > 0) out.push({ key: 'recommended' });
-    if (netflix.length > 0) out.push({ key: 'netflix' });
-    if (amazon.length > 0) out.push({ key: 'amazon' });
-    if (hbo.length > 0) out.push({ key: 'hbo' });
-    if (trendingMoviesOnly.length > 0) out.push({ key: 'topMoviesToday' });
-    if (trendingTvOnly.length > 0) out.push({ key: 'topTvToday' });
-    if (songs.length > 0) out.push({ key: 'popularMovies' });
-    if (movieReels.length > 0) out.push({ key: 'upcomingTheaters' });
-    if (recommended.length > 0) out.push({ key: 'topRatedMovies' });
+    if (filteredTrending.length > 0) out.push({ key: 'trending' });
+    if (filteredRecommended.length > 0) out.push({ key: 'recommended' });
+    if (filteredNetflix.length > 0) out.push({ key: 'netflix' });
+    if (filteredAmazon.length > 0) out.push({ key: 'amazon' });
+    if (filteredHbo.length > 0) out.push({ key: 'hbo' });
+    if (filteredTrendingMoviesOnly.length > 0) out.push({ key: 'topMoviesToday' });
+    if (filteredTrendingTvOnly.length > 0) out.push({ key: 'topTvToday' });
+    if (actionPicks.length > 0) out.push({ key: 'actionPicks' });
+    if (comedyPicks.length > 0) out.push({ key: 'comedyPicks' });
+    if (horrorPicks.length > 0) out.push({ key: 'horrorPicks' });
+    if (romancePicks.length > 0) out.push({ key: 'romancePicks' });
+    if (sciFiPicks.length > 0) out.push({ key: 'sciFiPicks' });
+    if (filteredSongs.length > 0) out.push({ key: 'popularMovies' });
+    if (filteredMovieReels.length > 0) out.push({ key: 'upcomingTheaters' });
+    if (filteredRecommended.length > 0) out.push({ key: 'topRatedMovies' });
     return out;
   }, [
+    actionPicks.length,
+    comedyPicks.length,
     becauseYouWatched.length,
     continueWatching.length,
     isEmptyState,
     favoriteGenre,
     favoriteGenreMovies.length,
     featuredMovie,
+    horrorPicks.length,
     lastWatched,
     movieTrailers.length,
     songs.length,
-    trending.length,
-    recommended.length,
-    netflix.length,
-    amazon.length,
-    hbo.length,
-    trendingMoviesOnly.length,
-    trendingTvOnly.length,
-    movieReels.length,
+    filteredTrending.length,
+    filteredRecommended.length,
+    filteredNetflix.length,
+    filteredAmazon.length,
+    filteredHbo.length,
+    romancePicks.length,
+    sciFiPicks.length,
+    filteredTrendingMoviesOnly.length,
+    filteredTrendingTvOnly.length,
+    filteredSongs.length,
+    filteredMovieReels.length,
   ]);
 
-  const sectionFadeStyle = useMemo(() => ({ opacity: sectionsAnim }), [sectionsAnim]);
+  const sectionFadeStyle = useMemo(() => ({
+    opacity: sectionsAnim,
+    transform: [{
+      translateY: sectionsAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [25, 0],
+      }),
+    }],
+  }), [sectionsAnim]);
+
+  const maxViewableSectionIndexRef = useRef(0);
+  const lastPrefetchAtRef = useRef(0);
+
+  const sectionMoviesLookup = useMemo(
+    () => ({
+      continueWatching,
+      becauseYouWatched,
+      favoriteGenre: favoriteGenreMovies,
+      trending: filteredTrending,
+      recommended: filteredRecommended,
+      netflix: filteredNetflix,
+      amazon: filteredAmazon,
+      hbo: filteredHbo,
+      topMoviesToday: filteredTrendingMoviesOnly,
+      topTvToday: filteredTrendingTvOnly,
+      actionPicks,
+      comedyPicks,
+      horrorPicks,
+      romancePicks,
+      sciFiPicks,
+      popularMovies: filteredSongs as Media[],
+      upcomingTheaters: filteredMovieReels,
+      topRatedMovies: filteredRecommended,
+    }),
+    [
+      actionPicks,
+      becauseYouWatched,
+      comedyPicks,
+      continueWatching,
+      favoriteGenreMovies,
+      filteredAmazon,
+      filteredHbo,
+      filteredMovieReels,
+      filteredNetflix,
+      filteredRecommended,
+      filteredSongs,
+      filteredTrending,
+      filteredTrendingMoviesOnly,
+      filteredTrendingTvOnly,
+      horrorPicks,
+      romancePicks,
+      sciFiPicks,
+    ],
+  );
+
+  const getSectionMoviesForPrefetch = useCallback(
+    (key: HomeSection['key']): Media[] => (sectionMoviesLookup as Record<string, Media[]>)[key] ?? [],
+    [sectionMoviesLookup],
+  );
+
+  const viewabilityConfig = useRef({ viewAreaCoveragePercentThreshold: 35, minimumViewTime: 80 }).current;
+  const onViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      const maxIndex = viewableItems.reduce((acc, v) => {
+        const idx = typeof v.index === 'number' ? v.index : -1;
+        return idx > acc ? idx : acc;
+      }, -1);
+      if (maxIndex >= 0) maxViewableSectionIndexRef.current = maxIndex;
+
+      // Avoid expensive work while the user is actively scrolling.
+      if (isListScrollingRef.current) return;
+
+      const now = Date.now();
+      if (now - lastPrefetchAtRef.current < 650) return;
+      lastPrefetchAtRef.current = now;
+
+      const upcoming = sections.slice(
+        Math.max(0, maxIndex + 1),
+        Math.max(0, maxIndex + 1 + PREFETCH_AHEAD_SECTIONS),
+      );
+      const urls: string[] = [];
+      for (const s of upcoming) {
+        const items = getSectionMoviesForPrefetch(s.key).slice(0, 8);
+        for (const m of items) {
+          const path = m?.poster_path || m?.backdrop_path;
+          if (!path) continue;
+          urls.push(`${IMAGE_BASE_URL}${path}`);
+        }
+      }
+
+      const unique = Array.from(new Set(urls)).slice(0, PREFETCH_MAX_IMAGES);
+      if (unique.length === 0) return;
+
+      InteractionManager.runAfterInteractions(() => {
+        void ExpoImage.prefetch(unique);
+      });
+    },
+  ).current;
+
+  const estimatedCarouselSectionHeight = useMemo(
+    () => Math.round(responsiveCards.cardHeight + 96),
+    [responsiveCards.cardHeight],
+  );
+
+  const drawDistance = useMemo(
+    () =>
+      Platform.OS === 'android'
+        ? Math.max(1200, Math.round(screenHeight * 1.4))
+        : Math.max(1100, Math.round(screenHeight * 1.5)),
+    [screenHeight],
+  );
+
+  // Stable callbacks that don't change
+  const handleSongsOpenAll = useCallback(() => deferNav(() => router.push('/music')), [deferNav, router]);
+
+  const fabItems = useMemo(
+    () => [
+      { key: 'shuffle', icon: 'shuffle', onPress: handleShuffle },
+      { key: 'mylist', icon: 'list-sharp', onPress: () => deferNav(() => router.push('/my-list')) },
+      { key: 'search', icon: 'search', onPress: () => deferNav(() => router.push('/search')) },
+      { key: 'watchparty', icon: 'people-outline', onPress: () => deferNav(() => router.push('/watchparty')) },
+      { key: 'tvlogin', icon: 'qr-code-outline', onPress: () => deferNav(() => router.push('/tv-login/scan')) },
+    ],
+    [deferNav, handleShuffle, router],
+  );
 
   const renderSection: ListRenderItem<HomeSection> = useCallback(
-    ({ item }) => {
+    ({ item, index }) => {
+      let content: React.ReactElement | null = null;
+
       switch (item.key) {
         case 'featured':
-          return featuredMovie ? (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <FeaturedMovie movie={featuredMovie} getGenreNames={getGenreNames} onInfoPress={openQuickPreview} />
-              </View>
-            </Animated.View>
+          content = featuredMovie ? (
+            <FeaturedSection
+              movie={featuredMovie}
+              getGenreNames={getGenreNames}
+              onInfoPress={openQuickPreview}
+              fadeStyle={sectionFadeStyle}
+            />
           ) : null;
+          break;
 
         case 'continueWatching':
-          return continueWatching.length > 0 ? (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Continue Watching"
-                  movies={continueWatching}
-                  onItemPress={handleResumePlayback}
-                  showProgress
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
-          ) : null;
+          content = (
+            <ContinueWatchingSection
+              movies={continueWatching}
+              onItemPress={handleResumePlayback}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
 
         case 'becauseYouWatched':
-          return lastWatched && becauseYouWatched.length > 0 ? (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title={`Because you watched ${lastWatched.title || lastWatched.name}`}
-                  movies={becauseYouWatched}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = lastWatched ? (
+            <BecauseYouWatchedSection
+              lastWatched={lastWatched}
+              movies={becauseYouWatched}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           ) : null;
+          break;
 
         case 'favoriteGenre':
-          return favoriteGenre && favoriteGenreMovies.length > 0 ? (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title={favoriteGenreLoading ? `Loading ${favoriteGenre.name} picks…` : `${favoriteGenre.name} Picks`}
-                  movies={favoriteGenreMovies}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = favoriteGenre ? (
+            <FavoriteGenreSection
+              genreName={favoriteGenre.name}
+              loading={favoriteGenreLoading}
+              movies={favoriteGenreMovies}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           ) : null;
+          break;
 
         case 'songs':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <SongList title="Songs of the Moment" songs={songs} onOpenAll={() => router.push('/songs')} />
-              </View>
-            </Animated.View>
+          content = (
+            <SongsSection
+              songs={songs}
+              onOpenAll={handleSongsOpenAll}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'trailers':
-          return movieTrailers.length > 0 ? (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieTrailerCarousel trailers={movieTrailers} onTrailerPress={handleOpenDetails} />
-              </View>
-            </Animated.View>
-          ) : null;
+          content = (
+            <TrailersSection
+              trailers={movieTrailers}
+              onTrailerPress={handleOpenDetails}
+              carouselRef={trailerCarouselRef}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
 
         case 'trending':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Trending"
-                  movies={filteredTrending}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Trending"
+              movies={filteredTrending}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'recommended':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Recommended"
-                  movies={filteredRecommended}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Recommended"
+              movies={filteredRecommended}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'netflix':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Netflix Originals"
-                  movies={filteredNetflix}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Netflix Originals"
+              movies={filteredNetflix}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'amazon':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Amazon Prime Video"
-                  movies={filteredAmazon}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Amazon Prime Video"
+              movies={filteredAmazon}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'hbo':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="HBO Max"
-                  movies={filteredHbo}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="HBO Max"
+              movies={filteredHbo}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'topMoviesToday':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Top Movies Today"
-                  movies={filteredTrendingMoviesOnly}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Top Movies Today"
+              movies={filteredTrendingMoviesOnly}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'topTvToday':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Top TV Today"
-                  movies={filteredTrendingTvOnly}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Top TV Today"
+              movies={filteredTrendingTvOnly}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
+
+        case 'actionPicks':
+          content = (
+            <ProgressiveMovieSection
+              title="Action Picks"
+              movies={actionPicks}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
+
+        case 'comedyPicks':
+          content = (
+            <ProgressiveMovieSection
+              title="Comedy Picks"
+              movies={comedyPicks}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
+
+        case 'horrorPicks':
+          content = (
+            <ProgressiveMovieSection
+              title="Horror Picks"
+              movies={horrorPicks}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
+
+        case 'romancePicks':
+          content = (
+            <ProgressiveMovieSection
+              title="Romance Picks"
+              movies={romancePicks}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
+
+        case 'sciFiPicks':
+          content = (
+            <ProgressiveMovieSection
+              title="Sci-Fi Picks"
+              movies={sciFiPicks}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
+          );
+          break;
 
         case 'popularMovies':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Popular Movies"
-                  movies={filteredSongs}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Popular Movies"
+              movies={filteredSongs}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'upcomingTheaters':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Upcoming in Theaters"
-                  movies={filteredMovieReels}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Upcoming in Theaters"
+              movies={filteredMovieReels}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         case 'topRatedMovies':
-          return (
-            <Animated.View style={sectionFadeStyle}>
-              <View style={styles.sectionBlock}>
-                <MovieList
-                  title="Top Rated Movies"
-                  movies={filteredRecommended}
-                  onItemPress={handleOpenDetails}
-                  myListIds={myListIds}
-                  onToggleMyList={toggleMyList}
-                />
-              </View>
-            </Animated.View>
+          content = (
+            <ProgressiveMovieSection
+              title="Top Rated Movies"
+              movies={filteredRecommended}
+              onItemPress={handleOpenDetails}
+              myListIds={myListIds}
+              onToggleMyList={toggleMyList}
+              fadeStyle={sectionFadeStyle}
+            />
           );
+          break;
 
         default:
-          return null;
+          content = null;
+          break;
       }
+
+      return content ? <RowWrapper index={index}>{content}</RowWrapper> : null;
     },
     [
+      actionPicks,
       becauseYouWatched,
+      comedyPicks,
       continueWatching,
       favoriteGenre,
       favoriteGenreLoading,
@@ -1015,11 +1609,14 @@ const HomeScreen: React.FC = () => {
       getGenreNames,
       handleOpenDetails,
       handleResumePlayback,
+      handleSongsOpenAll,
+      horrorPicks,
       lastWatched,
       myListIds,
       movieTrailers,
       openQuickPreview,
-      router,
+      romancePicks,
+      sciFiPicks,
       sectionFadeStyle,
       songs,
       toggleMyList,
@@ -1044,7 +1641,7 @@ const HomeScreen: React.FC = () => {
             onPress={() => {
               // Trigger a remount of this screen to re-run fetch hooks.
               // expo-router supports replace with the current route.
-              router.replace('/movies');
+              deferNav(() => router.replace('/movies'));
             }}
             activeOpacity={0.88}
           >
@@ -1059,154 +1656,278 @@ const HomeScreen: React.FC = () => {
   return (
     <ScreenWrapper>
       <LinearGradient
-        colors={[featuredAccent, '#150a13', '#05060f']}
+        colors={[featuredAccent + '60', '#150a13', '#05060f']}
+        locations={[0, 0.35, 1]}
         start={[0, 0]}
         end={[1, 1]}
         style={styles.gradient}
       >
-        {/* floating liquid glows to mirror social feed vibe */}
-        <LinearGradient
-          colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
-          start={{ x: 0.1, y: 0 }}
-          end={{ x: 0.9, y: 1 }}
-          style={styles.bgOrbPrimary}
-        />
-        <LinearGradient
-          colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
-          start={{ x: 0.8, y: 0 }}
-          end={{ x: 0.2, y: 1 }}
-          style={styles.bgOrbSecondary}
-        />
-          <View style={styles.container}>
+        {/* Static ambient orbs */}
+        <View style={styles.bgOrbPrimary} pointerEvents="none">
+          <LinearGradient
+            colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.1, y: 0 }}
+            end={{ x: 0.9, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </View>
+        <View style={styles.bgOrbSecondary} pointerEvents="none">
+          <LinearGradient
+            colors={['rgba(229,9,20,0.12)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.8, y: 0 }}
+            end={{ x: 0.2, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </View>
+        {/* Lightweight floating particles */}
+        {fxEnabled ? (
+          <FloatingParticles accentColor={featuredAccent} screenWidth={screenWidth} />
+        ) : null}
+
+        <View style={styles.container}>
+          <FireworksOverlay trigger={fireworksKey} />
+          <FreshDropsOverlay trigger={freshDropsKey} />
+
+          <Animated.View style={[styles.contentWrap, screenFxStyle]} pointerEvents={reelsCollapsing ? 'none' : 'auto'}>
+            <SnowOverlay enabled={snowing && fxEnabled} />
+            <View style={[styles.stickyHeaderWrap, { top: STICKY_HEADER_TOP }]} onLayout={onStickyHeaderLayout}>
+              {/* Header (glassy hero) */}
+              <Animated.View style={styles.headerWrap}>
+                <LinearGradient
+                  colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.headerGlow}
+                />
+                <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
+                  <View style={styles.titleRow}>
+                    <View style={styles.accentDot} />
+                    <View>
+                      <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">{`Tonight's picks`}</Text>
+                      <Text
+                        style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
+                        numberOfLines={1}
+                        ellipsizeMode="tail"
+                      >
+                        Welcome, {activeProfileName ?? accountName}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() =>
+                        deferNav(() => {
+                          if (isKidsProfile) {
+                            showKidsBlocked('Messaging');
+                            return;
+                          }
+                          router.push('/messaging');
+                        })
+                      }
+                    >
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[
+                          styles.iconBg,
+                          isCompactLayout && styles.iconBgCompact,
+                          isKidsProfile && styles.iconBgDisabled,
+                        ]}
+                      >
+                        <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                        {unreadMessageCount > 0 ? (
+                          <View style={styles.messageBadge}>
+                            <Text style={styles.messageBadgeText}>
+                              {unreadMessageCount > 99
+                                ? '99+'
+                                : unreadMessageCount > 9
+                                  ? '9+'
+                                  : String(unreadMessageCount)}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </LinearGradient>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() =>
+                        deferNav(() => {
+                          if (isKidsProfile) {
+                            showKidsBlocked('Marketplace');
+                            return;
+                          }
+                          router.push('/marketplace');
+                        })
+                      }
+                    >
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[
+                          styles.iconBg,
+                          isCompactLayout && styles.iconBgCompact,
+                          isKidsProfile && styles.iconBgDisabled,
+                        ]}
+                      >
+                        <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                      </LinearGradient>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() =>
+                        deferNav(() => {
+                          if (isKidsProfile) {
+                            showKidsBlocked('Social Feed');
+                            return;
+                          }
+                          router.push('/social-feed');
+                        })
+                      }
+                    >
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[
+                          styles.iconBg,
+                          isCompactLayout && styles.iconBgCompact,
+                          isKidsProfile && styles.iconBgDisabled,
+                        ]}
+                      >
+                        <Ionicons name="camera-outline" size={22} color="#ffffff" style={styles.iconMargin} />
+                      </LinearGradient>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.iconBtn}
+                      onPress={() => deferNav(() => router.push('/profile'))}
+                    >
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+                      >
+                        <FontAwesome name="user-circle" size={24} color="#ffffff" />
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <Animated.View
+                  style={[
+                    styles.headerMetaRow,
+                    {
+                      transform: [
+                        {
+                          translateY: metaRowAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
+                        },
+                      ],
+                      opacity: metaRowAnim,
+                    },
+                  ]}
+                >
+                  <TouchableOpacity
+                    style={styles.metaPill}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      bumpPill(trendingPillScale);
+                      setFireworksKey(Date.now());
+                    }}
+                  >
+                    <Animated.View style={{ transform: [{ scale: trendingPillScale }] }}>
+                      <View style={styles.metaPillRow}>
+                        <Ionicons name="flame" size={14} color="#fff" />
+                        <Text style={styles.metaText}>{trendingCount} trending</Text>
+                      </View>
+                    </Animated.View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.metaPill, styles.metaPillSoft]}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      bumpPill(reelsPillScale);
+                      triggerReelsCollapse();
+                    }}
+                  >
+                    <Animated.View style={{ transform: [{ scale: reelsPillScale }] }}>
+                      <View style={styles.metaPillRow}>
+                        <Ionicons name="film-outline" size={14} color="#fff" />
+                        <Text style={styles.metaText}>{reelsCount} reels</Text>
+                      </View>
+                    </Animated.View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.metaPill, styles.metaPillOutline]}
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      bumpPill(dropsPillScale);
+                      setFreshDropsKey(Date.now());
+                    }}
+                  >
+                    <Animated.View style={{ transform: [{ scale: dropsPillScale }] }}>
+                      <View style={styles.metaPillRow}>
+                        <Ionicons name="star" size={14} color="#fff" />
+                        <Text style={styles.metaText}>Fresh drops</Text>
+                      </View>
+                    </Animated.View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.metaPill, styles.metaPillOutline]}
+                    onPress={() => setShowPulseCards((v) => !v)}
+                    activeOpacity={0.9}
+                    accessibilityRole="button"
+                  >
+                    <Ionicons name={showPulseCards ? 'eye-off-outline' : 'eye-outline'} size={14} color="#fff" />
+                    <Text style={styles.metaText}>{showPulseCards ? 'Hide stats' : 'Show stats'}</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.metaPill, styles.metaPillOutline]}
+                    onPress={() => setSnowing((v) => !v)}
+                    activeOpacity={0.9}
+                    accessibilityRole="button"
+                    accessibilityLabel={snowing ? 'Disable snow' : 'Enable snow'}
+                  >
+                    <Ionicons name="snow" size={14} color="#fff" style={{ opacity: snowing ? 1 : 0.7 }} />
+                    <Text style={styles.metaText}>Snow</Text>
+                  </TouchableOpacity>
+                </Animated.View>
+              </Animated.View>
+            </View>
+
             <FlashList
               data={sections}
               renderItem={renderSection}
               keyExtractor={(it: HomeSection) => it.key}
               getItemType={getSectionItemType}
-              estimatedItemSize={330}
-              drawDistance={Platform.OS === 'android' ? 900 : 1100}
-              decelerationRate="fast"
+              estimatedItemSize={250}
+              estimatedListSize={{ width: screenWidth, height: screenHeight }}
+              drawDistance={screenHeight * 2}
+              removeClippedSubviews={true}
+              decelerationRate={Platform.OS === 'ios' ? 'normal' : 0.985}
               onScrollBeginDrag={markListScrolling}
               onMomentumScrollBegin={markListScrolling}
               onScrollEndDrag={markListScrollEnd}
               onMomentumScrollEnd={markListScrollEnd}
+              onViewableItemsChanged={onViewableItemsChanged}
+              viewabilityConfig={viewabilityConfig}
               scrollEventThrottle={16}
+              showsVerticalScrollIndicator={false}
+              overScrollMode="never"
+              bounces={Platform.OS === 'ios'}
               contentContainerStyle={styles.scrollViewContent}
               ListHeaderComponent={
                 <>
-                  {/* Header (glassy hero) */}
-                  <Animated.View style={[styles.headerWrap, { opacity: headerFadeAnim }]}>
-                    <LinearGradient
-                      colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.headerGlow}
-                    />
-                    <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
-                      <View style={styles.titleRow}>
-                        <View style={styles.accentDot} />
-                        <View>
-                          <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">{`Tonight's picks`}</Text>
-                          <Text
-                            style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
-                            numberOfLines={1}
-                            ellipsizeMode="tail"
-                          >
-                            Welcome, {activeProfileName ?? accountName}
-                          </Text>
-                        </View>
-                      </View>
-
-                      <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
-                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/messaging'))}>
-                          <LinearGradient
-                            colors={['#e50914', '#b20710']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-                          >
-                            <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                            {unreadMessageCount > 0 ? (
-                              <View style={styles.messageBadge}>
-                                <Text style={styles.messageBadgeText}>
-                                  {unreadMessageCount > 99 ? '99+' : unreadMessageCount > 9 ? '9+' : String(unreadMessageCount)}
-                                </Text>
-                              </View>
-                            ) : null}
-                          </LinearGradient>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/marketplace'))}>
-                          <LinearGradient
-                            colors={['#e50914', '#b20710']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-                          >
-                            <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                          </LinearGradient>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/social-feed'))}>
-                          <LinearGradient
-                            colors={['#e50914', '#b20710']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-                          >
-                            <Ionicons name="camera-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                          </LinearGradient>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/profile'))}>
-                          <LinearGradient
-                            colors={['#e50914', '#b20710']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
-                          >
-                            <FontAwesome name="user-circle" size={24} color="#ffffff" />
-                          </LinearGradient>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-
-                    <Animated.View
-                      style={[
-                        styles.headerMetaRow,
-                        {
-                          transform: [
-                            {
-                              translateY: metaRowAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }),
-                            },
-                          ],
-                          opacity: metaRowAnim,
-                        },
-                      ]}
-                    >
-                      <View style={styles.metaPill}>
-                        <Ionicons name="flame" size={14} color="#fff" />
-                        <Text style={styles.metaText}>{trendingCount} trending</Text>
-                      </View>
-                      <View style={[styles.metaPill, styles.metaPillSoft]}>
-                        <Ionicons name="film-outline" size={14} color="#fff" />
-                        <Text style={styles.metaText}>{reelsCount} reels</Text>
-                      </View>
-                      <View style={[styles.metaPill, styles.metaPillOutline]}>
-                        <Ionicons name="star" size={14} color="#fff" />
-                        <Text style={styles.metaText}>Fresh drops</Text>
-                      </View>
-                      <TouchableOpacity
-                        style={[styles.metaPill, styles.metaPillOutline]}
-                        onPress={() => setShowPulseCards((v) => !v)}
-                        activeOpacity={0.9}
-                        accessibilityRole="button"
-                      >
-                        <Ionicons name={showPulseCards ? 'eye-off-outline' : 'eye-outline'} size={14} color="#fff" />
-                        <Text style={styles.metaText}>{showPulseCards ? 'Hide stats' : 'Show stats'}</Text>
-                      </TouchableOpacity>
-                    </Animated.View>
-                  </Animated.View>
+                  <View style={{ height: stickyHeaderSpacerHeight }} />
 
                   {showPulseCards ? (
                     <View style={styles.pulseRow}>
@@ -1248,7 +1969,7 @@ const HomeScreen: React.FC = () => {
                           </View>
                           <TouchableOpacity
                             style={styles.upgradeBannerButton}
-                            onPress={() => router.push('/premium?source=movies')}
+                            onPress={() => deferNav(() => router.push('/premium?source=movies'))}
                           >
                             <Text style={styles.upgradeBannerButtonText}>Upgrade</Text>
                           </TouchableOpacity>
@@ -1308,7 +2029,7 @@ const HomeScreen: React.FC = () => {
 
                   {showStoriesSection && (
                     <Animated.View style={[styles.sectionBlock, styles.storiesSection, { opacity: storiesAnim }]}>
-                      <Story stories={displayedStories} />
+                      <StoryCarousel stories={displayedStories} />
                     </Animated.View>
                   )}
 
@@ -1354,68 +2075,83 @@ const HomeScreen: React.FC = () => {
               }
             />
 
-            {/* Sub FABs */}
+            {/* Flixy Assistant removed from header - duplicate */}
+
+            {/* Sub FABs with animated entrance */}
             {fabExpanded && (() => {
-              const MAIN_FAB_BOTTOM = 120;
-              const SUB_FAB_SIZE = 64;
-              const SUB_FAB_GAP = 12;
-              const firstOffset = SUB_FAB_SIZE + SUB_FAB_GAP;
+              const SUB_FAB_SIZE = 56;
+              const SUB_FAB_GAP = 10;
+              const firstOffset = SUB_FAB_SIZE + SUB_FAB_GAP + 8;
               const spacing = SUB_FAB_SIZE + SUB_FAB_GAP;
-              const items = [
-                { key: 'shuffle', icon: 'shuffle', onPress: handleShuffle },
-                { key: 'mylist', icon: 'list-sharp', onPress: () => deferNav(() => router.push('/my-list')) },
-                { key: 'search', icon: 'search', onPress: () => deferNav(() => router.push('/search')) },
-                { key: 'watchparty', icon: 'people-outline', onPress: () => deferNav(() => router.push('/watchparty')) },
-                { key: 'tvlogin', icon: 'qr-code-outline', onPress: () => deferNav(() => router.push('/tv-login/scan')) },
-              ];
 
               return (
                 <>
-                  {items.map((it, idx) => {
-                    const bottom = MAIN_FAB_BOTTOM + firstOffset + idx * spacing;
+                  {fabItems.map((it, idx) => {
+                    const bottom = fabBottomOffset + firstOffset + idx * spacing;
                     return (
-                      <TouchableOpacity
+                      <Animated.View
                         key={it.key}
-                        style={[styles.subFab, { bottom }]}
-                        onPress={() => {
-                          try {
-                            it.onPress();
-                          } finally {
-                            setFabExpanded(false);
-                          }
-                        }}
-                        activeOpacity={0.9}
+                        style={[
+                          styles.subFab,
+                          {
+                            bottom,
+                            opacity: 1,
+                            transform: [{ scale: 1 }],
+                          },
+                        ]}
                       >
-                        <LinearGradient
-                          colors={['#ff8a00', '#e50914']}
-                          start={{ x: 0, y: 0 }}
-                          end={{ x: 1, y: 1 }}
-                          style={styles.subFabGradient}
+                        <TouchableOpacity
+                          onPress={() => {
+                            setFabExpanded(false);
+                            setTimeout(() => it.onPress(), 50);
+                          }}
+                          activeOpacity={0.8}
+                          style={styles.subFabTouchable}
                         >
-                          <Ionicons name={it.icon as any} size={20} color="#FFFFFF" />
-                        </LinearGradient>
-                      </TouchableOpacity>
+                          <LinearGradient
+                            colors={['#ff8a00', '#e50914']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.subFabGradient}
+                          >
+                            <Ionicons name={it.icon as any} size={18} color="#FFFFFF" />
+                          </LinearGradient>
+                        </TouchableOpacity>
+                      </Animated.View>
                     );
                   })}
                 </>
               );
             })()}
 
-            {/* Main FAB */}
-            <Animated.View style={[{ transform: [{ scale: fabScaleAnim }] }]} >
+            {/* Clean FAB */}
+            <Animated.View
+              style={[
+                styles.fabContainer,
+                {
+                  bottom: fabBottomOffset,
+                  transform: [
+                    { scale: fabScaleAnim2 },
+                    { rotate: fabRotateAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '135deg'] }) },
+                  ],
+                },
+              ]}
+            >
               <TouchableOpacity
-                style={[styles.fab, { bottom: 120 }]}
-                onPress={() => setFabExpanded(!fabExpanded)}
+                style={styles.fab}
+                onPress={handleFabPress}
                 activeOpacity={0.9}
               >
                 <LinearGradient
-                  colors={['#ff8a00', '#e50914']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
+                  colors={['#0891b2', '#06b6d4', '#22d3ee']}
+                  start={{ x: 0, y: 1 }}
+                  end={{ x: 1, y: 0 }}
                   style={styles.fabGradient}
-                >
-                  <Ionicons name="add" size={24} color="#FFFFFF" />
-                </LinearGradient>
+                />
+                <View style={styles.fabIconWrap}>
+                  <Ionicons name="add" size={28} color="#fff" />
+                </View>
+                <View style={styles.fabShine} />
               </TouchableOpacity>
             </Animated.View>
 
@@ -1432,7 +2168,7 @@ const HomeScreen: React.FC = () => {
                   ]}
                 >
                   <View style={styles.previewRow}>
-                    <Image
+                    <ExpoImage
                       source={{ uri: `${IMAGE_BASE_URL}${featuredMovie.poster_path}` }}
                       style={styles.previewPoster}
                     />
@@ -1478,39 +2214,136 @@ const HomeScreen: React.FC = () => {
                 </View>
               </Animated.View>
             )}
-          </View>
+          </Animated.View>
+
+          {/* TV static/glitch line effect */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.tvStaticLine,
+              {
+                opacity: reelsCollapseAnim.interpolate({
+                  inputRange: [0, 0.4, 0.6, 0.85, 1],
+                  outputRange: [0, 0, 1, 1, 0]
+                }),
+                transform: [
+                  {
+                    scaleX: reelsCollapseAnim.interpolate({
+                      inputRange: [0, 0.5, 0.7, 1],
+                      outputRange: [0.3, 1.2, 0.8, 0]
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+          {/* REELS stamp while collapsing */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.reelsStampWrap,
+              {
+                opacity: reelsCollapseAnim.interpolate({
+                  inputRange: [0, 0.2, 0.5, 0.85, 1],
+                  outputRange: [0, 1, 1, 0.8, 0]
+                }),
+                transform: [
+                  {
+                    translateY: reelsCollapseAnim.interpolate({
+                      inputRange: [0, 0.3, 0.7, 1],
+                      outputRange: [30, 0, -5, -15]
+                    }),
+                  },
+                  {
+                    scale: reelsCollapseAnim.interpolate({
+                      inputRange: [0, 0.2, 0.5, 0.8, 1],
+                      outputRange: [0.5, 1.1, 1.05, 1.15, 0.9]
+                    }),
+                  },
+                  {
+                    rotate: reelsCollapseAnim.interpolate({
+                      inputRange: [0, 0.3, 0.6, 1],
+                      outputRange: ['-5deg', '0deg', '2deg', '0deg'],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <LinearGradient
+              colors={['rgba(95,132,255,0.95)', 'rgba(255,55,95,0.95)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.reelsStamp}
+            >
+              <Ionicons name="film" size={18} color="#fff" />
+              <Text style={styles.reelsStampText}>REELS</Text>
+            </LinearGradient>
+          </Animated.View>
+          {/* Glow flash at collapse point */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.collapseGlow,
+              {
+                opacity: reelsCollapseAnim.interpolate({
+                  inputRange: [0, 0.6, 0.75, 0.9, 1],
+                  outputRange: [0, 0, 0.9, 0.4, 0]
+                }),
+                transform: [
+                  {
+                    scale: reelsCollapseAnim.interpolate({
+                      inputRange: [0, 0.7, 0.85, 1],
+                      outputRange: [0.5, 1.5, 2, 0]
+                    }),
+                  },
+                ],
+              },
+            ]}
+          />
+          {walkthroughChecked && showWalkthrough && (
+            <FlixyWalkthrough onComplete={() => setShowWalkthrough(false)} />
+          )}
+
+          <FlixyAssistant
+            screen="movies"
+            bottomOffset={fabBottomOffset}
+          />
+        </View>
       </LinearGradient>
     </ScreenWrapper>
   );
 };
 
-  const styles = StyleSheet.create({
+const styles = StyleSheet.create({
   gradient: {
     ...StyleSheet.absoluteFillObject,
   },
   bgOrbPrimary: {
     position: 'absolute',
-    width: 380,
-    height: 380,
-    borderRadius: 190,
-    top: -40,
-    left: -60,
-    opacity: 0.6,
-    transform: [{ rotate: '15deg' }],
+    width: 400,
+    height: 400,
+    borderRadius: 200,
+    top: -60,
+    left: -80,
+    overflow: 'hidden',
   },
   bgOrbSecondary: {
     position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    bottom: -80,
-    right: -40,
-    opacity: 0.55,
-    transform: [{ rotate: '-12deg' }],
+    width: 350,
+    height: 350,
+    borderRadius: 175,
+    bottom: 100,
+    right: -60,
+    overflow: 'hidden',
   },
+
   container: {
     flex: 1,
     paddingBottom: 0,
+  },
+  contentWrap: {
+    flex: 1,
   },
   // Header glass hero
   headerWrap: {
@@ -1605,6 +2438,9 @@ const HomeScreen: React.FC = () => {
   iconBgCompact: {
     padding: 8,
   },
+  iconBgDisabled: {
+    opacity: 0.45,
+  },
   messageBadge: {
     position: 'absolute',
     top: -6,
@@ -1635,6 +2471,64 @@ const HomeScreen: React.FC = () => {
     rowGap: 10,
     paddingHorizontal: 6,
     paddingVertical: 10,
+  },
+  metaPillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  reelsStampWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 64,
+    zIndex: 9999,
+    alignItems: 'center',
+  },
+  reelsStamp: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  reelsStampText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 1.6,
+  },
+  tvStaticLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: '50%',
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    zIndex: 9998,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 15,
+  },
+  collapseGlow: {
+    position: 'absolute',
+    left: '50%',
+    top: '50%',
+    width: 120,
+    height: 120,
+    marginLeft: -60,
+    marginTop: -60,
+    borderRadius: 60,
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    zIndex: 9997,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 40,
   },
   pulseRow: {
     flexDirection: 'row',
@@ -1702,15 +2596,22 @@ const HomeScreen: React.FC = () => {
     flexShrink: 1,
   },
 
+  stickyHeaderWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 50,
+  },
+
   scrollViewContent: {
-    paddingBottom: 180,
-    paddingHorizontal: 16,
-    paddingTop: 12,
+    paddingBottom: 200,
+    paddingHorizontal: 12,
+    paddingTop: 16,
   },
 
   storiesSection: {
-      marginVertical: 8,
-    },
+    marginVertical: 8,
+  },
   filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1778,155 +2679,171 @@ const HomeScreen: React.FC = () => {
     color: '#fff',
   },
 
-    sectionBlock: {
-      marginBottom: 16,
-      paddingVertical: 2,
-      paddingHorizontal: 2,
-    },
-    sectionTitle: {
-      color: '#f5f5f5',
-      fontSize: 18,
-      fontWeight: '800',
-      letterSpacing: 0.3,
-      marginBottom: 8,
-      paddingHorizontal: 16,
-    },
-    previewSheet: {
-      position: 'absolute',
-      left: 0,
-      right: 0,
-      bottom: 130,
-      paddingHorizontal: 12,
-      paddingBottom: 0,
-    },
-    previewCard: {
-      borderRadius: 26,
-      paddingHorizontal: 18,
-      paddingVertical: 12,
-      backgroundColor: 'rgba(5,6,15,0.9)',
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.18)',
-      marginHorizontal: 4,
-      shadowColor: '#000',
-      shadowOpacity: 0.35,
-      shadowRadius: 18,
-      shadowOffset: { width: 0, height: 10 },
-      elevation: 14,
-    },
-    previewRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginBottom: 10,
-    },
-    previewPoster: {
-      width: 60,
-      height: 90,
-      borderRadius: 10,
-      backgroundColor: 'rgba(0,0,0,0.4)',
-      marginRight: 12,
-    },
-    previewTitleBlock: {
-      flex: 1,
-    },
-    previewTitle: {
-      color: '#fff',
-      fontSize: 17,
-      fontWeight: '800',
-    },
-    previewMeta: {
-      color: 'rgba(255,255,255,0.7)',
-      fontSize: 12,
-      marginTop: 4,
-    },
-    previewOverview: {
-      color: 'rgba(255,255,255,0.88)',
-      fontSize: 13,
-      marginBottom: 10,
-    },
-    previewActions: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-    },
-    previewPrimaryBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: '#ffffff',
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      borderRadius: 20,
-    },
-    previewPrimaryText: {
-      color: '#000',
-      fontWeight: '700',
-      fontSize: 13,
-      marginLeft: 8,
-    },
-    previewSecondaryBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.4)',
-      backgroundColor: 'rgba(0,0,0,0.4)',
-    },
-    previewSecondaryText: {
-      color: '#fff',
-      fontWeight: '600',
-      fontSize: 12,
-      marginLeft: 6,
-    },
-    previewCloseIcon: {
-      padding: 6,
-    },
-
-  fab: {
+  sectionBlock: {
+    marginBottom: 20,
+    paddingVertical: 4,
+    paddingHorizontal: 0,
+  },
+  sectionTitle: {
+    color: '#f5f5f5',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+  },
+  previewSheet: {
     position: 'absolute',
-    width: 64,
-    height: 64,
+    left: 0,
+    right: 0,
+    bottom: 130,
+    paddingHorizontal: 12,
+    paddingBottom: 0,
+  },
+  previewCard: {
+    borderRadius: 26,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(5,6,15,0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    marginHorizontal: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 14,
+  },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  previewPoster: {
+    width: 60,
+    height: 90,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    marginRight: 12,
+  },
+  previewTitleBlock: {
+    flex: 1,
+  },
+  previewTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  previewMeta: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  previewOverview: {
+    color: 'rgba(255,255,255,0.88)',
+    fontSize: 13,
+    marginBottom: 10,
+  },
+  previewActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  previewPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  previewPrimaryText: {
+    color: '#000',
+    fontWeight: '700',
+    fontSize: 13,
+    marginLeft: 8,
+  },
+  previewSecondaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  previewSecondaryText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 12,
+    marginLeft: 6,
+  },
+  previewCloseIcon: {
+    padding: 6,
+  },
+
+  fabContainer: {
+    position: 'absolute',
+    right: 16,
+    width: 60,
+    height: 60,
     alignItems: 'center',
     justifyContent: 'center',
-    right: 18,
-    bottom: 150,
-    // Bold movie-red FAB
-    backgroundColor: '#e50914',
-    borderRadius: 36,
-    borderWidth: 0,
-    borderColor: 'transparent',
-    elevation: 12,
-    shadowColor: '#e50914',
-    shadowOpacity: 0.36,
-    shadowRadius: 18,
+  },
+
+  fab: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    overflow: 'hidden',
+    elevation: 10,
+    shadowColor: '#06b6d4',
     shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+  },
+  fabGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+
+  fabIconWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  fabShine: {
+    position: 'absolute',
+    top: 6,
+    left: 10,
+    right: 10,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.25)',
   },
   subFab: {
     position: 'absolute',
-    width: 64,
-    height: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
-    right: 18,
-    backgroundColor: '#e50914',
-    borderRadius: 32,
-    elevation: 10,
+    right: 22,
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    elevation: 8,
     shadowColor: '#e50914',
     shadowOpacity: 0.35,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
   },
-  fabGradient: {
+  subFabTouchable: {
     width: '100%',
     height: '100%',
-    borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderRadius: 16,
+    overflow: 'hidden',
   },
   subFabGradient: {
     width: '100%',
     height: '100%',
-    borderRadius: 32,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2239,6 +3156,6 @@ const HomeScreen: React.FC = () => {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 12,
   },
-  });
+});
 
 export default HomeScreen;

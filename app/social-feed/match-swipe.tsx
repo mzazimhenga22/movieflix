@@ -33,8 +33,14 @@ const resolvePosterUri = (path?: string | null) => {
   return path.startsWith('http') ? path : `${IMAGE_BASE_URL}${path}`;
 };
 
+import { logInteraction } from '../../lib/algo';
+import { useUser } from '../../hooks/use-user';
+
+// ... (existing constants)
+
 export default function MatchSwipeScreen() {
   const router = useRouter();
+  const { user } = useUser();
   const { matches, loading, errorCopy, refreshLocalHistory } = useMovieMatchData();
   const deck = matches.slice(0, 50);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -64,6 +70,22 @@ export default function MatchSwipeScreen() {
 
   const onSwipeComplete = (direction: 'left' | 'right') => {
     const swipedMatch = deck[activeIndex];
+    
+    // Log Interaction for the Algorithm
+    if (swipedMatch && user?.uid) {
+      void logInteraction({
+        type: direction === 'right' ? 'match_swipe_right' : 'match_swipe_left',
+        actorId: user.uid,
+        targetId: swipedMatch.id, // Profile ID
+        targetType: 'user',
+        meta: {
+          matchScore: swipedMatch.matchScore,
+          sharedGenres: swipedMatch.sharedGenres,
+          profileName: swipedMatch.profileName
+        }
+      });
+    }
+
     setActiveIndex((prev) => prev + 1);
     position.setValue({ x: 0, y: 0 });
     if (swipedMatch) {
@@ -286,21 +308,45 @@ export default function MatchSwipeScreen() {
         </View>
       )}
 
-      {lastSwipe && (
+      {!loading && deck.length > 0 && lastSwipe && (
         <View
           style={[
-            styles.toast,
-            lastSwipe.direction === 'right' ? styles.toastLike : styles.toastSkip,
+            styles.nextActions,
+            lastSwipe.direction === 'right' ? styles.nextActionsLike : styles.nextActionsSkip,
           ]}
         >
-          <Ionicons
-            name={lastSwipe.direction === 'right' ? 'heart' : 'close'}
-            size={16}
-            color="#fff"
-          />
-          <Text style={styles.toastText}>
-            {lastSwipe.direction === 'right' ? 'Connected with' : 'Skipped'} {lastSwipe.match.profileName}
-          </Text>
+          <View style={styles.nextActionsHeader}>
+            <Ionicons
+              name={lastSwipe.direction === 'right' ? 'heart' : 'close'}
+              size={18}
+              color="#fff"
+            />
+            <View>
+              <Text style={styles.nextActionsTitle}>
+                {lastSwipe.direction === 'right' ? 'Connected' : 'Skipped'} {lastSwipe.match.profileName}
+              </Text>
+              <Text style={styles.nextActionsCopy}>
+                {lastSwipe.direction === 'right'
+                  ? 'Start something together right away.'
+                  : 'No worries—keep swiping to find your best fit.'}
+              </Text>
+            </View>
+          </View>
+
+          {lastSwipe.direction === 'right' ? (
+            <View style={styles.nextActionsRow}>
+              <TouchableOpacity style={[styles.nextActionBtn, styles.nextActionPrimary]} onPress={() => router.push('/watchparty')}>
+                <MaterialCommunityIcons name="movie-play-outline" size={18} color="#fff" />
+                <Text style={styles.nextActionText}>Start watch party</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.nextActionBtn, styles.nextActionSecondary]} onPress={() => router.push('/messaging')}>
+                <Ionicons name="chatbubble-outline" size={16} color="#fff" />
+                <Text style={styles.nextActionText}>Say hi now</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <Text style={styles.nextActionsHint}>Swipe right to immediately launch a watch party or chat.</Text>
+          )}
         </View>
       )}
     </ScreenWrapper>
@@ -512,7 +558,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-evenly',
     alignItems: 'center',
-    paddingBottom: 24,
+    paddingBottom: 12,
   },
   circleBtn: {
     width: 64,
@@ -550,25 +596,64 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 12,
   },
-  toast: {
-    position: 'absolute',
-    bottom: 18,
-    alignSelf: 'center',
-    borderRadius: 999,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
+  nextActions: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 18,
+    gap: 10,
+  },
+  nextActionsLike: {
+    backgroundColor: 'rgba(14,203,122,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(14,203,122,0.45)',
+  },
+  nextActionsSkip: {
+    backgroundColor: 'rgba(229,57,53,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(229,57,53,0.4)',
+  },
+  nextActionsHeader: {
     flexDirection: 'row',
-    gap: 8,
     alignItems: 'center',
+    gap: 10,
   },
-  toastLike: {
-    backgroundColor: 'rgba(14,203,122,0.95)',
-  },
-  toastSkip: {
-    backgroundColor: 'rgba(229,57,53,0.9)',
-  },
-  toastText: {
+  nextActionsTitle: {
     color: '#fff',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  nextActionsCopy: {
+    color: 'rgba(255,255,255,0.78)',
+    marginTop: 2,
+  },
+  nextActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  nextActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 14,
+  },
+  nextActionPrimary: {
+    backgroundColor: '#0ecb7a',
+  },
+  nextActionSecondary: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
+  nextActionText: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  nextActionsHint: {
+    color: 'rgba(255,255,255,0.75)',
     fontWeight: '600',
   },
 });

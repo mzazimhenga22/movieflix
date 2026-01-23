@@ -47,7 +47,7 @@ async function comboScraper(ctx: ShowScrapeContext | MovieScrapeContext): Promis
     /<a[^>]*href="([^"]*\/film\/\d+\/[^"]*)"[^>]*class="[^"]*poster[^"]*"[^>]*>[\s\S]*?<img[^>]*alt="([^"]*)"[^>]*>/g;
   let filmMatch;
 
-  for (;;) {
+  for (; ;) {
     filmMatch = filmCardRegex.exec(searchPage);
     if (filmMatch === null) break;
     const link = filmMatch[1];
@@ -204,7 +204,7 @@ export const movies4fScraper = makeSourcerer({
   id: 'movies4f',
   name: 'M4F',
   rank: 166,
-  disabled: false,
+  disabled: true,
   flags: [],
   scrapeMovie: comboScraper,
   scrapeShow: comboScraper,

@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 type Props = {
   children: React.ReactNode;
@@ -9,16 +9,16 @@ type Props = {
 
 type UpdatePrompt =
   | {
-      kind: 'expo';
-      message: string;
-    }
+    kind: 'expo';
+    message: string;
+  }
   | {
-      kind: 'remote';
-      message: string;
-      actionUrl?: string;
-      actionLabel?: string;
-      mandatory: boolean;
-    };
+    kind: 'remote';
+    message: string;
+    actionUrl?: string;
+    actionLabel?: string;
+    mandatory: boolean;
+  };
 
 type RemoteUpdateFeed = {
   latestVersion?: string;
@@ -29,20 +29,50 @@ type RemoteUpdateFeed = {
   message?: string;
 };
 
+type GitHubLatestRelease = {
+  tag_name?: string;
+  body?: string;
+};
+
+const DEFAULT_GITHUB_RELEASES_REPO = 'mzazimhenga22/movieflix';
+
+const APK_LATEST_DOWNLOAD_URL = (() => {
+  const explicit = (process.env.EXPO_PUBLIC_APK_DOWNLOAD_URL ?? '').trim();
+  if (explicit) return explicit;
+
+  const repo = (process.env.EXPO_PUBLIC_GITHUB_RELEASES_REPO ?? '').trim() || DEFAULT_GITHUB_RELEASES_REPO;
+  // Stable URL that always points at the latest release asset with this name.
+  return `https://github.com/${repo}/releases/latest/download/movieflix.apk`;
+})();
+
 const UPDATE_FEED_URL = (() => {
   const explicit = (process.env.EXPO_PUBLIC_APP_UPDATE_FEED_URL ?? '').trim();
   if (explicit) return explicit;
-
-  const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
-  if (supabaseUrl) return `${supabaseUrl.replace(/\/$/, '')}/functions/v1/app-update`;
 
   return '';
 })();
 
 function parseVersionParts(version: string): number[] | null {
-  const cleaned = version.trim().replace(/^v/i, '').split('-')[0];
+  const raw = version.trim().split('-')[0];
+  if (!raw) return null;
+
+  // Extract something like 1.0.1 from strings like: v1.0.1, v.1.01, release-1.2.3
+  const match = raw.match(/\d+(?:\.\d+)*/);
+  const cleaned = (match?.[0] ?? '').trim();
   if (!cleaned) return null;
-  const nums = cleaned.split('.').map((p) => Number(p));
+
+  const parts = cleaned.split('.');
+
+  // Heuristic for tags like "1.01" (often intended as 1.0.1)
+  if (parts.length === 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1]) && parts[1].length >= 2) {
+    const major = Number(parts[0]);
+    const minor = Number(parts[1].slice(0, 1));
+    const patch = Number(parts[1].slice(1));
+    if ([major, minor, patch].some((n) => Number.isNaN(n))) return null;
+    return [major, minor, patch];
+  }
+
+  const nums = parts.map((p) => Number(p));
   if (nums.some((n) => Number.isNaN(n))) return null;
   return nums;
 }
@@ -77,6 +107,13 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 8000): Promise<T
   }
 }
 
+async function fetchLatestGitHubRelease(repo: string): Promise<GitHubLatestRelease | null> {
+  // Note: unauthenticated GitHub API is rate-limited, but per-user usage is usually fine.
+  const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
+  const res = await fetchJsonWithTimeout<GitHubLatestRelease>(apiUrl);
+  return res || null;
+}
+
 export default function UpdateGate({ children }: Props) {
   const [prompt, setPrompt] = useState<UpdatePrompt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -87,8 +124,9 @@ export default function UpdateGate({ children }: Props) {
   }, []);
 
   const checkInBackground = useCallback(async () => {
-    try {
-      if (updatesEnabled) {
+    // 1. Check for Expo OTA updates (EAS Update)
+    if (updatesEnabled) {
+      try {
         const result = await Updates.checkForUpdateAsync();
         if (result.isAvailable) {
           setPrompt({
@@ -97,18 +135,26 @@ export default function UpdateGate({ children }: Props) {
           });
           return;
         }
+      } catch (e) {
+        console.warn('[UpdateGate] Expo update check failed:', e);
+        // Continue to check for native updates
+      }
+    }
+
+    // 2. Check for Native/APK updates (GitHub or Feed)
+    try {
+      const local = (Constants.expoConfig?.version ?? Constants.manifest2?.extra?.expoClient?.version ?? '').trim();
+      if (!local) {
+        console.warn('[UpdateGate] Local app version missing');
+        return;
       }
 
+      // Back-compat: allow a custom JSON feed if explicitly configured.
       if (UPDATE_FEED_URL) {
         const feed = await fetchJsonWithTimeout<RemoteUpdateFeed>(UPDATE_FEED_URL);
         const latest = (feed.latestVersion ?? '').trim();
-        const local = (Constants.expoConfig?.version ?? '').trim();
         const mandatory = feed.mandatory !== false;
         const url = (feed.url ?? feed.androidUrl ?? feed.iosUrl ?? '').trim();
-
-        if (!local) {
-          throw new Error('Local app version missing');
-        }
 
         if (latest && compareVersions(latest, local) > 0) {
           setPrompt({
@@ -120,9 +166,33 @@ export default function UpdateGate({ children }: Props) {
           });
           return;
         }
+      } else {
+        const repo = (process.env.EXPO_PUBLIC_GITHUB_RELEASES_REPO ?? '').trim() || DEFAULT_GITHUB_RELEASES_REPO;
+        const release = await fetchLatestGitHubRelease(repo);
+        const latest = (release?.tag_name ?? '').trim();
+        const body = (release?.body ?? '').toLowerCase();
+
+        // Check for force update flags in release notes or local env
+        const envMandatory = String(process.env.EXPO_PUBLIC_APP_UPDATE_MANDATORY ?? '').trim().toLowerCase() === 'true';
+        const notesMandatory = body.includes('[mandatory]') || body.includes('[force-update]') || body.includes('force update');
+        const mandatory = envMandatory || notesMandatory;
+
+        const message = (process.env.EXPO_PUBLIC_APP_UPDATE_MESSAGE ?? '').trim();
+
+        if (latest && compareVersions(latest, local) > 0) {
+          setPrompt({
+            kind: 'remote',
+            message: message || (mandatory ? 'A critical update is required to continue.' : 'An update is available.'),
+            actionUrl: APK_LATEST_DOWNLOAD_URL,
+            actionLabel: mandatory ? 'Update now' : 'Update',
+            mandatory,
+          });
+          return;
+        }
       }
-    } catch {
+    } catch (e) {
       // Silent failure: don't block app entry; only show UI when an update is actually available.
+      console.warn('[UpdateGate] Version check failed:', e);
     }
   }, [updatesEnabled]);
 

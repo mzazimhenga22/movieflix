@@ -1,26 +1,60 @@
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React from 'react';
-import { Alert, Platform, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useRef } from 'react';
+import {
+  Alert,
+  Animated,
+  Dimensions,
+  Easing,
+  PixelRatio,
+  Platform,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { recommendProducts } from '@/lib/algo';
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { useSubscription } from '../../providers/SubscriptionProvider';
-import { useAccent } from '../components/AccentContext';
-import { Product as APIProduct, getProducts, trackPromotionClick } from './api';
-import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
-import ProductCard from './components/ProductCard';
 import { useActiveProfile } from '../../hooks/use-active-profile';
 import { useMarketplaceCart } from '../../hooks/use-marketplace-cart';
 import { formatKsh } from '../../lib/money';
+import { useSubscription } from '../../providers/SubscriptionProvider';
+import { useAccent } from '../components/AccentContext';
+import FlixyAssistant from '../components/FlixyAssistant';
+import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
+import { Product as APIProduct, getProducts, trackPromotionClick } from './api';
+import ProductCard from './components/ProductCard';
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export default function MarketplaceScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
+  const headerTopMargin = Math.max(10, insets.top + 8);
   const params = useLocalSearchParams<{ category?: string }>();
   const categoryParam = typeof params.category === 'string' ? params.category : '';
   const cart = useMarketplaceCart();
   const [products, setProducts] = React.useState<APIProduct[]>([]);
+  const [algoProducts, setAlgoProducts] = React.useState<APIProduct[]>([]);
   const [loading, setLoading] = React.useState(true);
+
+  // Apply algorithm to products
+  useEffect(() => {
+    if (products.length > 0) {
+      void recommendProducts(products).then(setAlgoProducts);
+    }
+  }, [products]);
+
   const CATEGORY_KEYS = React.useMemo(
     () => new Set(['merch', 'digital', 'services', 'promos', 'events', 'lifestyle']),
     []
@@ -36,24 +70,106 @@ export default function MarketplaceScreen() {
   const { setAccentColor } = useAccent();
   const { currentPlan } = useSubscription();
 
+  // Animation values
+  const headerAnim = useRef(new Animated.Value(0)).current;
+  const heroAnim = useRef(new Animated.Value(0)).current;
+  const tabsAnim = useRef(new Animated.Value(0)).current;
+  const productsAnim = useRef(new Animated.Value(0)).current;
+  const fabAnim = useRef(new Animated.Value(0)).current;
+  const fabRotateAnim = useRef(new Animated.Value(0)).current;
+  const fabPulseAnim = useRef(new Animated.Value(1)).current;
+
+  // Floating particles
+  const particles = useRef(
+    Array.from({ length: 12 }, () => ({
+      x: new Animated.Value(Math.random() * 100),
+      y: new Animated.Value(Math.random() * 100),
+      opacity: new Animated.Value(0),
+      scale: new Animated.Value(0.3 + Math.random() * 0.7),
+    }))
+  ).current;
+
+  // Ambient orbs
+  const orbAnim1 = useRef(new Animated.Value(0)).current;
+  const orbAnim2 = useRef(new Animated.Value(0)).current;
+
   React.useEffect(() => {
     setAccentColor('#e50914');
   }, [setAccentColor]);
 
   const categories = [
-    { key: 'merch', label: '🎬 Movies & Fan Merch' },
-    { key: 'digital', label: '🎨 Digital Creatives' },
-    { key: 'services', label: '🎥 Film Services' },
-    { key: 'promos', label: '📣 Promotions & Ads' },
-    { key: 'events', label: '🎟️ Events & Experiences' },
-    { key: 'lifestyle', label: '🛍️ Lifestyle' },
+    { key: 'merch', label: 'Movies & Merch', icon: 'film-outline' },
+    { key: 'digital', label: 'Digital', icon: 'color-palette-outline' },
+    { key: 'services', label: 'Services', icon: 'videocam-outline' },
+    { key: 'promos', label: 'Promos', icon: 'megaphone-outline' },
+    { key: 'events', label: 'Events', icon: 'ticket-outline' },
+    { key: 'lifestyle', label: 'Lifestyle', icon: 'bag-outline' },
   ];
 
   const monetizationHighlights = [
     { icon: 'sparkles', label: 'Top sellers earn KSh 500k+/mo', color: '#FFD166' },
     { icon: 'flash', label: 'Instant payouts weekly', color: '#4ADE80' },
-    { icon: 'shield-checkmark', label: 'Safer checkout & dispute support', color: '#93C5FD' },
+    { icon: 'shield-checkmark', label: 'Safer checkout & support', color: '#93C5FD' },
   ];
+
+  // Start entrance animations
+  useEffect(() => {
+    Animated.stagger(100, [
+      Animated.spring(headerAnim, { toValue: 1, tension: 50, friction: 8, useNativeDriver: true }),
+      Animated.spring(heroAnim, { toValue: 1, tension: 50, friction: 8, useNativeDriver: true }),
+      Animated.spring(tabsAnim, { toValue: 1, tension: 50, friction: 8, useNativeDriver: true }),
+      Animated.spring(productsAnim, { toValue: 1, tension: 50, friction: 8, useNativeDriver: true }),
+      Animated.spring(fabAnim, { toValue: 1, tension: 60, friction: 7, useNativeDriver: true }),
+    ]).start();
+
+    // Floating particles animation
+    particles.forEach((particle, i) => {
+      const animateParticle = () => {
+        particle.y.setValue(110);
+        particle.opacity.setValue(0);
+        particle.x.setValue(5 + Math.random() * 90);
+
+        Animated.parallel([
+          Animated.timing(particle.y, {
+            toValue: -10,
+            duration: 10000 + Math.random() * 5000,
+            easing: Easing.linear,
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.timing(particle.opacity, { toValue: 0.6, duration: 2000, useNativeDriver: true }),
+            Animated.delay(5000),
+            Animated.timing(particle.opacity, { toValue: 0, duration: 3000, useNativeDriver: true }),
+          ]),
+        ]).start(() => animateParticle());
+      };
+
+      setTimeout(animateParticle, i * 800);
+    });
+
+    // FAB pulse
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(fabPulseAnim, { toValue: 1.1, duration: 1500, useNativeDriver: true }),
+        Animated.timing(fabPulseAnim, { toValue: 1, duration: 1500, useNativeDriver: true }),
+      ])
+    ).start();
+
+    // Ambient orbs
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(orbAnim1, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(orbAnim1, { toValue: 0, duration: 4000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    ).start();
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(orbAnim2, { toValue: 1, duration: 5000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(orbAnim2, { toValue: 0, duration: 5000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
 
   React.useEffect(() => {
     const fetchProducts = async () => {
@@ -113,10 +229,8 @@ export default function MarketplaceScreen() {
     [messagingBusy, router]
   );
 
-  // Filter out products without an id and narrow types for TS
-  const validProducts = products.filter((p): p is APIProduct & { id: string } => !!p.id);
+  const validProducts = algoProducts.filter((p): p is APIProduct & { id: string } => !!p.id);
 
-  // Group products by category (assume product.category exists)
   const grouped = categories.reduce((acc, cat) => {
     acc[cat.key] = validProducts.filter(p => (p.categoryKey || p.category) === cat.key);
     return acc;
@@ -141,7 +255,6 @@ export default function MarketplaceScreen() {
     return null;
   };
 
-  // Featured products (first 3 in active category)
   const nowMs = Date.now();
   const activeCategoryProducts = grouped[activeCategory] || [];
   const promotedActive = activeCategoryProducts
@@ -154,110 +267,142 @@ export default function MarketplaceScreen() {
 
   const promotedIds = new Set(promotedActive.map((p: any) => p.id));
   const nonPromoted = activeCategoryProducts.filter((p: any) => !promotedIds.has(p.id));
-  const featured = [...promotedActive, ...nonPromoted].slice(0, 3);
+  const featured = [...promotedActive, ...nonPromoted].slice(0, 4);
+
+  const handleFabPress = useCallback(() => {
+    Animated.parallel([
+      Animated.spring(fabPulseAnim, { toValue: 0.9, tension: 200, friction: 10, useNativeDriver: true }),
+      Animated.timing(fabRotateAnim, { toValue: fabExpanded ? 0 : 1, duration: 200, useNativeDriver: true }),
+    ]).start(() => {
+      Animated.spring(fabPulseAnim, { toValue: 1, tension: 100, friction: 8, useNativeDriver: true }).start();
+      setFabExpanded(!fabExpanded);
+    });
+  }, [fabExpanded]);
 
   return (
     <ScreenWrapper>
       <StatusBar barStyle="light-content" backgroundColor="#0E0E0E" />
       <LinearGradient
-        colors={['#e50914', '#150a13', '#05060f'] as const}
+        colors={['#e50914', '#150a13', '#05060f']}
         start={[0, 0]}
         end={[1, 1]}
         style={styles.gradient}
       >
-        <LinearGradient
-          colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)'] as const}
-          start={{ x: 0.1, y: 0 }}
-          end={{ x: 0.9, y: 1 }}
-          style={styles.bgOrbPrimary}
-        />
-        <LinearGradient
-          colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)'] as const}
-          start={{ x: 0.8, y: 0 }}
-          end={{ x: 0.2, y: 1 }}
-          style={styles.bgOrbSecondary}
-        />
+        {/* Animated ambient orbs */}
+        <Animated.View
+          style={[
+            styles.bgOrbPrimary,
+            {
+              transform: [
+                { translateY: orbAnim1.interpolate({ inputRange: [0, 1], outputRange: [0, 30] }) },
+                { translateX: orbAnim1.interpolate({ inputRange: [0, 1], outputRange: [0, -20] }) },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(125,216,255,0.25)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.1, y: 0 }}
+            end={{ x: 0.9, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </Animated.View>
+        <Animated.View
+          style={[
+            styles.bgOrbSecondary,
+            {
+              transform: [
+                { translateY: orbAnim2.interpolate({ inputRange: [0, 1], outputRange: [0, -25] }) },
+                { translateX: orbAnim2.interpolate({ inputRange: [0, 1], outputRange: [0, 15] }) },
+              ],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={['rgba(229,9,20,0.2)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.8, y: 0 }}
+            end={{ x: 0.2, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </Animated.View>
+
+        {/* Floating particles */}
+        {particles.map((particle, i) => (
+          <Animated.View
+            key={i}
+            pointerEvents="none"
+            style={[
+              styles.floatingParticle,
+              {
+                backgroundColor: i % 3 === 0 ? '#e50914' : i % 3 === 1 ? '#7dd8ff' : '#ffd700',
+                opacity: particle.opacity,
+                transform: [
+                  { translateX: particle.x.interpolate({ inputRange: [0, 100], outputRange: [0, screenWidth] }) },
+                  { translateY: particle.y.interpolate({ inputRange: [0, 100], outputRange: [0, SCREEN_HEIGHT] }) },
+                  { scale: particle.scale },
+                ],
+              },
+            ]}
+          />
+        ))}
+
         <View style={styles.container}>
-          {/* Header (glassy hero) */}
-          <View style={styles.headerWrap}>
-            <LinearGradient
-              colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)'] as const}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.headerGlow}
-            />
-            <View style={styles.headerBar}>
-              <View style={styles.titleRow}>
-                <View style={styles.accentDot} />
-                <View>
-                  <Text style={styles.headerEyebrow}>Fan Marketplace</Text>
-                <Text style={styles.headerGreeting}>Hey, {activeProfileName}</Text>
-                <Text style={styles.headerText}>Collectibles & Creators</Text>
-                </View>
+          {/* Liquid Glass Header */}
+          <Animated.View
+            style={[
+              styles.headerWrap,
+              { marginTop: headerTopMargin },
+              {
+                opacity: headerAnim,
+                transform: [
+                  { translateY: headerAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) },
+                ],
+              },
+            ]}
+          >
+            {Platform.OS === 'ios' ? (
+              <BlurView intensity={40} tint="dark" style={styles.headerBlur}>
+                <HeaderContent
+                  isCompactLayout={isCompactLayout}
+                  activeProfileName={activeProfileName}
+                  cart={cart}
+                  router={router}
+                  showPlaceholders={showPlaceholders}
+                  validProducts={validProducts}
+                  categories={categories}
+                />
+              </BlurView>
+            ) : (
+              <View style={styles.headerAndroid}>
+                <HeaderContent
+                  isCompactLayout={isCompactLayout}
+                  activeProfileName={activeProfileName}
+                  cart={cart}
+                  router={router}
+                  showPlaceholders={showPlaceholders}
+                  validProducts={validProducts}
+                  categories={categories}
+                />
               </View>
+            )}
 
-              <View style={styles.headerIcons}>
-                <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/marketplace/cart')}>
-                  <LinearGradient
-                    colors={['#e50914', '#b20710'] as const}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.iconBg}
-                  >
-                    <View>
-                      <Ionicons name="cart" size={22} color="#ffffff" />
-                      {cart.count > 0 && (
-                        <View style={styles.cartBadge}>
-                          <Text style={styles.cartBadgeText}>{cart.count > 9 ? '9+' : String(cart.count)}</Text>
-                        </View>
-                      )}
-                    </View>
-                  </LinearGradient>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/search')}>
-                  <LinearGradient
-                    colors={['#e50914', '#b20710'] as const}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.iconBg}
-                  >
-                    <Ionicons name="search" size={22} color="#ffffff" style={styles.iconMargin} />
-                  </LinearGradient>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/profile')}>
-                  <LinearGradient
-                    colors={['#e50914', '#b20710'] as const}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.iconBg}
-                  >
-                    <Ionicons name="person-circle" size={24} color="#ffffff" />
-                  </LinearGradient>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            <View style={styles.headerMetaRow}>
-              <View style={styles.metaPill}>
-                <Ionicons name="storefront" size={14} color="#fff" />
-                {showPlaceholders ? <View style={styles.metaSkeletonBar} /> : <Text style={styles.metaText}>{validProducts.length} items</Text>}
-              </View>
-              <View style={[styles.metaPill, styles.metaPillSoft]}>
-                <Ionicons name="grid-outline" size={14} color="#fff" />
-                <Text style={styles.metaText}>{categories.length} categories</Text>
-              </View>
-              <View style={[styles.metaPill, styles.metaPillOutline]}>
-                <Ionicons name="shield-checkmark" size={14} color="#fff" />
-                <Text style={styles.metaText}>Safe & Moderated</Text>
-              </View>
-            </View>
-          </View>
+            {/* Glass border highlights */}
+            <View style={styles.headerBorderTop} pointerEvents="none" />
+            <View style={styles.headerBorderBottom} pointerEvents="none" />
+          </Animated.View>
 
           {currentPlan === 'free' && (
-            <View style={styles.upgradeBanner}>
+            <Animated.View
+              style={[
+                styles.upgradeBanner,
+                {
+                  opacity: heroAnim,
+                  transform: [{ translateY: heroAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+                },
+              ]}
+            >
               <LinearGradient
-                colors={['rgba(229,9,20,0.9)', 'rgba(185,7,16,0.9)'] as const}
+                colors={['rgba(229,9,20,0.9)', 'rgba(185,7,16,0.9)']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.upgradeBannerGradient}
@@ -267,7 +412,7 @@ export default function MarketplaceScreen() {
                   <View style={styles.upgradeBannerText}>
                     <Text style={styles.upgradeBannerTitle}>Upgrade to Plus</Text>
                     <Text style={styles.upgradeBannerSubtitle}>
-                      Unlock unlimited profiles, premium features & more
+                      Unlock unlimited profiles & premium features
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -278,26 +423,51 @@ export default function MarketplaceScreen() {
                   </TouchableOpacity>
                 </View>
               </LinearGradient>
-            </View>
+            </Animated.View>
           )}
-          <ScrollView contentContainerStyle={styles.scrollViewContent}>
-            <View style={styles.heroPromo}>
+
+          <ScrollView contentContainerStyle={styles.scrollViewContent} showsVerticalScrollIndicator={false}>
+            {/* Hero Promo Section */}
+            <Animated.View
+              style={[
+                styles.heroPromo,
+                {
+                  opacity: heroAnim,
+                  transform: [{ translateY: heroAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+                },
+              ]}
+            >
+              <LinearGradient
+                colors={['rgba(229,9,20,0.15)', 'rgba(0,0,0,0.4)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={StyleSheet.absoluteFillObject}
+              />
               <View style={styles.heroCopy}>
-                <Text style={styles.heroEyebrow}>Earn on MovieFlix</Text>
-                <Text style={styles.heroTitle}>Sell merch, drops, and services.</Text>
+                <View style={styles.heroEyebrowRow}>
+                  <View style={styles.heroEyebrowDot} />
+                  <Text style={styles.heroEyebrow}>Earn on MovieFlix</Text>
+                </View>
+                <Text style={styles.heroTitle}>Sell merch, drops & services</Text>
                 <Text style={styles.heroSubtitle}>Launch in minutes. Keep more of what you earn.</Text>
                 <View style={styles.heroBadges}>
                   {monetizationHighlights.map((h) => (
-                    <View key={h.label} style={[styles.heroBadge, { borderColor: `${h.color}55`, backgroundColor: `${h.color}11` }] }>
-                      <Ionicons name={h.icon as any} size={16} color={h.color} />
+                    <View key={h.label} style={[styles.heroBadge, { borderColor: `${h.color}40`, backgroundColor: `${h.color}15` }]}>
+                      <Ionicons name={h.icon as any} size={14} color={h.color} />
                       <Text style={[styles.heroBadgeText, { color: h.color }]}>{h.label}</Text>
                     </View>
                   ))}
                 </View>
                 <View style={styles.heroCtas}>
                   <TouchableOpacity style={styles.sellCta} onPress={() => router.push('/marketplace/sell')}>
+                    <LinearGradient
+                      colors={['#e50914', '#b20710']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={StyleSheet.absoluteFillObject}
+                    />
                     <Text style={styles.sellCtaText}>Start selling</Text>
-                    <Ionicons name="arrow-forward" size={18} color="#fff" />
+                    <Ionicons name="arrow-forward" size={16} color="#fff" />
                   </TouchableOpacity>
                   <TouchableOpacity style={styles.promoteCta} onPress={() => router.push('/marketplace/promote')}>
                     <Text style={styles.promoteCtaText}>Promote a drop</Text>
@@ -305,172 +475,360 @@ export default function MarketplaceScreen() {
                 </View>
               </View>
               <View style={styles.heroStats}>
-                <View style={styles.heroStatCard}>
-                  <Text style={styles.heroStatNumber}>2.4k</Text>
-                  <Text style={styles.heroStatLabel}>Active sellers</Text>
-                </View>
-                <View style={styles.heroStatCard}>
-                  <Text style={styles.heroStatNumber}>{formatKsh(120_000_000, { compact: true })}</Text>
-                  <Text style={styles.heroStatLabel}>GMV last 30d</Text>
-                </View>
-                <View style={styles.heroStatCard}>
-                  <Text style={styles.heroStatNumber}>4.9★</Text>
-                  <Text style={styles.heroStatLabel}>Buyer trust</Text>
-                </View>
+                {[
+                  { value: '2.4k', label: 'Active sellers' },
+                  { value: formatKsh(120_000_000, { compact: true }), label: 'GMV last 30d' },
+                  { value: '4.9★', label: 'Buyer trust' },
+                ].map((stat, idx) => (
+                  <View key={stat.label} style={styles.heroStatCard}>
+                    <LinearGradient
+                      colors={['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.02)']}
+                      style={StyleSheet.absoluteFillObject}
+                    />
+                    <Text style={styles.heroStatNumber}>{stat.value}</Text>
+                    <Text style={styles.heroStatLabel}>{stat.label}</Text>
+                  </View>
+                ))}
               </View>
-            </View>
-            <View style={styles.tabsRow}>
-              {categories.map(cat => (
-                <TouchableOpacity
-                  key={cat.key}
-                  style={[styles.tab, activeCategory === cat.key && styles.tabActive]}
-                  onPress={() => setActiveCategory(cat.key)}
-                >
-                  <Text style={[styles.tabText, activeCategory === cat.key && styles.tabTextActive]}>{cat.label}</Text>
+
+              {/* Glass border */}
+              <View style={styles.heroBorder} pointerEvents="none" />
+            </Animated.View>
+
+            {/* Category Tabs */}
+            <Animated.View
+              style={[
+                styles.tabsContainer,
+                {
+                  opacity: tabsAnim,
+                  transform: [{ translateY: tabsAnim.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }],
+                },
+              ]}
+            >
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.tabsRow}
+              >
+                {categories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat.key}
+                    style={[styles.tab, activeCategory === cat.key && styles.tabActive]}
+                    onPress={() => setActiveCategory(cat.key)}
+                    activeOpacity={0.8}
+                  >
+                    {activeCategory === cat.key && (
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={StyleSheet.absoluteFillObject}
+                      />
+                    )}
+                    <Ionicons
+                      name={cat.icon as any}
+                      size={16}
+                      color={activeCategory === cat.key ? '#fff' : 'rgba(255,255,255,0.7)'}
+                    />
+                    <Text style={[styles.tabText, activeCategory === cat.key && styles.tabTextActive]}>
+                      {cat.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </Animated.View>
+
+            {/* Featured Section */}
+            <Animated.View
+              style={[
+                styles.sectionBlock,
+                {
+                  opacity: productsAnim,
+                  transform: [{ translateY: productsAnim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+                },
+              ]}
+            >
+              <View style={styles.sectionHeaderRow}>
+                <View style={styles.sectionHeaderLeft}>
+                  <View style={styles.sectionAccent} />
+                  <View>
+                    <Text style={styles.sectionHeader}>Featured</Text>
+                    <Text style={styles.sectionSub}>Curated drops for high intent buyers</Text>
+                  </View>
+                </View>
+                <TouchableOpacity style={styles.seeAllBtn}>
+                  <Text style={styles.seeAllText}>See all</Text>
+                  <Ionicons name="chevron-forward" size={14} color="#e50914" />
                 </TouchableOpacity>
-              ))}
-            </View>
-            <View style={styles.sectionBlock}>
-              <Text style={styles.sectionHeader}>Featured</Text>
-              <Text style={styles.sectionSub}>Limited drops curated for high intent buyers.</Text>
+              </View>
               <View style={styles.productsGrid}>
                 {showPlaceholders
                   ? Array.from({ length: 4 }).map((_, idx) => (
-                      <View key={`featured-skel-${idx}`} style={styles.skeletonCard}>
-                        <View style={styles.skeletonImage} />
-                        <View style={styles.skeletonInfo}>
-                          <View style={styles.skeletonLine} />
-                          <View style={[styles.skeletonLine, styles.skeletonLineShort]} />
-                          <View style={styles.skeletonSellerRow}>
-                            <View style={styles.skeletonAvatar} />
-                            <View style={styles.skeletonSellerCopy}>
-                              <View style={[styles.skeletonLine, styles.skeletonLineThin]} />
-                              <View style={[styles.skeletonLine, styles.skeletonLineThin, styles.skeletonLineShort]} />
-                            </View>
-                          </View>
-                        </View>
-                      </View>
-                    ))
-                  : featured.map((product) => (
-                      <ProductCard
-                        key={product.id}
-                        product={product as any}
-                        onPress={() => {
-                          if ((product as any)?.id && (product as any)?.promoted) {
-                            const placement = ((product as any).promotionPlacement || 'feed') as any;
-                            void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => {});
-                          }
-                          router.push((`/marketplace/${product.id}`) as any);
-                        }}
-                        onMessage={() => handleMessageSeller(product as any)}
-                      />
-                    ))}
+                    <SkeletonCard key={`featured-skel-${idx}`} />
+                  ))
+                  : featured.map((product, idx) => (
+                    <ProductCard
+                      key={product.id}
+                      product={product as any}
+                      index={idx}
+                      onPress={() => {
+                        if ((product as any)?.id && (product as any)?.promoted) {
+                          const placement = ((product as any).promotionPlacement || 'feed') as any;
+                          void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => { });
+                        }
+                        router.push((`/marketplace/${product.id}`) as any);
+                      }}
+                      onMessage={() => handleMessageSeller(product as any)}
+                    />
+                  ))}
               </View>
-            </View>
-            <View style={styles.sectionBlock}>
-              <Text style={styles.sectionHeader}>{categories.find(c => c.key === activeCategory)?.label}</Text>
-              <Text style={styles.sectionSub}>Browse sellers, book services, or buy merch instantly.</Text>
+            </Animated.View>
+
+            {/* Category Section */}
+            <Animated.View
+              style={[
+                styles.sectionBlock,
+                {
+                  opacity: productsAnim,
+                  transform: [{ translateY: productsAnim.interpolate({ inputRange: [0, 1], outputRange: [40, 0] }) }],
+                },
+              ]}
+            >
+              <View style={styles.sectionHeaderRow}>
+                <View style={styles.sectionHeaderLeft}>
+                  <View style={[styles.sectionAccent, { backgroundColor: '#7dd8ff' }]} />
+                  <View>
+                    <Text style={styles.sectionHeader}>
+                      {categories.find(c => c.key === activeCategory)?.label}
+                    </Text>
+                    <Text style={styles.sectionSub}>Browse sellers, book services, or buy merch</Text>
+                  </View>
+                </View>
+              </View>
               <View style={styles.productsGrid}>
                 {showPlaceholders
                   ? Array.from({ length: 6 }).map((_, idx) => (
-                      <View key={`cat-skel-${idx}`} style={styles.skeletonCard}>
-                        <View style={styles.skeletonImage} />
-                        <View style={styles.skeletonInfo}>
-                          <View style={styles.skeletonLine} />
-                          <View style={[styles.skeletonLine, styles.skeletonLineShort]} />
-                        </View>
-                      </View>
-                    ))
-                  : grouped[activeCategory]?.map((product) => (
-                      <ProductCard
-                        key={product.id}
-                        product={product as any}
-                        onPress={() => {
-                          if ((product as any)?.id && (product as any)?.promoted) {
-                            const placement = ((product as any).promotionPlacement || 'feed') as any;
-                            void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => {});
-                          }
-                          router.push((`/marketplace/${product.id}`) as any);
-                        }}
-                        onMessage={() => handleMessageSeller(product as any)}
-                      />
-                    ))}
+                    <SkeletonCard key={`cat-skel-${idx}`} />
+                  ))
+                  : grouped[activeCategory]?.map((product, idx) => (
+                    <ProductCard
+                      key={product.id}
+                      product={product as any}
+                      index={idx}
+                      onPress={() => {
+                        if ((product as any)?.id && (product as any)?.promoted) {
+                          const placement = ((product as any).promotionPlacement || 'feed') as any;
+                          void trackPromotionClick({ productId: String((product as any).id), placement }).catch(() => { });
+                        }
+                        router.push((`/marketplace/${product.id}`) as any);
+                      }}
+                      onMessage={() => handleMessageSeller(product as any)}
+                    />
+                  ))}
                 {!loading && grouped[activeCategory]?.length === 0 && (
-                  <Text style={styles.emptyText}>No products yet in this category.</Text>
+                  <View style={styles.emptyState}>
+                    <Ionicons name="cube-outline" size={48} color="rgba(255,255,255,0.3)" />
+                    <Text style={styles.emptyText}>No products yet in this category</Text>
+                  </View>
                 )}
               </View>
-            </View>
+            </Animated.View>
+
+            {/* Rules Section */}
             <View style={styles.rulesSection}>
-              <Text style={styles.rulesHeader}>Marketplace Rules & Safety</Text>
-              <Text style={styles.rulesText}>❌ No pirated movies/series, streaming account sharing, adult/drugs/weapons, scams, or fake giveaways. Only fan-made/original designs allowed. Sellers must prove rights for studio logos. All listings are moderated.</Text>
+              <LinearGradient
+                colors={['rgba(255,255,255,0.05)', 'rgba(255,255,255,0.02)']}
+                style={StyleSheet.absoluteFillObject}
+              />
+              <View style={styles.rulesHeader}>
+                <Ionicons name="shield-checkmark" size={20} color="#4ade80" />
+                <Text style={styles.rulesTitle}>Marketplace Rules & Safety</Text>
+              </View>
+              <Text style={styles.rulesText}>
+                No pirated content, account sharing, adult/drugs/weapons, scams, or fake giveaways. Only fan-made/original designs allowed. All listings are moderated.
+              </Text>
             </View>
           </ScrollView>
-          <TouchableOpacity
-            style={styles.fab}
-            onPress={() => setFabExpanded(!fabExpanded)}
-            activeOpacity={0.9}
-          >
-            <LinearGradient
-              colors={['#ff8a00', '#e50914'] as const}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.fabGradient}
-            >
-              <Ionicons name="add" size={24} color="#FFFFFF" />
-            </LinearGradient>
-          </TouchableOpacity>
-          {fabExpanded && (() => {
-            const MAIN_FAB_BOTTOM = 120;
-            const SUB_FAB_SIZE = 64;
-            const SUB_FAB_GAP = 12;
-            const firstOffset = SUB_FAB_SIZE + SUB_FAB_GAP;
-            const spacing = SUB_FAB_SIZE + SUB_FAB_GAP;
-            const items = [
-              {
-                key: 'sell',
-                icon: 'pricetag-outline',
-                colors: ['#ff8a00', '#ff416c'] as const,
-                onPress: () => router.push('/marketplace/sell'),
-              },
-              {
-                key: 'promote',
-                icon: 'megaphone-outline',
-                colors: ['#43cea2', '#185a9d'] as const,
-                onPress: () => router.push('/marketplace/promote'),
-              },
-            ];
 
-            return (
-              <>
-                {items.map((item, idx) => {
-                  const bottom = MAIN_FAB_BOTTOM + firstOffset + idx * spacing;
-                  return (
-                    <TouchableOpacity
-                      key={item.key}
-                      style={[styles.subFab, { bottom }]}
-                      onPress={() => {
-                        setFabExpanded(false);
-                        item.onPress();
-                      }}
-                      activeOpacity={0.9}
-                    >
-                      <LinearGradient
-                        colors={item.colors}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.subFabGradient}
-                      >
-                        <Ionicons name={item.icon as any} size={20} color="#FFFFFF" />
-                      </LinearGradient>
-                    </TouchableOpacity>
-                  );
-                })}
-              </>
-            );
-          })()}
+          {/* Animated FAB */}
+          <Animated.View
+            style={[
+              styles.fabContainer,
+              {
+                transform: [
+                  { scale: Animated.multiply(fabAnim, fabPulseAnim) },
+                  { rotate: fabRotateAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '135deg'] }) },
+                ],
+              },
+            ]}
+          >
+            <TouchableOpacity style={styles.fab} onPress={handleFabPress} activeOpacity={1}>
+              <LinearGradient
+                colors={['#ff8a00', '#e50914']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.fabGradient}
+              >
+                <Ionicons name="add" size={28} color="#fff" />
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
+
+          {/* Sub FABs */}
+          {fabExpanded && (
+            <>
+              <TouchableOpacity
+                style={[styles.subFab, { bottom: 190 }]}
+                onPress={() => {
+                  setFabExpanded(false);
+                  router.push('/marketplace/sell');
+                }}
+                activeOpacity={0.9}
+              >
+                <LinearGradient colors={['#ff8a00', '#ff416c']} style={styles.subFabGradient}>
+                  <Ionicons name="pricetag-outline" size={20} color="#fff" />
+                </LinearGradient>
+                <View style={styles.subFabLabel}>
+                  <Text style={styles.subFabLabelText}>Sell</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.subFab, { bottom: 260 }]}
+                onPress={() => {
+                  setFabExpanded(false);
+                  router.push('/marketplace/promote');
+                }}
+                activeOpacity={0.9}
+              >
+                <LinearGradient colors={['#43cea2', '#185a9d']} style={styles.subFabGradient}>
+                  <Ionicons name="megaphone-outline" size={20} color="#fff" />
+                </LinearGradient>
+                <View style={styles.subFabLabel}>
+                  <Text style={styles.subFabLabelText}>Promote</Text>
+                </View>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* Flixy Assistant - Surprise helper in marketplace! */}
+          <FlixyAssistant screen="marketplace" position="bottom-left" />
         </View>
       </LinearGradient>
     </ScreenWrapper>
+  );
+}
+
+// Header Content Component
+function HeaderContent({
+  isCompactLayout,
+  activeProfileName,
+  cart,
+  router,
+  showPlaceholders,
+  validProducts,
+  categories,
+}: any) {
+  return (
+    <>
+      <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
+        <View style={styles.titleRow}>
+          <View style={styles.accentDot} />
+          <View>
+            <Text style={styles.headerEyebrow}>Fan Marketplace</Text>
+            <Text style={[styles.headerGreeting, isCompactLayout && styles.headerGreetingCompact]}>
+              Hey, {activeProfileName}
+            </Text>
+            <Text style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}>
+              Collectibles & Creators
+            </Text>
+          </View>
+        </View>
+
+        <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/marketplace/cart')}>
+            <LinearGradient colors={['#e50914', '#b20710']} style={styles.iconBg}>
+              <Ionicons name="cart" size={20} color="#fff" />
+              {cart.count > 0 && (
+                <View style={styles.cartBadge}>
+                  <Text style={styles.cartBadgeText}>{cart.count > 9 ? '9+' : String(cart.count)}</Text>
+                </View>
+              )}
+            </LinearGradient>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/search')}>
+            <LinearGradient colors={['#e50914', '#b20710']} style={styles.iconBg}>
+              <Ionicons name="search" size={20} color="#fff" />
+            </LinearGradient>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => router.push('/profile')}>
+            <LinearGradient colors={['#e50914', '#b20710']} style={styles.iconBg}>
+              <Ionicons name="person-circle" size={22} color="#fff" />
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.headerMetaRow}>
+        <View style={styles.metaPill}>
+          <Ionicons name="storefront" size={12} color="#fff" />
+          {showPlaceholders ? (
+            <View style={styles.metaSkeletonBar} />
+          ) : (
+            <Text style={styles.metaText}>{validProducts.length} items</Text>
+          )}
+        </View>
+        <View style={[styles.metaPill, styles.metaPillSoft]}>
+          <Ionicons name="grid-outline" size={12} color="#fff" />
+          <Text style={styles.metaText}>{categories.length} categories</Text>
+        </View>
+        <View style={[styles.metaPill, styles.metaPillOutline]}>
+          <Ionicons name="shield-checkmark" size={12} color="#4ade80" />
+          <Text style={styles.metaText}>Verified</Text>
+        </View>
+      </View>
+    </>
+  );
+}
+
+// Skeleton Card Component
+function SkeletonCard() {
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        Animated.timing(shimmerAnim, { toValue: 0, duration: 1000, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+
+  return (
+    <View style={styles.skeletonCard}>
+      <Animated.View
+        style={[
+          styles.skeletonImage,
+          {
+            opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.6] }),
+          },
+        ]}
+      />
+      <View style={styles.skeletonInfo}>
+        <Animated.View
+          style={[
+            styles.skeletonLine,
+            { opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.5] }) },
+          ]}
+        />
+        <Animated.View
+          style={[
+            styles.skeletonLine,
+            styles.skeletonLineShort,
+            { opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.5] }) },
+          ]}
+        />
+      </View>
+    </View>
   );
 }
 
@@ -480,58 +838,78 @@ const styles = StyleSheet.create({
   },
   bgOrbPrimary: {
     position: 'absolute',
-    width: 380,
-    height: 380,
-    borderRadius: 190,
-    top: -40,
-    left: -60,
-    opacity: 0.6,
+    width: 400,
+    height: 400,
+    borderRadius: 200,
+    top: -80,
+    left: -100,
+    overflow: 'hidden',
   },
   bgOrbSecondary: {
     position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    bottom: -80,
-    right: -40,
-    opacity: 0.55,
-  },
-
-  container: {
-    flex: 1,
-    paddingBottom: 0,
-  },
-  // Header glass hero
-  headerWrap: {
-    marginHorizontal: 12,
-    marginTop: Platform.OS === 'ios' ? 64 : 48,
-    marginBottom: 12,
-    borderRadius: 18,
+    width: 350,
+    height: 350,
+    borderRadius: 175,
+    bottom: 50,
+    right: -80,
     overflow: 'hidden',
   },
-  headerGlow: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.7,
+  floatingParticle: {
+    position: 'absolute',
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  container: {
+    flex: 1,
+  },
+  headerWrap: {
+    marginHorizontal: 12,
+    marginBottom: 12,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  headerBlur: {
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  headerAndroid: {
+    backgroundColor: 'rgba(20,20,25,0.85)',
+    borderRadius: 20,
+  },
+  headerBorderTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  headerBorderBottom: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
   headerBar: {
     paddingVertical: 14,
     paddingHorizontal: 14,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.14,
-    shadowRadius: 20,
+  },
+  headerBarCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    rowGap: 10,
   },
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    flex: 1,
   },
   accentDot: {
     width: 12,
@@ -539,311 +917,150 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: '#e50914',
     shadowColor: '#e50914',
-    shadowOpacity: 0.6,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.8,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
   },
   headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 0.6,
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
   headerGreeting: {
     color: 'rgba(255,255,255,0.85)',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
+  headerGreetingCompact: {
+    fontSize: 12,
+  },
   headerText: {
-    color: '#FFFFFF',
-    fontSize: 22,
+    color: '#fff',
+    fontSize: 20,
     fontWeight: '800',
     letterSpacing: 0.3,
+  },
+  headerTextCompact: {
+    fontSize: 17,
   },
   headerIcons: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+  },
+  headerIconsCompact: {
+    justifyContent: 'flex-start',
   },
   iconBtn: {
-    marginLeft: 8,
     borderRadius: 12,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.28,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
   },
   iconBg: {
     padding: 10,
     borderRadius: 12,
   },
-  iconMargin: {
-    marginRight: 4,
-  },
   cartBadge: {
     position: 'absolute',
-    top: -6,
-    right: -8,
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 5,
-    borderRadius: 9,
+    top: -4,
+    right: -4,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
     backgroundColor: '#ff8a00',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(0,0,0,0.35)',
   },
   cartBadgeText: {
     color: '#fff',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '800',
   },
   headerMetaRow: {
     flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 10,
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
+    flexWrap: 'wrap',
   },
   metaPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   metaPillSoft: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   metaPillOutline: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'rgba(74,222,128,0.3)',
   },
   metaText: {
     color: '#fff',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   metaSkeletonBar: {
-    width: 58,
+    width: 40,
     height: 10,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderRadius: 5,
+    backgroundColor: 'rgba(255,255,255,0.2)',
   },
   scrollViewContent: {
     paddingBottom: 180,
-    paddingHorizontal: 16,
-    paddingTop: 12,
-  },
-  tabsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 6,
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  tab: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-  },
-  tabActive: {
-    backgroundColor: '#e50914',
-    borderColor: '#e50914',
-  },
-  tabText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  tabTextActive: {
-    color: '#fff',
-  },
-  sectionBlock: {
-    marginBottom: 22,
-    paddingVertical: 4,
-    paddingHorizontal: 2,
-  },
-  sectionHeader: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-  },
-  sectionSub: {
-    color: 'rgba(255,255,255,0.7)',
-    marginTop: 2,
-    marginBottom: 10,
-  },
-  emptyText: {
-    color: '#E6E6E6',
-    fontSize: 16,
-    textAlign: 'center',
-    marginVertical: 24,
-  },
-  rulesSection: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 24,
-    marginHorizontal: 16,
-  },
-  rulesHeader: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  rulesText: {
-    color: 'rgba(255,255,255,0.88)',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  fab: {
-    position: 'absolute',
-    width: 64,
-    height: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
-    right: 18,
-    bottom: 120,
-    backgroundColor: '#e50914',
-    borderRadius: 36,
-    borderWidth: 0,
-    borderColor: 'transparent',
-    elevation: 12,
-    shadowColor: '#e50914',
-    shadowOpacity: 0.36,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-  },
-  fabGradient: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  subFab: {
-    position: 'absolute',
-    width: 64,
-    height: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
-    right: 18,
-    backgroundColor: '#e50914',
-    borderRadius: 32,
-    elevation: 10,
-    shadowColor: '#e50914',
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-  },
-  subFabGradient: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000',
-  },
-  loadingText: {
-    color: '#E50914',
-    marginTop: 10,
-  },
-  productsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-around',
-  },
-  skeletonCard: {
-    width: '48%',
-    borderRadius: 8,
-    marginVertical: 8,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  skeletonImage: {
-    width: '100%',
-    height: 150,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-  },
-  skeletonInfo: {
-    padding: 10,
-    gap: 8,
-  },
-  skeletonLine: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-  },
-  skeletonLineThin: {
-    height: 10,
-  },
-  skeletonLineShort: {
-    width: '55%',
-  },
-  skeletonSellerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.06)',
-    gap: 8,
-  },
-  skeletonAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-  },
-  skeletonSellerCopy: {
-    flex: 1,
-    gap: 6,
+    paddingHorizontal: 12,
   },
   heroPromo: {
-    marginHorizontal: 12,
-    marginBottom: 18,
-    borderRadius: 18,
-    padding: 16,
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    marginBottom: 16,
+    borderRadius: 20,
+    padding: 18,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
+  },
+  heroBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
   },
   heroCopy: {
     gap: 8,
   },
+  heroEyebrowRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  heroEyebrowDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4ade80',
+  },
   heroEyebrow: {
     color: 'rgba(255,255,255,0.7)',
     fontWeight: '700',
-    letterSpacing: 0.6,
+    fontSize: 12,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
   heroTitle: {
     color: '#fff',
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: '900',
+    letterSpacing: -0.5,
   },
   heroSubtitle: {
-    color: 'rgba(255,255,255,0.75)',
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
   },
   heroBadges: {
     flexDirection: 'row',
@@ -856,60 +1073,59 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
     borderWidth: 1,
   },
   heroBadgeText: {
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 11,
   },
   heroCtas: {
     flexDirection: 'row',
     gap: 10,
-    marginTop: 12,
+    marginTop: 14,
   },
   sellCta: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 14,
-    backgroundColor: '#e50914',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    overflow: 'hidden',
   },
   sellCtaText: {
     color: '#fff',
     fontWeight: '800',
+    fontSize: 14,
   },
   promoteCta: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.2)',
     backgroundColor: 'rgba(255,255,255,0.05)',
   },
   promoteCtaText: {
     color: '#fff',
     fontWeight: '700',
+    fontSize: 14,
   },
   heroStats: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 14,
+    gap: 8,
+    marginTop: 16,
   },
   heroStatCard: {
     flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
     borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    marginHorizontal: 4,
   },
   heroStatNumber: {
     color: '#fff',
@@ -917,9 +1133,202 @@ const styles = StyleSheet.create({
     fontSize: 18,
   },
   heroStatLabel: {
-    color: 'rgba(255,255,255,0.65)',
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  tabsContainer: {
+    marginBottom: 16,
+  },
+  tabsRow: {
+    paddingHorizontal: 4,
+    gap: 8,
+  },
+  tab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    overflow: 'hidden',
+  },
+  tabActive: {
+    borderColor: '#e50914',
+  },
+  tabText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  sectionBlock: {
+    marginBottom: 24,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  sectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  sectionAccent: {
+    width: 4,
+    height: 36,
+    borderRadius: 2,
+    backgroundColor: '#e50914',
+  },
+  sectionHeader: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  sectionSub: {
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
     marginTop: 2,
+  },
+  seeAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(229,9,20,0.15)',
+  },
+  seeAllText: {
+    color: '#e50914',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  productsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  emptyState: {
+    width: '100%',
+    alignItems: 'center',
+    paddingVertical: 40,
+    gap: 12,
+  },
+  emptyText: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
+  },
+  rulesSection: {
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  rulesHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  rulesTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  rulesText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  fabContainer: {
+    position: 'absolute',
+    right: 18,
+    bottom: 120,
+  },
+  fab: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    overflow: 'hidden',
+    shadowColor: '#e50914',
+    shadowOpacity: 0.5,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  fabGradient: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  subFab: {
+    position: 'absolute',
+    right: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  subFabGradient: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
+  subFabLabel: {
+    marginLeft: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+  },
+  subFabLabelText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  skeletonCard: {
+    width: '48%',
+    borderRadius: 16,
+    marginVertical: 8,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonImage: {
+    width: '100%',
+    height: 160,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonInfo: {
+    padding: 12,
+    gap: 8,
+  },
+  skeletonLine: {
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  skeletonLineShort: {
+    width: '60%',
   },
   upgradeBanner: {
     marginHorizontal: 12,
@@ -928,7 +1337,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   upgradeBannerGradient: {
-    padding: 16,
+    padding: 14,
   },
   upgradeBannerContent: {
     flexDirection: 'row',
@@ -940,23 +1349,23 @@ const styles = StyleSheet.create({
   },
   upgradeBannerTitle: {
     color: '#fff',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
   },
   upgradeBannerSubtitle: {
     color: 'rgba(255,255,255,0.8)',
-    fontSize: 12,
+    fontSize: 11,
     marginTop: 2,
   },
   upgradeBannerButton: {
     backgroundColor: '#fff',
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 20,
   },
   upgradeBannerButtonText: {
     color: '#e50914',
     fontWeight: '700',
-    fontSize: 13,
+    fontSize: 12,
   },
 });

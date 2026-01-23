@@ -7,15 +7,60 @@ import {
 } from 'react-native-webrtc';
 import type { CallType } from './types';
 
+type IceServer = {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+};
+
+const DEFAULT_ICE_SERVERS: IceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+const readEnvString = (key: string): string => {
+  try {
+    const v = (typeof process !== 'undefined' && (process.env as any)?.[key]) || '';
+    return String(v ?? '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const safeParseIceServers = (raw: string): IceServer[] | null => {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return null;
+    const servers: IceServer[] = [];
+    for (const s of parsed) {
+      if (!s || typeof s !== 'object') continue;
+      const urls = (s as any).urls;
+      if (typeof urls !== 'string' && !Array.isArray(urls)) continue;
+      const out: IceServer = { urls };
+      if (typeof (s as any).username === 'string') out.username = (s as any).username;
+      if (typeof (s as any).credential === 'string') out.credential = (s as any).credential;
+      servers.push(out);
+    }
+    return servers.length ? servers : null;
+  } catch {
+    return null;
+  }
+};
+
+const getIceServers = (): IceServer[] => {
+  // Optional override for production: include TURN servers to support symmetric NAT / carrier-grade NAT.
+  // Expected value example:
+  // EXPO_PUBLIC_WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+  const env = readEnvString('EXPO_PUBLIC_WEBRTC_ICE_SERVERS');
+  const parsed = safeParseIceServers(env);
+  return parsed ?? DEFAULT_ICE_SERVERS;
+};
+
 const configuration = {
-  iceServers: [
-    {
-      urls: 'stun:stun.l.google.com:19302',
-    },
-    {
-      urls: 'stun:stun1.l.google.com:19302',
-    },
-  ],
+  iceServers: getIceServers() as any,
+  iceCandidatePoolSize: 4,
 };
 
 let peerConnection: RTCPeerConnection | null = null;
@@ -30,30 +75,73 @@ export const initializeWebRTC = async (callType: CallType) => {
   iceCandidateBuffer = [];
 
   const isFront = true;
-  const devices = await mediaDevices.enumerateDevices() as any[];
+  const devices = (await mediaDevices.enumerateDevices()) as any[];
 
-  const facing = isFront ? 'front' : 'environment';
-  const videoSourceId = devices.find((device: any) => device.kind === 'videoinput' && device.facing === facing);
+  const desiredFacing = isFront ? 'front' : 'environment';
   const facingMode = isFront ? 'user' : 'environment';
-  const constraints = {
+  const preferredVideoDevice = devices.find((device: any) => {
+    if (device?.kind !== 'videoinput') return false;
+    const deviceFacing = (device?.facing ?? device?.facingMode ?? '').toLowerCase();
+    if (deviceFacing === desiredFacing) return true;
+    const label = String(device?.label ?? '').toLowerCase();
+    if (isFront && label.includes('front')) return true;
+    if (!isFront && (label.includes('back') || label.includes('rear'))) return true;
+    return false;
+  });
+  const preferredSourceId: string | undefined =
+    preferredVideoDevice?.deviceId ?? preferredVideoDevice?.id ?? undefined;
+
+  const constraints: any = {
     audio: true,
-    video: callType === 'video' ? {
-      mandatory: {
-        minWidth: 500,
-        minHeight: 300,
-        minFrameRate: 30,
-      },
-      facingMode,
-      optional: videoSourceId ? [{ sourceId: videoSourceId }] : [],
-    } : false,
+    video:
+      callType === 'video'
+        ? {
+            // Prefer conservative defaults for low-end devices / poor networks.
+            width: { ideal: 480, max: 640 },
+            height: { ideal: 270, max: 360 },
+            frameRate: { ideal: 15, max: 20 },
+            facingMode,
+            optional: preferredSourceId ? [{ sourceId: preferredSourceId }] : [],
+          }
+        : false,
   };
 
-  const newStream = await mediaDevices.getUserMedia(constraints);
+  let newStream: any;
+  try {
+    newStream = await mediaDevices.getUserMedia(constraints);
+  } catch (err) {
+    if (callType !== 'video') throw err;
+    // Fallback: some devices reject "mandatory" constraints.
+    newStream = await mediaDevices.getUserMedia({ audio: true, video: { facingMode } } as any);
+  }
   localStream = newStream;
 
   newStream.getTracks().forEach((track: any) => {
     peerConnection?.addTrack(track, newStream);
   });
+
+  // Apply sender constraints (bitrate/fps caps) to avoid saturating weak networks.
+  try {
+    const pc: any = peerConnection;
+    const senders = typeof pc?.getSenders === 'function' ? pc.getSenders() : [];
+    const videoSender = Array.isArray(senders) ? senders.find((s: any) => s?.track?.kind === 'video') : null;
+    if (callType === 'video' && videoSender && typeof videoSender.getParameters === 'function') {
+      const params = videoSender.getParameters();
+      if (!params.encodings || !Array.isArray(params.encodings) || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings[0] = {
+        ...params.encodings[0],
+        maxBitrate: 250_000,
+        maxFramerate: 15,
+      };
+      if (typeof videoSender.setParameters === 'function') {
+        await videoSender.setParameters(params);
+      }
+    }
+  } catch {
+    // ignore
+  }
 
   // Set up event handlers
   (peerConnection as any).onicecandidate = (event: any) => {
@@ -116,6 +204,13 @@ export const createOffer = async () => {
   return offer;
 };
 
+export const createOfferWithOptions = async (options: any) => {
+  if (!peerConnection) throw new Error('Peer connection not initialized');
+  const offer = await (peerConnection as any).createOffer(options);
+  await peerConnection.setLocalDescription(offer);
+  return offer;
+};
+
 export const createAnswer = async () => {
   if (!peerConnection) throw new Error('Peer connection not initialized');
 
@@ -174,25 +269,19 @@ export const closeConnection = () => {
 };
 
 export const toggleAudio = () => {
-  if (localStream) {
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      return audioTrack.enabled;
-    }
-  }
-  return false;
+  if (!localStream) return null;
+  const audioTrack = localStream.getAudioTracks?.()[0];
+  if (!audioTrack) return null;
+  audioTrack.enabled = !audioTrack.enabled;
+  return { enabled: Boolean(audioTrack.enabled) };
 };
 
 export const toggleVideo = () => {
-  if (localStream) {
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      return videoTrack.enabled;
-    }
-  }
-  return false;
+  if (!localStream) return null;
+  const videoTrack = localStream.getVideoTracks?.()[0];
+  if (!videoTrack) return null;
+  videoTrack.enabled = !videoTrack.enabled;
+  return { enabled: Boolean(videoTrack.enabled) };
 };
 
 export const switchCamera = async () => {

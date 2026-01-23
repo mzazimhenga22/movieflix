@@ -4,8 +4,9 @@ import * as Linking from 'expo-linking';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Easing, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, Easing, PixelRatio, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { authPromise, firestore } from '../constants/firebase';
 import { useSubscription } from '../providers/SubscriptionProvider';
@@ -142,8 +143,20 @@ function appendQueryParams(url: string, params: Record<string, string | undefine
   return hash ? `${next}#${hash}` : next;
 }
 
+function extractMpesaReceiptCode(input: string): string | null {
+  const upper = String(input ?? '').toUpperCase();
+  const trimmed = upper.trim();
+  if (/^[A-Z0-9]{10}$/.test(trimmed) && /[A-Z]/.test(trimmed) && /\d/.test(trimmed)) return trimmed;
+  const matches = upper.match(/\b[A-Z0-9]{10}\b/g) ?? [];
+  return matches.find((m) => /[A-Z]/.test(m) && /\d/.test(m)) ?? null;
+}
+
 const PremiumScreen = () => {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+  const fontScale = PixelRatio.getFontScale();
+  const isCompactLayout = screenWidth < 360 || fontScale > 1.2;
   const params = useLocalSearchParams<{ source?: string; requested?: string }>();
   const source = params.source;
   const requestedFromParams = params.requested as PlanTier | undefined;
@@ -165,33 +178,24 @@ const PremiumScreen = () => {
   const sheetTranslateY = React.useRef(new Animated.Value(1)).current;
   const [stripeCheckoutUrl, setStripeCheckoutUrl] = useState<string | null>(null);
   const [stripeLoading, setStripeLoading] = useState(false);
-  const [mpesaPhone, setMpesaPhone] = useState('');
-  const [mpesaBusy, setMpesaBusy] = useState(false);
-  const [mpesaCheckoutRequestId, setMpesaCheckoutRequestId] = useState<string | null>(null);
-  const [mpesaMerchantRequestId, setMpesaMerchantRequestId] = useState<string | null>(null);
-  const [mpesaStatus, setMpesaStatus] = useState<string | null>(null);
-  const [paybillReceiptCode, setPaybillReceiptCode] = useState('');
+  const [paybillReceiptText, setPaybillReceiptText] = useState('');
   const [paybillBusy, setPaybillBusy] = useState(false);
   const [paybillStatus, setPaybillStatus] = useState<string | null>(null);
-  const didAutoStartMpesaRef = useRef(false);
   const didAutoOpenRequestedTier = React.useRef(false);
   const { refresh, currentPlan } = useSubscription();
 
-  const MPESA_PHONE_CACHE_KEY = 'mpesaPhone';
   const PAYBILL_NUMBER = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_NUMBER ?? process.env.EXPO_PUBLIC_PAYBILL_NUMBER ?? '247247').trim();
   const PAYBILL_ACCOUNT = (process.env.EXPO_PUBLIC_EQUITY_PAYBILL_ACCOUNT ?? process.env.EXPO_PUBLIC_PAYBILL_ACCOUNT ?? '480755').trim();
 
   const billingProvider = useMemo(() => {
     const raw = (process.env.EXPO_PUBLIC_BILLING_PROVIDER ?? '').toLowerCase().trim();
     if (raw === 'stripe') return 'stripe';
-    if (raw === 'daraja') return 'daraja';
     if (raw === 'paybill' || raw === 'equity') return 'paybill';
 
-    const anyStripeUrl =
-      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL ||
-      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PLUS ||
-      process.env.EXPO_PUBLIC_STRIPE_CHECKOUT_URL_PREMIUM;
-    if (Platform.OS === 'android' && anyStripeUrl) return 'stripe';
+    // Treat legacy "daraja" config as Paybill so the app doesn't depend on Daraja STK Push.
+    if (raw === 'daraja') return 'paybill';
+
+    // Default: Paybill flow (no Daraja API required).
     return 'paybill';
   }, []);
 
@@ -201,53 +205,28 @@ const PremiumScreen = () => {
       setRequestedTier(null);
       setStripeCheckoutUrl(null);
       setStripeLoading(false);
-      setMpesaBusy(false);
-      setMpesaCheckoutRequestId(null);
-      setMpesaMerchantRequestId(null);
-      setMpesaStatus(null);
-      setPaybillReceiptCode('');
+      setPaybillReceiptText('');
       setPaybillBusy(false);
       setPaybillStatus(null);
-      didAutoStartMpesaRef.current = false;
     });
   }, [sheetTranslateY]);
 
-  useEffect(() => {
-    if (!showPurchaseSheet) return;
-    if (billingProvider !== 'daraja') return;
-    if (mpesaPhone.trim()) return;
-
-    let mounted = true;
-    void AsyncStorage.getItem(MPESA_PHONE_CACHE_KEY)
-      .then((stored) => {
-        if (!mounted) return;
-        if (stored && stored.trim()) setMpesaPhone(stored.trim());
-      })
-      .catch(() => {});
-
-    return () => {
-      mounted = false;
-    };
-  }, [MPESA_PHONE_CACHE_KEY, billingProvider, mpesaPhone, showPurchaseSheet]);
-
-  const isLikelyKenyaPhone = useCallback((raw: string) => {
-    const cleaned = raw.trim().replace(/^[+]/, '').replace(/[\s-]/g, '');
-    if (!cleaned) return false;
-    if (!/^\d+$/.test(cleaned)) return false;
-    return cleaned.startsWith('0') || cleaned.startsWith('254') || cleaned.startsWith('7') || cleaned.startsWith('1');
-  }, []);
-
   const submitPaybillReceipt = useCallback(async () => {
     if (!requestedTier || requestedTier === 'free') return;
-    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
+    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim().replace(/\/$/, '');
+    const anonKey = (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '').trim();
     if (!base) {
       Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Paybill verification.');
       return;
     }
+    if (!anonKey) {
+      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_ANON_KEY to use Paybill verification.');
+      return;
+    }
 
-    const code = paybillReceiptCode.trim().toUpperCase();
-    if (!/^[A-Z0-9]{10}$/.test(code)) {
-      Alert.alert('Invalid receipt', 'Paste the M-Pesa receipt code (10 chars), e.g. QRTSITS25S.');
+    const code = extractMpesaReceiptCode(paybillReceiptText);
+    if (!code) {
+      Alert.alert('Invalid receipt', 'Paste the full M-Pesa message or just the receipt code (10 chars), e.g. QRTSITS25S.');
       return;
     }
 
@@ -263,23 +242,71 @@ const PremiumScreen = () => {
       }
 
       const idToken = await user.getIdToken();
-      const res = await fetch(`${base}/functions/v1/paybill`, {
+
+      // NOTE: Use a dedicated lightweight edge function to avoid Supabase compute errors from the large paybill handler.
+      const res = await fetch(`${base}/functions/v1/paybill-lite`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
+          // Supabase gateway may require a valid JWT in Authorization if verify_jwt is enabled.
+          // The anon key is a JWT and is sufficient for that; the function itself verifies Firebase via x-firebase-authorization.
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+          'x-firebase-authorization': `Bearer ${idToken}`,
         },
         body: JSON.stringify({
-          action: 'plan_submit_receipt',
           tier: requestedTier,
           receiptCode: code,
         }),
       });
 
-      const data = await res.json().catch(() => ({} as any));
-      if (!res.ok) throw new Error(data?.error || 'Failed to submit receipt');
+      const raw = await res.text();
+      const data = (() => {
+        try {
+          return raw ? (JSON.parse(raw) as any) : ({} as any);
+        } catch {
+          return { raw };
+        }
+      })();
 
-      setPaybillStatus('Receipt submitted. Your plan will update after confirmation.');
+      if (!res.ok) {
+        const msg =
+          data?.error ||
+          data?.message ||
+          data?.raw ||
+          `Failed to submit receipt (HTTP ${res.status})`;
+
+        // Common Supabase transient capacity error.
+        const lower = String(msg).toLowerCase();
+        if (res.status === 429 || res.status === 503 || lower.includes('not enough compute')) {
+          throw new Error('Server is busy (Supabase capacity). Please wait 30–60 seconds and try again.');
+        }
+
+        throw new Error(msg);
+      }
+
+      // Semi-auto workaround: grant access immediately, but mark it pending for later admin confirmation.
+      try {
+        const previousTier: PlanTier = selectedPlan;
+        await updateDoc(doc(firestore, 'users', user.uid), {
+          planTier: requestedTier,
+          subscription: {
+            pending: true,
+            temporaryAccess: true,
+            previousTier,
+            tier: requestedTier,
+            updatedAt: serverTimestamp(),
+            source: 'paybill',
+            status: 'pending_verification',
+            receiptCode: code,
+            paybill: { paybill: PAYBILL_NUMBER, account: PAYBILL_ACCOUNT },
+          },
+        });
+      } catch (err) {
+        console.warn('[premium] failed to persist paybill pending plan to Firestore', err);
+      }
+
+      setPaybillStatus('Receipt submitted. Temporary access enabled (pending confirmation).');
       try {
         await refresh();
       } catch {
@@ -291,150 +318,7 @@ const PremiumScreen = () => {
     } finally {
       setPaybillBusy(false);
     }
-  }, [paybillReceiptCode, refresh, requestedTier]);
-
-  const startMpesaPayment = useCallback(async () => {
-    if (!requestedTier || requestedTier === 'free') return;
-    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
-    if (!base) {
-      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Daraja payments.');
-      return;
-    }
-
-    if (!mpesaPhone.trim() || !isLikelyKenyaPhone(mpesaPhone)) {
-      Alert.alert('Invalid phone', 'Enter a Kenya phone number (e.g. 07XXXXXXXX or 2547XXXXXXXX).');
-      return;
-    }
-
-    try {
-      setMpesaBusy(true);
-      setMpesaStatus(null);
-      setMpesaCheckoutRequestId(null);
-      setMpesaMerchantRequestId(null);
-
-      try {
-        await AsyncStorage.setItem(MPESA_PHONE_CACHE_KEY, mpesaPhone.trim());
-      } catch {
-        // ignore
-      }
-
-      const auth = await authPromise;
-      const user = auth.currentUser;
-      if (!user) {
-        Alert.alert('Sign in required', 'Please sign in to continue.');
-        return;
-      }
-      const idToken = await user.getIdToken();
-
-      const res = await fetch(`${base}/functions/v1/daraja`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          action: 'stkpush',
-          tier: requestedTier,
-          phone: mpesaPhone,
-          accountReference: `movieflix-${requestedTier}`,
-          transactionDesc: `MovieFlix ${requestedTier} plan`,
-          firebaseUid: user.uid,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({} as any));
-      if (!res.ok) {
-        throw new Error(data?.error || 'Failed to start payment');
-      }
-
-      setMpesaCheckoutRequestId(data?.checkoutRequestId ?? null);
-      setMpesaMerchantRequestId(data?.merchantRequestId ?? null);
-      setMpesaStatus(data?.customerMessage ?? 'STK Push sent. Complete payment on your phone.');
-    } catch (err: any) {
-      console.warn('[premium] mpesa stkpush failed', err);
-      Alert.alert('Payment failed', err?.message || 'Unable to start M-Pesa payment.');
-    } finally {
-      setMpesaBusy(false);
-    }
-  }, [MPESA_PHONE_CACHE_KEY, isLikelyKenyaPhone, mpesaPhone, requestedTier]);
-
-  useEffect(() => {
-    if (!showPurchaseSheet) return;
-    if (billingProvider !== 'daraja') return;
-    if (!requestedTier || requestedTier === 'free') return;
-    if (mpesaBusy) return;
-    if (mpesaCheckoutRequestId) return;
-    if (didAutoStartMpesaRef.current) return;
-    if (!mpesaPhone.trim() || !isLikelyKenyaPhone(mpesaPhone)) return;
-
-    didAutoStartMpesaRef.current = true;
-    // auto-trigger STK push so user gets the M-Pesa PIN prompt right after plan selection
-    void startMpesaPayment();
-  }, [billingProvider, isLikelyKenyaPhone, mpesaBusy, mpesaCheckoutRequestId, mpesaPhone, requestedTier, showPurchaseSheet, startMpesaPayment]);
-
-  const checkMpesaStatus = useCallback(async () => {
-    if (!requestedTier || requestedTier === 'free') return;
-    const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').trim();
-    if (!base) {
-      Alert.alert('Supabase not configured', 'Set EXPO_PUBLIC_SUPABASE_URL to use Daraja payments.');
-      return;
-    }
-    if (!mpesaCheckoutRequestId) {
-      Alert.alert('Missing request', 'Start the payment first.');
-      return;
-    }
-
-    try {
-      setMpesaBusy(true);
-
-      const auth = await authPromise;
-      const user = auth.currentUser;
-      if (!user) {
-        Alert.alert('Sign in required', 'Please sign in to continue.');
-        return;
-      }
-      const idToken = await user.getIdToken();
-
-      const res = await fetch(`${base}/functions/v1/daraja`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          action: 'query',
-          checkoutRequestId: mpesaCheckoutRequestId,
-          tier: requestedTier,
-          merchantRequestId: mpesaMerchantRequestId,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({} as any));
-      if (!res.ok) {
-        throw new Error(data?.error || 'Failed to query payment');
-      }
-
-      const resultCode = String(data?.resultCode ?? '').trim();
-      const resultDesc = String(data?.resultDesc ?? '').trim();
-
-      if (resultCode === '0') {
-        await refresh().catch(() => {});
-        setSelectedPlan(requestedTier);
-        Alert.alert('Payment confirmed', `You're now on ${PLAN_LABELS[requestedTier]}.`);
-        closePurchaseSheet();
-        return;
-      }
-
-      const message = resultDesc || 'Payment not completed yet.';
-      setMpesaStatus(message);
-      Alert.alert('Not completed', message);
-    } catch (err: any) {
-      console.warn('[premium] mpesa query failed', err);
-      Alert.alert('Check failed', err?.message || 'Unable to check payment status.');
-    } finally {
-      setMpesaBusy(false);
-    }
-  }, [closePurchaseSheet, mpesaCheckoutRequestId, mpesaMerchantRequestId, refresh, requestedTier]);
+  }, [PAYBILL_ACCOUNT, PAYBILL_NUMBER, paybillReceiptText, refresh, requestedTier, selectedPlan]);
 
   const buildStripeCheckoutUrl = useCallback(async (tier: PlanTier) => {
     const direct =
@@ -611,20 +495,62 @@ const PremiumScreen = () => {
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={gradientColors}
+        colors={[accentColor + '60', '#150a13', '#05060f']}
+        locations={[0, 0.35, 1]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
 
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={22} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Go Premium</Text>
+      <View style={[styles.headerWrap, { marginTop: insets.top + 8 }]}>
+        <LinearGradient
+          colors={[`${accentColor}35`, 'rgba(10,12,24,0.4)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.headerGlow}
+        />
+        <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
+          <View style={styles.titleRow}>
+            <TouchableOpacity onPress={handleBack} style={styles.iconBtn}>
+              <LinearGradient
+                colors={['#e50914', '#b20710']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+              >
+                <Ionicons name="arrow-back" size={22} color="#ffffff" />
+              </LinearGradient>
+            </TouchableOpacity>
+            <View style={{ marginLeft: 4 }}>
+              <Text style={styles.headerEyebrow} numberOfLines={1}>{heroBadge}</Text>
+              <Text
+                style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
+                numberOfLines={1}
+              >
+                Go Premium
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => router.push('/profile')}
+            >
+              <LinearGradient
+                colors={['#e50914', '#b20710']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={[styles.iconBg, isCompactLayout && styles.iconBgCompact]}
+              >
+                <Ionicons name="person-circle-outline" size={24} color="#ffffff" />
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingTop: 12 }]}>
         <View style={styles.hero}>
           <LinearGradient
             colors={badgeGradient}
@@ -716,12 +642,10 @@ const PremiumScreen = () => {
         })}
 
         <Text style={styles.disclaimer}>
-          {billingProvider === 'daraja'
-            ? 'Upgrading uses M-Pesa (Daraja STK Push). Your plan updates after payment is confirmed.'
-            : billingProvider === 'stripe'
+          {billingProvider === 'stripe'
             ? 'Upgrading uses a secure Stripe card checkout. Your plan updates after payment is confirmed.'
             : billingProvider === 'paybill'
-            ? 'Upgrading uses M-Pesa Paybill (Equity). Your plan updates after payment is confirmed.'
+            ? 'Upgrading uses M-Pesa Paybill. Paste your M-Pesa message after paying and we’ll verify it.'
             : 'Upgrading is not configured on this device.'}
         </Text>
 
@@ -761,73 +685,10 @@ const PremiumScreen = () => {
 
               {/* Offerings / packages */}
               <View style={{ marginTop: 6 }}>
-                {billingProvider === 'daraja' ? (
+                {billingProvider === 'paybill' ? (
                   <View>
                     <Text style={{ color: 'rgba(255,255,255,0.85)', marginBottom: 10 }}>
-                      Enter your M-Pesa number to receive an STK Push (you&apos;ll be prompted for your M-Pesa PIN).
-                    </Text>
-
-                    <TextInput
-                      value={mpesaPhone}
-                      onChangeText={(t) => setMpesaPhone(t)}
-                      placeholder="07XXXXXXXX"
-                      placeholderTextColor="rgba(255,255,255,0.35)"
-                      keyboardType="phone-pad"
-                      style={{
-                        borderWidth: 1,
-                        borderColor: 'rgba(255,255,255,0.12)',
-                        borderRadius: 12,
-                        paddingHorizontal: 12,
-                        paddingVertical: 10,
-                        color: '#fff',
-                        backgroundColor: 'rgba(255,255,255,0.03)',
-                      }}
-                    />
-
-                    <Text style={{ color: 'rgba(255,255,255,0.7)', marginTop: 10 }}>
-                      Amount: {requestedTier === 'plus' ? '100' : '200'} KSH
-                    </Text>
-
-                    {mpesaCheckoutRequestId ? (
-                      <Text style={{ color: 'rgba(255,255,255,0.6)', marginTop: 8, fontSize: 12 }}>
-                        CheckoutRequestID: {mpesaCheckoutRequestId}
-                      </Text>
-                    ) : null}
-
-                    {mpesaStatus ? (
-                      <Text style={{ color: 'rgba(255,255,255,0.8)', marginTop: 8 }}>
-                        {mpesaStatus}
-                      </Text>
-                    ) : null}
-
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 12 }}>
-                      <TouchableOpacity
-                        style={[styles.cancelButton, { marginLeft: 0, flex: 1, marginRight: 8 }]}
-                        disabled={mpesaBusy}
-                        onPress={checkMpesaStatus}
-                      >
-                        <Text style={styles.cancelText}>{mpesaBusy ? 'Checking…' : 'Check status'}</Text>
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        style={[styles.saveButton, { backgroundColor: accentColor, flex: 1 }]}
-                        disabled={mpesaBusy}
-                        onPress={startMpesaPayment}
-                      >
-                        <Text style={styles.saveText}>{mpesaBusy ? 'Sending…' : 'Pay with M-Pesa'}</Text>
-                      </TouchableOpacity>
-                    </View>
-
-                    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 10 }}>
-                      <TouchableOpacity style={[styles.saveButton, { backgroundColor: 'rgba(255,255,255,0.08)' }]} onPress={closePurchaseSheet}>
-                        <Text style={styles.saveText}>Close</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : billingProvider === 'paybill' ? (
-                  <View>
-                    <Text style={{ color: 'rgba(255,255,255,0.85)', marginBottom: 10 }}>
-                      Pay via M-Pesa Paybill, then paste your M-Pesa receipt code.
+                      Pay via M-Pesa Paybill, then paste your full M-Pesa message (or just the receipt code).
                     </Text>
 
                     <View
@@ -849,14 +710,15 @@ const PremiumScreen = () => {
                     </View>
 
                     <Text style={{ color: 'rgba(255,255,255,0.75)', marginTop: 12, marginBottom: 8 }}>
-                      M-Pesa receipt code
+                      M-Pesa message / receipt code
                     </Text>
                     <TextInput
-                      value={paybillReceiptCode}
-                      onChangeText={(t) => setPaybillReceiptCode(t.replace(/[^0-9a-zA-Z]/g, '').toUpperCase())}
-                      placeholder="QRTSITS25S"
+                      value={paybillReceiptText}
+                      onChangeText={setPaybillReceiptText}
+                      placeholder="Paste the M-Pesa SMS here…"
                       placeholderTextColor="rgba(255,255,255,0.35)"
                       autoCapitalize="characters"
+                      multiline
                       style={{
                         borderWidth: 1,
                         borderColor: 'rgba(255,255,255,0.12)',
@@ -865,6 +727,7 @@ const PremiumScreen = () => {
                         paddingVertical: 10,
                         color: '#fff',
                         backgroundColor: 'rgba(255,255,255,0.03)',
+                        minHeight: 84,
                       }}
                       editable={!paybillBusy}
                     />
@@ -1015,21 +878,85 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#050509',
   },
-  header: {
+  headerWrap: {
+    marginHorizontal: 12,
+    marginBottom: 6,
+    borderRadius: 18,
+    overflow: 'hidden',
+  },
+  headerGlow: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.7,
+  },
+  headerBar: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.14,
+    shadowRadius: 20,
+  },
+  headerBarCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    rowGap: 10,
+  },
+  titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 40,
-    paddingBottom: 12,
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
   },
-  backButton: {
-    padding: 6,
-    marginRight: 8,
+  headerEyebrow: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    letterSpacing: 0.6,
   },
-  headerTitle: {
+  headerText: {
     color: '#FFFFFF',
     fontSize: 20,
-    fontWeight: 'bold',
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  headerTextCompact: {
+    fontSize: 18,
+  },
+  headerIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  headerIconsCompact: {
+    flexWrap: 'wrap',
+    rowGap: 8,
+    justifyContent: 'flex-start',
+  },
+  iconBtn: {
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+    shadowColor: '#e50914',
+    shadowOpacity: 0.28,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  iconBg: {
+    padding: 10,
+    borderRadius: 12,
+    position: 'relative',
+  },
+  iconBgCompact: {
+    padding: 8,
   },
   content: {
     paddingHorizontal: 16,

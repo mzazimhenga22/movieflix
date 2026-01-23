@@ -21,6 +21,9 @@ google-services.json
 GoogleService-Info.plist
 google-service account.json
 *service-account*.json
+*adminsdk*.json
+movieflixreactnative-firebase-adminsdk-*.json
+google-services.env.json
 
 # Metro
 .metro-health-check*

@@ -1,6 +1,7 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createRemoteJWKSet, jwtVerify } from 'npm:jose@5.9.6';
 import { cert, getApps, initializeApp } from 'npm:firebase-admin/app';
+import { getAuth as getAdminAuth } from 'npm:firebase-admin/auth';
 import { FieldValue, getFirestore } from 'npm:firebase-admin/firestore';
 import type { DocumentData, DocumentReference, Firestore, Transaction } from 'firebase-admin/firestore';
 
@@ -14,7 +15,9 @@ type PaybillAction =
   | 'promo_credits_submit_receipt'
   | 'promo_credits_admin_confirm_receipt'
   | 'plan_submit_receipt'
-  | 'plan_admin_confirm_receipt';
+  | 'plan_admin_confirm_receipt'
+  | 'plan_admin_reject_receipt'
+  | 'admin_bootstrap';
 
 class HttpError extends Error {
   status: number;
@@ -34,6 +37,7 @@ const PAYBILL_NUMBER = (Deno.env.get('EQUITY_PAYBILL_NUMBER') ?? Deno.env.get('P
 const PAYBILL_ACCOUNT = (Deno.env.get('EQUITY_PAYBILL_ACCOUNT') ?? Deno.env.get('PAYBILL_ACCOUNT') ?? '480755').trim();
 const PAYBILL_PROVIDER = (Deno.env.get('PAYBILL_PROVIDER') ?? 'equity').trim() || 'equity';
 const PAYBILL_ADMIN_SECRET = (Deno.env.get('PAYBILL_ADMIN_SECRET') ?? '').trim();
+const PAYBILL_ADMIN_EMAIL = (Deno.env.get('PAYBILL_ADMIN_EMAIL') ?? '').trim().toLowerCase();
 
 const MARKETPLACE_ORDERS_COLLECTION = 'marketplace_orders';
 const WALLET_ACCOUNTS_COLLECTION = 'wallet_accounts';
@@ -71,15 +75,25 @@ function okResponse(payload: unknown) {
   return jsonResponse(payload, 200);
 }
 
-function parseBearer(req: Request) {
-  const header = req.headers.get('authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return '';
-  return header.slice('Bearer '.length).trim();
+function extractBearerValue(header: string | null): string {
+  const raw = String(header ?? '').trim();
+  if (!raw) return '';
+  if (raw.toLowerCase().startsWith('bearer ')) return raw.slice('bearer '.length).trim();
+  return raw;
+}
+
+function parseFirebaseBearer(req: Request) {
+  // Prefer a dedicated header so callers can still use Authorization for Supabase gateway auth.
+  const firebaseHeader = req.headers.get('x-firebase-authorization');
+  const firebaseToken = extractBearerValue(firebaseHeader);
+  if (firebaseToken) return firebaseToken;
+
+  return extractBearerValue(req.headers.get('authorization'));
 }
 
 async function requireFirebaseAuth(req: Request) {
-  const token = parseBearer(req);
-  if (!token) throw new HttpError(401, 'Missing Authorization Bearer token');
+  const token = parseFirebaseBearer(req);
+  if (!token) throw new HttpError(401, 'Missing Firebase auth token');
 
   const { payload } = await jwtVerify(token, FIREBASE_JWKS, {
     issuer: FIREBASE_ISSUER,
@@ -88,7 +102,11 @@ async function requireFirebaseAuth(req: Request) {
 
   const uid = (payload as any)?.user_id ?? (payload as any)?.sub;
   if (!uid) throw new HttpError(401, 'Invalid Firebase token (missing uid)');
-  return { uid: String(uid) };
+
+  const emailRaw = (payload as any)?.email;
+  const email = emailRaw ? String(emailRaw).trim().toLowerCase() : '';
+
+  return { uid: String(uid), email };
 }
 
 function requireAdminSecret(req: Request) {
@@ -97,7 +115,19 @@ function requireAdminSecret(req: Request) {
   if (!got || got !== PAYBILL_ADMIN_SECRET) throw new HttpError(403, 'Forbidden');
 }
 
-function initFirestore(): Firestore {
+async function requireAdminEmail(req: Request) {
+  if (!PAYBILL_ADMIN_EMAIL) throw new HttpError(500, 'Server misconfigured: PAYBILL_ADMIN_EMAIL not set');
+  const auth = await requireFirebaseAuth(req);
+  if (!auth.email || auth.email !== PAYBILL_ADMIN_EMAIL) throw new HttpError(403, 'Forbidden');
+  return auth;
+}
+
+let _cachedApp: ReturnType<typeof getApps>[number] | null = null;
+let _cachedDb: Firestore | null = null;
+let _cachedAdminUid: string | null | undefined;
+
+function initAdminApp() {
+  if (_cachedApp) return _cachedApp;
   const json = (
     Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON') ??
     Deno.env.get('FIREBASE_SERVICE_ACCOUNT') ??
@@ -124,8 +154,51 @@ function initFirestore(): Firestore {
     throw new HttpError(500, 'Invalid Firebase Admin credentials: missing top-level "project_id"');
   }
 
-  const app = getApps()[0] ?? initializeApp({ credential: cert(credentials as Record<string, unknown>) });
-  return getFirestore(app);
+  _cachedApp = getApps()[0] ?? initializeApp({ credential: cert(credentials as Record<string, unknown>) });
+  return _cachedApp;
+}
+
+async function getAdminUid(db: Firestore): Promise<string | null> {
+  if (_cachedAdminUid !== undefined) return _cachedAdminUid;
+  if (!PAYBILL_ADMIN_EMAIL) {
+    _cachedAdminUid = null;
+    return null;
+  }
+  try {
+    const app = initAdminApp();
+    const auth = getAdminAuth(app);
+    const user = await auth.getUserByEmail(PAYBILL_ADMIN_EMAIL);
+    _cachedAdminUid = user?.uid ? String(user.uid) : null;
+    return _cachedAdminUid;
+  } catch {
+    _cachedAdminUid = null;
+    return null;
+  }
+}
+
+async function notifyAdmin(db: Firestore, payload: Record<string, unknown>) {
+  try {
+    const adminUid = await getAdminUid(db);
+    if (!adminUid) return;
+    await db.collection('notifications').add({
+      type: 'paybill_receipt_submitted',
+      scope: 'billing',
+      channel: 'payments',
+      targetUid: adminUid,
+      read: false,
+      createdAt: FieldValue.serverTimestamp(),
+      ...payload,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+function initFirestore(): Firestore {
+  if (_cachedDb) return _cachedDb;
+  const app = initAdminApp();
+  _cachedDb = getFirestore(app);
+  return _cachedDb;
 }
 
 function normalizeReceiptCode(raw: unknown): string {
@@ -625,11 +698,19 @@ serve(async (req: Request) => {
         };
       });
 
+      void notifyAdmin(db, {
+        kind: 'marketplace',
+        actorId: auth.uid,
+        message: `New marketplace receipt submitted: ${receiptCode}`,
+        receiptCode,
+        orderDocId,
+      });
+
       return okResponse({ ok: true, ...result });
     }
 
     if (action === 'marketplace_admin_confirm_receipt') {
-      requireAdminSecret(req);
+      await requireAdminEmail(req);
       const receiptCode = normalizeReceiptCode(body?.receiptCode);
 
       const receiptRef = db.collection(PAYMENT_RECEIPTS_COLLECTION).doc(receiptCode);
@@ -710,11 +791,20 @@ serve(async (req: Request) => {
         return { alreadySubmitted: false, amountKsh, credits };
       });
 
+      void notifyAdmin(db, {
+        kind: 'promo_credits',
+        actorId: auth.uid,
+        message: `New promo credits receipt submitted: ${receiptCode}`,
+        receiptCode,
+        amountKsh,
+        credits,
+      });
+
       return okResponse({ ok: true, receiptCode, amountKsh: (result as any)?.amountKsh ?? amountKsh, credits: (result as any)?.credits ?? credits });
     }
 
     if (action === 'promo_credits_admin_confirm_receipt') {
-      requireAdminSecret(req);
+      await requireAdminEmail(req);
       const receiptCode = normalizeReceiptCode(body?.receiptCode);
 
       const result = await db.runTransaction(async (tx) => {
@@ -853,11 +943,20 @@ serve(async (req: Request) => {
         return { alreadySubmitted: false };
       });
 
+      void notifyAdmin(db, {
+        kind: 'plan',
+        actorId: auth.uid,
+        message: `New plan receipt submitted: ${receiptCode} (${tier})`,
+        receiptCode,
+        tier,
+        amount,
+      });
+
       return okResponse({ ok: true, tier, amount, receiptCode, ...(result as any) });
     }
 
     if (action === 'plan_admin_confirm_receipt') {
-      requireAdminSecret(req);
+      await requireAdminEmail(req);
       const receiptCode = normalizeReceiptCode(body?.receiptCode);
 
       const receiptRef = db.collection(PAYMENT_RECEIPTS_COLLECTION).doc(receiptCode);
@@ -878,6 +977,8 @@ serve(async (req: Request) => {
         {
           planTier: tier,
           subscription: {
+            pending: false,
+            temporaryAccess: false,
             tier,
             amountKSH: amount,
             currency: 'KES',
@@ -904,6 +1005,77 @@ serve(async (req: Request) => {
       );
 
       return okResponse({ ok: true, uid, tier, amount, receiptCode });
+    }
+
+    if (action === 'plan_admin_reject_receipt') {
+      await requireAdminEmail(req);
+      const receiptCode = normalizeReceiptCode(body?.receiptCode);
+
+      const receiptRef = db.collection(PAYMENT_RECEIPTS_COLLECTION).doc(receiptCode);
+      const receiptSnap = await receiptRef.get();
+      if (!receiptSnap.exists) throw new HttpError(404, 'Receipt not found');
+      const receipt = receiptSnap.data() as any;
+      if (String(receipt?.type ?? '') !== 'plan') throw new HttpError(400, 'Receipt is not for plan');
+
+      const status = String(receipt?.status ?? '').toLowerCase();
+      if (status === 'rejected') return okResponse({ ok: true, alreadyRejected: true, receiptCode });
+      if (status === 'confirmed') throw new HttpError(409, 'Receipt is already confirmed');
+      if (status && status !== 'submitted') throw new HttpError(409, 'Receipt is not in a rejectable state');
+
+      const uid = String(receipt?.userId ?? '').trim();
+      if (!uid) throw new HttpError(500, 'Receipt record is missing userId');
+
+      const userRef = db.collection(USERS_COLLECTION).doc(uid);
+      const userSnap = await userRef.get();
+      const userData = userSnap.exists ? (userSnap.data() as any) : ({} as any);
+      const previousTierRaw = String(userData?.subscription?.previousTier ?? 'free').toLowerCase().trim();
+      const previousTier = previousTierRaw === 'plus' || previousTierRaw === 'premium' ? previousTierRaw : 'free';
+
+      await userRef.set(
+        {
+          planTier: previousTier,
+          subscription: {
+            pending: false,
+            temporaryAccess: false,
+            status: 'rejected',
+            rejectedAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+            receiptCode,
+            previousTier,
+          },
+        },
+        { merge: true }
+      );
+
+      await receiptRef.set(
+        {
+          status: 'rejected',
+          rejectedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      return okResponse({ ok: true, uid, revertedTo: previousTier, receiptCode });
+    }
+
+    if (action === 'admin_bootstrap') {
+      const auth = await requireAdminEmail(req);
+
+      await db.collection(USERS_COLLECTION).doc(auth.uid).set(
+        {
+          roles: {
+            paymentsAdmin: true,
+          },
+          admin: {
+            paymentsEmail: auth.email,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+        },
+        { merge: true }
+      );
+
+      return okResponse({ ok: true, uid: auth.uid, email: auth.email });
     }
 
     throw new HttpError(400, 'Invalid action');

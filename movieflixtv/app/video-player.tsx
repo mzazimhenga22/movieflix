@@ -1,3 +1,4 @@
+import { joinWatchPartyAsParticipant, leaveWatchPartyAsParticipant, type WatchPartyEpisode } from '@/lib/watchparty/controller';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
@@ -13,42 +14,95 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppStateStatus } from 'react-native';
 import {
-    ActivityIndicator,
-    AppState,
-    Alert,
-    Animated,
-    FlatList,
-    Image,
-    Platform,
-    Pressable,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    InteractionManager,
-    View,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  AppState,
+  Easing,
+  FlatList,
+  Image,
+  InteractionManager,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
 } from 'react-native';
-import { firestore } from '../constants/firebase';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import NativeAdCard from '../components/ads/NativeAdCard';
 import { API_BASE_URL, API_KEY } from '../constants/api';
-import { useUser } from '../hooks/use-user';
+import { firestore } from '../constants/firebase';
 import { usePromotedProducts } from '../hooks/use-promoted-products';
-import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
+import { useUser } from '../hooks/use-user';
 import { logInteraction } from '../lib/algo';
+import { VideoMaskingOverlay } from '../lib/engineer';
 import { syncMovieMatchProfile } from '../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../lib/profileStorage';
+import { buildScrapeDebugTag, buildSourceOrder } from '../lib/videoPlaybackShared';
+import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
+import { useSubscription } from '../providers/SubscriptionProvider';
 import { usePStream, type PStreamPlayback } from '../src/pstream/usePStream';
 import type { Media } from '../types';
-import { buildSourceOrder, buildScrapeDebugTag } from '../lib/videoPlaybackShared';
-import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
-import { VideoMaskingOverlay } from '../lib/engineer';
-import NativeAdCard from '../components/ads/NativeAdCard';
-import { useSubscription } from '../providers/SubscriptionProvider';
+import { TvFocusable } from './components/TvSpatialNavigation';
+import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
+// WebRTC - only available on native, stubs for web
+let RTCView: any = View;
+let mediaDevices: any = null;
+let RTCPeerConnection: any = null;
+let RTCSessionDescription: any = null;
+let RTCIceCandidate: any = null;
+
+if (Platform.OS !== 'web') {
+  try {
+    const webrtc = require('react-native-webrtc');
+    RTCView = webrtc.RTCView || View;
+    mediaDevices = webrtc.mediaDevices;
+    RTCPeerConnection = webrtc.RTCPeerConnection;
+    RTCSessionDescription = webrtc.RTCSessionDescription;
+    RTCIceCandidate = webrtc.RTCIceCandidate;
+  } catch {
+    // WebRTC not available
+  }
+}
+
+// Animated section wrapper
+const AnimatedSection = React.memo(function AnimatedSection({ children, delay = 0, style }: { children: React.ReactNode; delay?: number; style?: any }) {
+  const translateY = useRef(new Animated.Value(40)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.delay(delay),
+      Animated.parallel([
+        Animated.spring(translateY, {
+          toValue: 0,
+          friction: 10,
+          tension: 50,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 400,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [delay, translateY, opacity]);
+
+  return (
+    <Animated.View style={[style, { opacity, transform: [{ translateY }] }]}>
+      {children}
+    </Animated.View>
+  );
+});
 const FALLBACK_EPISODE_IMAGE = 'https://via.placeholder.com/160x90?text=Episode';
 type UpcomingEpisode = {
   id?: number;
@@ -98,6 +152,95 @@ type QualityOption = {
   bandwidth?: number;
   codecs?: string;
 };
+
+// Fetch subtitles from multiple free sources (parity with phone player)
+async function fetchFallbackSubtitles(
+  imdbId?: string,
+  tmdbId?: string,
+  mediaType?: string,
+  seasonNum?: number,
+  episodeNum?: number,
+): Promise<CaptionSource[]> {
+  if (!imdbId && !tmdbId) return [];
+
+  const subs: CaptionSource[] = [];
+
+  // Try OpenSubtitles.org hash-less search (free endpoint)
+  try {
+    const imdbNum = imdbId?.replace('tt', '') || '';
+    let osUrl = `https://rest.opensubtitles.org/search/imdbid-${imdbNum}`;
+    if (mediaType === 'tv' && seasonNum && episodeNum) {
+      osUrl += `/season-${seasonNum}/episode-${episodeNum}`;
+    }
+
+    const osResponse = await fetch(osUrl, {
+      headers: {
+        'User-Agent': 'TemporaryUserAgent',
+        'X-User-Agent': 'TemporaryUserAgent',
+      },
+    });
+
+    if (osResponse.ok) {
+      const osData = await osResponse.json();
+      const seenLangs = new Set<string>();
+
+      for (const item of osData ?? []) {
+        if (!item?.SubDownloadLink) continue;
+
+        const lang = item.ISO639?.toLowerCase() || item.LanguageName?.toLowerCase() || 'en';
+        if (seenLangs.has(lang)) continue;
+        seenLangs.add(lang);
+
+        subs.push({
+          id: `os-${item.IDSubtitleFile || subs.length}`,
+          type: 'srt',
+          url: item.SubDownloadLink.replace('.gz', ''),
+          language: lang,
+          display: item.LanguageName || lang.toUpperCase(),
+        });
+
+        if (subs.length >= 10) break;
+      }
+    }
+  } catch (err) {
+    if (__DEV__) console.warn('[OpenSubs] Fetch failed', err);
+  }
+
+  // If no subs found, try YIFY subs for movies
+  if (subs.length === 0 && mediaType !== 'tv' && imdbId) {
+    try {
+      const yifyRes = await fetch(`https://yifysubtitles.ch/movie-imdb/${imdbId}`);
+      if (yifyRes.ok) {
+        const html = await yifyRes.text();
+        const matches = html.matchAll(/href="(\/subtitles\/[^\"]+)"/g);
+        let count = 0;
+        for (const match of matches) {
+          if (count >= 5) break;
+          const subPage = match[1];
+          const langMatch = subPage.match(/\/subtitles\/[^/]+\/([^/]+)/);
+          const lang = langMatch?.[1] || 'english';
+
+          subs.push({
+            id: `yify-${count}`,
+            type: 'srt',
+            url: `https://yifysubtitles.ch${subPage}`,
+            language: lang.slice(0, 2),
+            display: lang.charAt(0).toUpperCase() + lang.slice(1),
+          });
+          count++;
+        }
+      }
+    } catch (err) {
+      if (__DEV__) console.warn('[YIFY] Fetch failed', err);
+    }
+  }
+
+  if (__DEV__ && subs.length > 0) {
+    console.log('[Subtitles] Found fallback subs:', subs.length);
+  }
+
+  return subs;
+}
 const CONTROLS_HIDE_DELAY_PLAYING = 10500;
 const CONTROLS_HIDE_DELAY_PAUSED = 16500;
 const SURFACE_DOUBLE_TAP_MS = 350;
@@ -115,16 +258,16 @@ function normalizePlaybackUri(uri: string): string {
       try {
         const decoded = decodeURIComponent(encodedUrl);
         if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
-      } catch {}
+      } catch { }
       // Support base64url-encoded url param (best-effort)
       try {
         const base64 = encodedUrl.replace(/-/g, '+').replace(/_/g, '/');
         const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
         const decoded = Buffer.from(padded, 'base64').toString('utf8');
         if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   return uri;
 }
 
@@ -255,11 +398,78 @@ function createPlaybackSource(params: {
 }
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 // (TV) Brightness/volume sliders removed — system controls are used instead.
+const FloatingEmoji = React.memo(({ emoji, x }: { emoji: string; x: number }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: 1,
+      duration: 3500 + Math.random() * 1000,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [anim]);
+
+  const translateY = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [windowHeight, -100],
+  });
+
+  const translateX = anim.interpolate({
+    inputRange: [0, 0.25, 0.5, 0.75, 1],
+    outputRange: [0, 20, -20, 20, 0],
+  });
+
+  const opacity = anim.interpolate({
+    inputRange: [0, 0.1, 0.8, 1],
+    outputRange: [0, 1, 1, 0],
+  });
+
+  const scale = anim.interpolate({
+    inputRange: [0, 0.2, 1],
+    outputRange: [0.5, 1.5, 1.2],
+  });
+
+  return (
+    <Animated.View
+      style={{
+        position: 'absolute',
+        left: x * windowWidth,
+        transform: [{ translateY }, { translateX }, { scale }],
+        opacity,
+        zIndex: 9999,
+      }}
+      pointerEvents="none"
+    >
+      <Text style={{ fontSize: 32 }}>{emoji}</Text>
+    </Animated.View>
+  );
+});
+
+const FaceCam = React.memo(({ stream, label, isLocal }: { stream: any; label: string; isLocal?: boolean }) => {
+  if (!stream) return null;
+  return (
+    <View style={styles.faceCamContainer}>
+      <RTCView
+        streamURL={stream.toURL()}
+        style={styles.faceCamView}
+        objectFit="cover"
+        mirror={isLocal}
+      />
+      <View style={styles.faceCamLabel}>
+        <Text style={styles.faceCamLabelText} numberOfLines={1}>{label}</Text>
+      </View>
+    </View>
+  );
+});
+
 const VideoPlayerScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
   // movieflixtv is a TV-only surface; force TV UI even on platforms where Platform.isTV may be false.
   const isTvDevice = true;
+  const insets = useSafeAreaInsets();
   const { currentPlan } = useSubscription();
   const { products: promotedProducts, hasAds: hasPromotedAds } = usePromotedProducts({ placement: 'story', limit: 20 });
 
@@ -419,10 +629,10 @@ const VideoPlayerScreen = () => {
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
     resolvedVideoUrl
       ? createPlaybackSource({
-          uri: resolvedVideoUrl,
-          headers: resolvedVideoHeaders,
-          streamType: resolvedStreamType,
-        })
+        uri: resolvedVideoUrl,
+        headers: resolvedVideoHeaders,
+        streamType: resolvedStreamType,
+      })
       : null,
   );
 
@@ -458,9 +668,9 @@ const VideoPlayerScreen = () => {
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
         staysActiveInBackground: false,
-        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-        shouldDuckAndroid: true,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        shouldDuckAndroid: false,
         playThroughEarpieceAndroid: false,
       });
     } catch {
@@ -493,6 +703,7 @@ const VideoPlayerScreen = () => {
   }, [ensurePlaybackAudioMode]);
 
   const [showControls, setShowControls] = useState(true);
+  const showControlsRef = useRef(true);
   const [controlsSession, setControlsSession] = useState(0);
   const lastSurfaceTapRef = useRef(0);
   const [positionMillis, setPositionMillis] = useState(0);
@@ -522,7 +733,7 @@ const VideoPlayerScreen = () => {
     if (!productId) return;
     if (midrollImpressionsRef.current.has(productId)) return;
     midrollImpressionsRef.current.add(productId);
-    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => {});
+    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => { });
   }, [currentPlan, midrollActive, midrollProduct?.id]);
   useEffect(() => {
     return () => {
@@ -538,6 +749,10 @@ const VideoPlayerScreen = () => {
   }, [midrollActive]);
 
   useEffect(() => {
+    showControlsRef.current = showControls;
+  }, [showControls]);
+
+  useEffect(() => {
     positionMillisRef.current = positionMillis;
   }, [positionMillis]);
   const { user } = useUser();
@@ -547,15 +762,168 @@ const VideoPlayerScreen = () => {
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
   const [showChat, setShowChat] = useState(true);
+  const [reactions, setReactions] = useState<Array<{ id: string; emoji: string; x: number }>>([]);
+  const [watchPartyParticipantsCount, setWatchPartyParticipantsCount] = useState<number>(0);
+  const joinedAsParticipantRef = useRef(false);
+
+  // Face Cam (TV is passive: can see others, cannot turn on own)
+  const [remoteCamStreams, setRemoteCamStreams] = useState<Record<string, any>>({});
+  const pcsRef = useRef<Record<string, RTCPeerConnection>>({});
+
+  const getOrCreatePC = useCallback((targetUid: string) => {
+    if (pcsRef.current[targetUid]) return pcsRef.current[targetUid];
+
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    (pc as any).onicecandidate = (event: any) => {
+      if (event.candidate && roomCode && user?.uid) {
+        const ref = doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid, 'ice', Math.random().toString(36).slice(2));
+        void setDoc(ref, {
+          candidate: event.candidate.toJSON(),
+          targetUid,
+          createdAt: serverTimestamp()
+        });
+      }
+    };
+
+    (pc as any).ontrack = (event: any) => {
+      if (event.streams[0]) {
+        setRemoteCamStreams(prev => ({ ...prev, [targetUid]: event.streams[0] }));
+      }
+    };
+
+    pcsRef.current[targetUid] = pc;
+    return pc;
+  }, [roomCode, user?.uid]);
+
+  // Signaling Effect (TV version - passive)
+  useEffect(() => {
+    if (!roomCode || !user?.uid) return;
+
+    // Broadcaster Intent (TV can signal it's active to receive, but doesn't share local tracks)
+    const mySignalingRef = doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid);
+    void setDoc(mySignalingRef, { active: true, updatedAt: serverTimestamp(), isTV: true });
+
+    const signalingCol = collection(firestore, 'watchParties', roomCode, 'camSignaling');
+    const unsub = onSnapshot(signalingCol, async (snap) => {
+      for (const change of snap.docChanges()) {
+        const otherId = change.doc.id;
+        if (otherId === user.uid) continue;
+
+        if (change.type === 'added' || change.type === 'modified') {
+          const data = change.doc.data();
+          if (!data.active) continue;
+
+          // For TV, we always let the other side initiate if it's a mobile user
+          // or we can follow the same lexicographical rule.
+          if (user.uid > otherId) {
+            const pc = getOrCreatePC(otherId);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            void setDoc(doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid, 'offers', otherId), {
+              sdp: offer.sdp,
+              type: offer.type,
+              createdAt: serverTimestamp()
+            });
+          }
+        }
+      }
+    });
+
+    return () => {
+      unsub();
+      void updateDoc(mySignalingRef, { active: false }).catch(() => { });
+      Object.values(pcsRef.current).forEach(pc => pc.close());
+      pcsRef.current = {};
+      setRemoteCamStreams({});
+    };
+  }, [roomCode, user?.uid, getOrCreatePC]);
+
   useEffect(() => {
     if (isTvDevice) setShowChat(false);
   }, [isTvDevice]);
+
+  // Join party tracking
+  useEffect(() => {
+    if (!roomCode || !user?.uid) return;
+
+    let cancelled = false;
+    const participantsRef = collection(firestore, 'watchParties', roomCode, 'participants');
+    const unsub = onSnapshot(query(participantsRef, orderBy('joinedAt', 'desc')), (snap) => {
+      if (!cancelled) setWatchPartyParticipantsCount(snap.size);
+    });
+
+    if (!joinedAsParticipantRef.current) {
+      joinedAsParticipantRef.current = true;
+      void joinWatchPartyAsParticipant({
+        code: roomCode,
+        userId: user.uid,
+        displayName: user.displayName || user.email || 'TV Guest',
+        avatarUrl: (user as any)?.photoURL ?? null,
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      unsub();
+      void leaveWatchPartyAsParticipant({ code: roomCode, userId: user.uid });
+    };
+  }, [roomCode, user]);
+
+  // Reaction Listener
+  useEffect(() => {
+    if (!roomCode) return;
+    const reactionsRef = collection(firestore, 'watchParties', roomCode, 'reactions');
+    const q = query(reactionsRef, orderBy('createdAt', 'asc'));
+
+    const unsub = onSnapshot(q, (snap) => {
+      snap.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const data = change.doc.data();
+          const id = change.doc.id;
+          const createdAt = data.createdAt?.toMillis?.() ?? Date.now();
+          if (Date.now() - createdAt < 5000) {
+            setReactions(prev => [...prev, { id, emoji: data.emoji, x: data.x }]);
+            setTimeout(() => {
+              setReactions(prev => prev.filter(r => r.id !== id));
+            }, 4000);
+          }
+        }
+      });
+    });
+    return () => unsub();
+  }, [roomCode]);
+
+  // Chat Listener
+  useEffect(() => {
+    if (!roomCode) return;
+    const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
+    const q = query(messagesRef, orderBy('createdAt', 'asc'));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        items.push({
+          id: docSnap.id,
+          user: data.userDisplayName || 'Guest',
+          text: data.text || '',
+          avatar: data.userAvatar || null,
+        });
+      });
+      setChatMessages(items);
+    });
+    return () => unsub();
+  }, [roomCode]);
 
   const watchPartyRef = useMemo(() => (roomCode ? doc(firestore, 'watchParties', roomCode) : null), [roomCode]);
   const [watchPartyHostId, setWatchPartyHostId] = useState<string | null>(null);
   const isWatchPartyHost = Boolean(roomCode && user?.uid && watchPartyHostId && user.uid === watchPartyHostId);
   const [watchPartyIsOpen, setWatchPartyIsOpen] = useState(true);
   const watchPartyBlocked = Boolean(roomCode && !isWatchPartyHost && !watchPartyIsOpen);
+  const [currentWatchPartyEpisode, setCurrentWatchPartyEpisode] = useState<WatchPartyEpisode | null>(null);
+  const lastRemoteEpisodeUpdatedAtRef = useRef(0);
 
   useEffect(() => {
     if (!roomCode) {
@@ -591,7 +959,7 @@ const VideoPlayerScreen = () => {
           updatedBy: user.uid,
           updatedAt: serverTimestamp(),
         },
-      }).catch(() => {});
+      }).catch(() => { });
     },
     [isWatchPartyHost, user?.uid, watchPartyRef],
   );
@@ -663,14 +1031,38 @@ const VideoPlayerScreen = () => {
         setResolvedStreamType((prev) => prev ?? data.streamType);
       }
 
-      const playback = data.playback;
       const hostNow = Boolean(user?.uid && hostId && user.uid === hostId);
+
+      // Handle episode sync for TV shows (guests only)
+      const episode = data.episode;
+      if (!hostNow && episode && typeof episode === 'object') {
+        const episodeUpdatedAtMillis =
+          typeof episode.updatedAt?.toMillis === 'function'
+            ? episode.updatedAt.toMillis()
+            : typeof episode.updatedAt === 'number'
+              ? episode.updatedAt
+              : 0;
+
+        if (episodeUpdatedAtMillis && episodeUpdatedAtMillis > lastRemoteEpisodeUpdatedAtRef.current) {
+          lastRemoteEpisodeUpdatedAtRef.current = episodeUpdatedAtMillis;
+          setCurrentWatchPartyEpisode({
+            seasonNumber: episode.seasonNumber ?? null,
+            episodeNumber: episode.episodeNumber ?? null,
+            seasonTmdbId: episode.seasonTmdbId ?? null,
+            episodeTmdbId: episode.episodeTmdbId ?? null,
+            seasonTitle: episode.seasonTitle ?? null,
+            episodeTitle: episode.episodeTitle ?? null,
+          });
+        }
+      }
+
+      const playback = data.playback;
       if (hostNow) return;
 
       if (!isOpen) {
         setIsPlaying(false);
         try {
-          (videoRef.current as any)?.pauseAsync?.().catch?.(() => {});
+          (videoRef.current as any)?.pauseAsync?.().catch?.(() => { });
         } catch {
           // ignore
         }
@@ -717,11 +1109,11 @@ const VideoPlayerScreen = () => {
       videoUrl: resolvedVideoUrl ?? null,
       videoHeaders: resolvedVideoHeaders ?? null,
       streamType: resolvedStreamType ?? null,
-    }).catch(() => {});
+    }).catch(() => { });
 
     return () => {
       if (!isWatchPartyHost) return;
-      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => {});
+      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => { });
     };
   }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
 
@@ -881,10 +1273,10 @@ const VideoPlayerScreen = () => {
     setPlaybackSource(
       resolvedVideoUrl
         ? createPlaybackSource({
-            uri: resolvedVideoUrl,
-            headers: resolvedVideoHeaders,
-            streamType: resolvedStreamType,
-          })
+          uri: resolvedVideoUrl,
+          headers: resolvedVideoHeaders,
+          streamType: resolvedStreamType,
+        })
         : null,
     );
     triedVariantUrisRef.current = new Set();
@@ -949,16 +1341,39 @@ const VideoPlayerScreen = () => {
           title: options?.title,
         });
       }
+      const mappedCaptions: CaptionSource[] = (playback.stream?.captions ?? [])
+        .filter((cap: any) => cap?.url)
+        .map((cap: any, idx: number) => ({
+          id: cap.id || `caption-${idx}`,
+          type: cap.type === 'srt' || cap.type === 'vtt' ? cap.type : 'vtt',
+          url: cap.url,
+          language: cap.lang || cap.language,
+          display: cap.label || cap.lang || cap.language || `Subtitle ${idx + 1}`,
+        }));
       const payload = createPlaybackSource({
         uri: playback.uri,
         headers: playback.headers,
         streamType: playback.stream?.type,
-        captions: playback.stream?.captions,
+        captions: mappedCaptions,
         sourceId: playback.sourceId,
         embedId: playback.embedId,
       });
       setPlaybackSource(payload);
-      setCaptionSources(playback.stream?.captions ?? []);
+      setCaptionSources(mappedCaptions);
+
+      // Fetch subtitle fallback if stream has no captions
+      if (mappedCaptions.length === 0) {
+        fetchFallbackSubtitles(imdbId, tmdbId, rawMediaType, seasonNumberParam, episodeNumberParam)
+          .then((fallbackSubs) => {
+            if (fallbackSubs.length > 0) {
+              setCaptionSources(fallbackSubs);
+              if (__DEV__) {
+                console.log('[VideoPlayer] Loaded fallback subtitles', fallbackSubs.length);
+              }
+            }
+          })
+          .catch(() => { });
+      }
       setSelectedCaptionId('off');
       captionCacheRef.current = {};
       captionCuesRef.current = [];
@@ -982,6 +1397,74 @@ const VideoPlayerScreen = () => {
     },
     [],
   );
+  // Effect to scrape and load new episode when host changes episode (guests only)
+  useEffect(() => {
+    if (isWatchPartyHost) return;
+    if (!currentWatchPartyEpisode) return;
+    if (!isTvShow || !tmdbId) return;
+
+    const { seasonNumber, episodeNumber, seasonTmdbId, episodeTmdbId, seasonTitle: remoteSeasonTitle } = currentWatchPartyEpisode;
+    if (seasonNumber == null || episodeNumber == null) return;
+
+    // Skip if already on this episode
+    if (seasonNumber === seasonNumberParam && episodeNumber === episodeNumberParam) return;
+
+    let isCancelled = false;
+
+    const loadRemoteEpisode = async () => {
+      try {
+        const enrichment = tmdbEnrichmentRef.current;
+        const fallbackYear = enrichment?.releaseYear ?? releaseYear ?? new Date().getFullYear();
+
+        const payload = {
+          type: 'show' as const,
+          title: displayTitle,
+          tmdbId: tmdbId,
+          imdbId: imdbId || enrichment?.imdbId || undefined,
+          releaseYear: fallbackYear,
+          season: {
+            number: seasonNumber,
+            tmdbId: seasonTmdbId ?? '',
+            title: remoteSeasonTitle ?? `Season ${seasonNumber}`,
+          },
+          episode: {
+            number: episodeNumber,
+            tmdbId: episodeTmdbId ?? '',
+          },
+        };
+
+        console.log('[TV WatchParty Guest] Scraping synced episode', payload);
+        const playback = await scrapeEpisode(payload, { sourceOrder });
+
+        if (isCancelled) return;
+        if (!playback.uri) throw new Error('Playback URI missing');
+
+        const formattedTitle = `${displayTitle} • S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
+        applyPlaybackResult(playback, { title: formattedTitle });
+      } catch (err) {
+        console.error('[TV WatchParty Guest] Failed to load synced episode', err);
+      }
+    };
+
+    void loadRemoteEpisode();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    currentWatchPartyEpisode,
+    isWatchPartyHost,
+    isTvShow,
+    tmdbId,
+    imdbId,
+    displayTitle,
+    releaseYear,
+    seasonNumberParam,
+    episodeNumberParam,
+    scrapeEpisode,
+    sourceOrder,
+    applyPlaybackResult,
+  ]);
   useEffect(() => {
     if (!playbackSource) return;
     if (__DEV__) {
@@ -1366,7 +1849,7 @@ const VideoPlayerScreen = () => {
           manifestUrl = originalUrl;
         }
       }
-    } catch {}
+    } catch { }
 
     const fetchManifest = async () => {
       try {
@@ -1413,41 +1896,41 @@ const VideoPlayerScreen = () => {
   }, [isHlsSource, playbackSource?.uri, playbackSource?.headers]);
 
   function normalizeLang(lang?: string) {
-  if (!lang) return undefined;
-  return lang.toLowerCase().split('-')[0];
-}
-
-useEffect(() => {
-  if (!audioTrackOptions.length) return;
-  const video = videoRef.current;
-  if (!video) return;
-
-  // Respect manual selection
-  if (selectedAudioKey !== 'auto') return;
-
-  // Prefer English
-  let chosen = audioTrackOptions.find((t) => normalizeLang(t.language) === 'en') ??
-               audioTrackOptions.find((t) => (t.name || '').toLowerCase().includes('english'));
-
-  // If no English, fall back to default or first track
-  if (!chosen) {
-    chosen = audioTrackOptions.find((t) => t.isDefault) ?? audioTrackOptions[0];
+    if (!lang) return undefined;
+    return lang.toLowerCase().split('-')[0];
   }
 
-  if (!chosen) return;
+  useEffect(() => {
+    if (!audioTrackOptions.length) return;
+    const video = videoRef.current;
+    if (!video) return;
 
-  setSelectedAudioKey(chosen.id);
+    // Respect manual selection
+    if (selectedAudioKey !== 'auto') return;
 
-  if (chosen.language && chosen.language !== 'und') {
-    (video as any).setStatusAsync({
-      selectedAudioTrack: { type: 'language', value: chosen.language },
-    }).catch(() => {});
-  } else {
-    (video as any).setStatusAsync({
-      selectedAudioTrack: { type: 'system' },
-    }).catch(() => {});
-  }
-}, [audioTrackOptions, selectedAudioKey]);
+    // Prefer English
+    let chosen = audioTrackOptions.find((t) => normalizeLang(t.language) === 'en') ??
+      audioTrackOptions.find((t) => (t.name || '').toLowerCase().includes('english'));
+
+    // If no English, fall back to default or first track
+    if (!chosen) {
+      chosen = audioTrackOptions.find((t) => t.isDefault) ?? audioTrackOptions[0];
+    }
+
+    if (!chosen) return;
+
+    setSelectedAudioKey(chosen.id);
+
+    if (chosen.language && chosen.language !== 'und') {
+      (video as any).setStatusAsync({
+        selectedAudioTrack: { type: 'language', value: chosen.language },
+      }).catch(() => { });
+    } else {
+      (video as any).setStatusAsync({
+        selectedAudioTrack: { type: 'system' },
+      }).catch(() => { });
+    }
+  }, [audioTrackOptions, selectedAudioKey]);
   // lock orientation
   useEffect(() => {
     const setup = async () => {
@@ -1515,7 +1998,7 @@ useEffect(() => {
         const shouldResume = midrollWasPlayingRef.current;
         if (shouldResume) {
           setIsPlaying(true);
-          video.playAsync().catch(() => {});
+          video.playAsync().catch(() => { });
         }
       }
     }, 250);
@@ -1595,6 +2078,7 @@ useEffect(() => {
         }
         const enriched: Media = {
           ...baseEntry,
+          vote_average: baseEntry.vote_average,
           watchProgress: {
             positionMillis: positionValue,
             durationMillis: durationValue,
@@ -1632,7 +2116,7 @@ useEffect(() => {
           });
           try {
             void logInteraction({ type: 'watch', actorId: user.uid, targetId: enriched.id, meta: { progress: progressValue } });
-          } catch {}
+          } catch { }
         }
       } catch (err) {
         console.warn('Failed to update watch history', err);
@@ -1722,7 +2206,7 @@ useEffect(() => {
             if (shouldPlayAfter === false) return video.pauseAsync();
             return undefined;
           })
-          .catch(() => {});
+          .catch(() => { });
       }
     }
 
@@ -1763,7 +2247,7 @@ useEffect(() => {
           lastAdvanceTsRef.current = Date.now();
         }
       }
-    } catch {}
+    } catch { }
     prevPositionRef.current = currentPos;
     // Show buffering overlay only when buffering persists and playback is effectively stalled
     if (bufferingNow && !isSeeking) {
@@ -1857,7 +2341,8 @@ useEffect(() => {
     bumpControlsLife();
     lastPlayPauseIntentTsRef.current = Date.now();
 
-    const nextPlaying = !isPlaying;
+    // Use ref to avoid dependency on frequent state updates
+    const nextPlaying = !isPlayingRef.current;
     setIsPlaying(nextPlaying);
     if (!nextPlaying) setShowControls(true);
 
@@ -1913,13 +2398,15 @@ useEffect(() => {
         Alert.alert('Playback error', msg);
       }
     })();
-  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying, publishWatchPartyPlayback]);
+  }, [bumpControlsLife, ensurePlaybackAudioMode, publishWatchPartyPlayback]);
   const seekBy = useCallback(
     async (deltaMillis: number) => {
       const video = videoRef.current;
       if (!video) return;
       bumpControlsLife();
-      const next = Math.max(0, Math.min(positionMillis + deltaMillis, durationMillis));
+      // Use ref to avoid dependency on constant progress updates
+      const currentPos = positionMillisRef.current;
+      const next = Math.max(0, Math.min(currentPos + deltaMillis, durationMillis));
       await video.setPositionAsync(next);
       setSeekPosition(next);
 
@@ -1928,7 +2415,7 @@ useEffect(() => {
         { force: true },
       );
     },
-    [bumpControlsLife, durationMillis, positionMillis, publishWatchPartyPlayback],
+    [bumpControlsLife, durationMillis, publishWatchPartyPlayback],
   );
 
   const tvRemoteHandler = useCallback(
@@ -1939,10 +2426,21 @@ useEffect(() => {
 
       // Keep controls alive on any remote input.
       bumpControlsLife();
-      if (type !== 'down') setShowControls(true);
+      const controlsVisible = showControlsRef.current;
+      if (controlsVisible) {
+        if (type === 'select') return;
+        if (type === 'left' || type === 'right' || type === 'up' || type === 'down') return;
+      }
+
+      if (type !== 'down' && !controlsVisible) {
+        setShowControls(true);
+        return;
+      }
 
       switch (type) {
         case 'select':
+          if (!controlsVisible) togglePlayPause();
+          return;
         case 'playPause':
           togglePlayPause();
           return;
@@ -1955,7 +2453,7 @@ useEffect(() => {
           void seekBy(10_000);
           return;
         case 'up':
-          setShowControls(true);
+          if (!controlsVisible) setShowControls(true);
           return;
         case 'down':
           setShowControls(false);
@@ -2003,6 +2501,58 @@ useEffect(() => {
       handler.disable();
     };
   }, [isTvDevice, tvRemoteHandler]);
+
+  // Web keyboard support for TV remote simulation
+  useEffect(() => {
+    if (!isTvDevice) return;
+    if (Platform.OS !== 'web') return;
+    if (typeof window === 'undefined') return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key;
+      let eventType: string | null = null;
+
+      switch (key) {
+        case ' ':
+        case 'Enter':
+          eventType = 'playPause';
+          break;
+        case 'ArrowLeft':
+        case 'Left':
+          eventType = 'left';
+          break;
+        case 'ArrowRight':
+        case 'Right':
+          eventType = 'right';
+          break;
+        case 'ArrowUp':
+        case 'Up':
+          eventType = 'up';
+          break;
+        case 'ArrowDown':
+        case 'Down':
+          eventType = 'down';
+          break;
+        case 'Escape':
+        case 'Backspace':
+          eventType = 'back';
+          break;
+        default:
+          return;
+      }
+
+      if (eventType) {
+        e.preventDefault();
+        e.stopPropagation();
+        tvRemoteHandler({ eventType });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [isTvDevice, tvRemoteHandler]);
   const handleRateToggle = async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -2025,6 +2575,14 @@ useEffect(() => {
   const bufferedMillisForUi = Math.max(playedMillisForUi, bufferedMillis);
   const playedPctForUi = clamp01(playedMillisForUi / durationForUi);
   const bufferedPctForUi = clamp01(bufferedMillisForUi / durationForUi);
+
+  const overlayPaddingStyle = useMemo(
+    () => ({
+      paddingTop: Math.max(18, insets.top + 10),
+      paddingBottom: Math.max(18, insets.bottom + 12),
+    }),
+    [insets.bottom, insets.top],
+  );
   useEffect(() => {
     if (!isTvShow) {
       setEpisodeDrawerOpen(false);
@@ -2123,14 +2681,14 @@ useEffect(() => {
       typeof player?.presentPictureInPictureAsync === 'function'
         ? player.presentPictureInPictureAsync.bind(player)
         : typeof player?.enterPictureInPictureAsync === 'function'
-        ? player.enterPictureInPictureAsync.bind(player)
-        : null;
+          ? player.enterPictureInPictureAsync.bind(player)
+          : null;
     const exitPip =
       typeof player?.dismissPictureInPictureAsync === 'function'
         ? player.dismissPictureInPictureAsync.bind(player)
         : typeof player?.exitPictureInPictureAsync === 'function'
-        ? player.exitPictureInPictureAsync.bind(player)
-        : null;
+          ? player.exitPictureInPictureAsync.bind(player)
+          : null;
     if (!enterPip && !exitPip) {
       if (Platform.OS === 'android') {
         Alert.alert(
@@ -2202,7 +2760,7 @@ useEffect(() => {
         setActiveCaptionText(null);
         const key = captionPreferenceKeyRef.current;
         if (key) {
-          await AsyncStorage.setItem(key, 'off').catch(() => {});
+          await AsyncStorage.setItem(key, 'off').catch(() => { });
         }
         return;
       }
@@ -2214,7 +2772,7 @@ useEffect(() => {
       setSelectedCaptionId(captionId);
       const key = captionPreferenceKeyRef.current;
       if (key) {
-        await AsyncStorage.setItem(key, captionId).catch(() => {});
+        await AsyncStorage.setItem(key, captionId).catch(() => { });
       }
       const cached = captionCacheRef.current[captionId];
       if (cached) {
@@ -2245,32 +2803,32 @@ useEffect(() => {
     [captionSources, positionMillis, selectedCaptionId, updateActiveCaption, bumpControlsLife],
   );
   const handleAudioSelect = useCallback(
-  async (option: AudioTrackOption | null) => {
-    bumpControlsLife();
-    const video = videoRef.current;
-    if (!video) return;
+    async (option: AudioTrackOption | null) => {
+      bumpControlsLife();
+      const video = videoRef.current;
+      if (!video) return;
 
-    setSelectedAudioKey(option?.id ?? 'auto');
+      setSelectedAudioKey(option?.id ?? 'auto');
 
-    try {
-      if (option?.language && option.language !== 'und') {
-        await (video as any).setStatusAsync({
-          selectedAudioTrack: {
-            type: 'language',
-            value: option.language,
-          },
-        });
-      } else {
-        await (video as any).setStatusAsync({
-          selectedAudioTrack: { type: 'system' },
-        });
+      try {
+        if (option?.language && option.language !== 'und') {
+          await (video as any).setStatusAsync({
+            selectedAudioTrack: {
+              type: 'language',
+              value: option.language,
+            },
+          });
+        } else {
+          await (video as any).setStatusAsync({
+            selectedAudioTrack: { type: 'system' },
+          });
+        }
+      } catch (err) {
+        console.warn('Audio track switch failed', err);
       }
-    } catch (err) {
-      console.warn('Audio track switch failed', err);
-    }
-  },
-  [bumpControlsLife],
-);
+    },
+    [bumpControlsLife],
+  );
   useEffect(() => {
     if (!captionSources.length) return;
     let cancelled = false;
@@ -2299,7 +2857,7 @@ useEffect(() => {
       cancelled = true;
     };
   }, [captionSources, handleCaptionSelect, selectedCaptionId]);
-  const handleEpisodePlay = async (episode: UpcomingEpisode, index: number) => {
+  const handleEpisodePlay = useCallback(async (episode: UpcomingEpisode, index: number) => {
     if (!isTvShow) return;
     if (!tmdbId) {
       Alert.alert('Missing episode info', 'Unable to load this episode right now.');
@@ -2313,20 +2871,20 @@ useEffect(() => {
         typeof episode.seasonNumber === 'number'
           ? episode.seasonNumber
           : typeof seasonNumberParam === 'number'
-          ? seasonNumberParam
-          : 1;
+            ? seasonNumberParam
+            : 1;
       const normalizedEpisodeNumber =
         typeof episode.episodeNumber === 'number'
           ? episode.episodeNumber
           : typeof episodeNumberParam === 'number'
-          ? episodeNumberParam
-          : 1;
+            ? episodeNumberParam
+            : 1;
       const derivedSeasonEpisodeCount =
         typeof episode.seasonEpisodeCount === 'number'
           ? episode.seasonEpisodeCount
           : typeof seasonEpisodeCountParam === 'number'
-          ? seasonEpisodeCountParam
-          : undefined;
+            ? seasonEpisodeCountParam
+            : undefined;
       const payload = {
         type: 'show',
         title: displayTitle,
@@ -2375,12 +2933,27 @@ useEffect(() => {
       console.error('[VideoPlayer] Episode scrape failed', err);
       Alert.alert('Episode unavailable', err?.message || 'Unable to load this episode.');
     }
-  };
+  }, [
+    isTvShow,
+    tmdbId,
+    scrapingEpisode,
+    displayTitle,
+    seasonNumberParam,
+    episodeNumberParam,
+    seasonEpisodeCountParam,
+    releaseYear,
+    seasonTitleParam,
+    sourceOrder,
+    scrapeEpisode,
+    applyPlaybackResult,
+    watchHistoryEntry,
+    parsedTmdbNumericId,
+  ]);
   const videoPipProps = useMemo(() => ({ allowsPictureInPicture: pipUiEnabled }), [pipUiEnabled]);
   return (
     <View style={styles.container}>
       <StatusBar hidden />
-      <TouchableOpacity activeOpacity={1} style={styles.touchLayer} onPress={handleSurfacePress}>
+      <View style={styles.touchLayer}>
         {transitionReady && videoPlaybackSource ? (
           <>
             <Video
@@ -2406,18 +2979,40 @@ useEffect(() => {
               onReadyForDisplay={handleVideoReadyForDisplay}
             />
             <VideoMaskingOverlay intensity={0.06} />
+
+            {/* Surface tap handler sits behind controls so it never steals button presses. */}
+            <Pressable
+              focusable={false}
+              accessible={false}
+              style={styles.surfacePressLayer}
+              onPress={handleSurfacePress}
+            />
           </>
         ) : (
           <View style={styles.videoFallback}>
             {shouldShowMovieFlixLoader ? null : (
               <>
                 <Text style={styles.videoFallbackText}>{scrapeError ?? 'No video stream available.'}</Text>
-                <TouchableOpacity style={styles.videoFallbackButton} onPress={handleRetryStream}>
+                <TvFocusable
+                  tvPreferredFocus
+                  onPress={handleRetryStream}
+                  style={({ focused }: any) => [
+                    styles.videoFallbackButton,
+                    focused ? styles.videoFallbackButtonFocused : null,
+                  ]}
+                >
                   <Text style={styles.videoFallbackButtonText}>Retry</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.videoFallbackButton, { marginTop: 12 }]} onPress={() => router.back()}>
+                </TvFocusable>
+                <TvFocusable
+                  onPress={() => router.back()}
+                  style={({ focused }: any) => [
+                    styles.videoFallbackButton,
+                    { marginTop: 12 },
+                    focused ? styles.videoFallbackButtonFocused : null,
+                  ]}
+                >
                   <Text style={styles.videoFallbackButtonText}>Go Back</Text>
-                </TouchableOpacity>
+                </TvFocusable>
               </>
             )}
           </View>
@@ -2439,16 +3034,16 @@ useEffect(() => {
               <Text style={styles.watchPartyWaitText}>
                 The host hasn’t started the movie yet. Playback will start automatically once they press play.
               </Text>
-              <Pressable
+              <TvFocusable
                 onPress={() => router.back()}
-                hasTVPreferredFocus
+                tvPreferredFocus
                 style={({ focused }: any) => [
                   styles.watchPartyWaitButton,
                   focused ? styles.watchPartyWaitButtonFocused : null,
                 ]}
               >
                 <Text style={styles.watchPartyWaitButtonText}>Back</Text>
-              </Pressable>
+              </TvFocusable>
             </View>
           </View>
         ) : null}
@@ -2475,7 +3070,7 @@ useEffect(() => {
                   product={midrollProduct}
                   onPress={() => {
                     if (!midrollProduct?.id) return;
-                    void trackPromotionClick({ productId: String(midrollProduct.id), placement: 'story' }).catch(() => {});
+                    void trackPromotionClick({ productId: String(midrollProduct.id), placement: 'story' }).catch(() => { });
                     router.push((`/marketplace/${midrollProduct.id}`) as any);
                   }}
                 />
@@ -2486,39 +3081,78 @@ useEffect(() => {
             </View>
           </View>
         ) : null}
+        {/* Big paused info - shows when paused (behind controls, visible when they fade) */}
+        {!isPlaying && !isLocked && !midrollActive && rawOverview && (
+          <View style={styles.pausedOverlay} pointerEvents="none">
+            <LinearGradient
+              colors={['transparent', 'rgba(0,0,0,0.6)', 'rgba(0,0,0,0.95)']}
+              style={styles.pausedGradient}
+            />
+            <View style={[styles.pausedContent, { paddingBottom: insets.bottom + 60 }]}>
+              <View style={styles.pausedBadgeRow}>
+                <View style={styles.pausedBadge}>
+                  <Ionicons name="pause" size={18} color="#fff" />
+                  <Text style={styles.pausedBadgeText}>PAUSED</Text>
+                </View>
+                {durationMillis > 0 && (
+                  <Text style={styles.pausedTime}>
+                    {Math.floor(durationMillis / 60000)} min
+                  </Text>
+                )}
+              </View>
+              <Text style={styles.pausedTitle}>{activeTitle}</Text>
+              {isTvShow && initialSeasonNumber && initialEpisodeNumber && (
+                <Text style={styles.pausedEpisode}>
+                  Season {initialSeasonNumber}, Episode {initialEpisodeNumber}
+                </Text>
+              )}
+              <Text style={styles.pausedDesc} numberOfLines={5}>{rawOverview}</Text>
+              {!showControls && <Text style={styles.pausedHint}>Press any button to resume</Text>}
+            </View>
+          </View>
+        )}
+
         {!showControls && !isLocked && !midrollActive ? (
-          <Pressable style={styles.touchCatcher} onPress={handleSurfacePress} />
+          <Pressable
+            focusable={false}
+            accessible={false}
+            style={styles.touchCatcher}
+            onPress={handleSurfacePress}
+          />
         ) : null}
         {showControls && !isLocked && (
-          <View style={styles.overlay}>
+          <View style={[styles.overlay, overlayPaddingStyle]}>
             {/* Top fade */}
             <LinearGradient
               colors={['rgba(0,0,0,0.8)', 'transparent']}
-              style={styles.topGradient}
+              style={[styles.topGradient, { height: 140 + insets.top }]}
             />
             {/* Bottom fade */}
             <LinearGradient
               colors={['transparent', 'rgba(0,0,0,0.9)']}
-              style={styles.bottomGradient}
+              style={[styles.bottomGradient, { height: 180 + insets.bottom }]}
             />
             {/* TOP BAR */}
             <View style={styles.topBar}>
               <View style={styles.topLeft}>
                 {isTvDevice ? (
-                  <Pressable
+                  <TvFocusable
                     onPress={() => router.back()}
-                    hasTVPreferredFocus
+                    tvPreferredFocus
                     style={({ focused }: any) => [
                       styles.roundButton,
                       focused ? styles.roundButtonFocused : null,
                     ]}
                   >
                     <Ionicons name="chevron-back" size={20} color="#fff" />
-                  </Pressable>
+                  </TvFocusable>
                 ) : (
-                  <TouchableOpacity style={styles.roundButton} onPress={() => router.back()}>
+                  <TvFocusable
+                    onPress={() => router.back()}
+                    style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
+                  >
                     <Ionicons name="chevron-back" size={20} color="#fff" />
-                  </TouchableOpacity>
+                  </TvFocusable>
                 )}
                 <View style={styles.titleWrap}>
                   <Text style={styles.title}>{activeTitle}</Text>
@@ -2531,7 +3165,7 @@ useEffect(() => {
                 {isTvDevice ? (
                   <>
                     {isTvShow && episodeQueue.length > 0 ? (
-                      <Pressable
+                      <TvFocusable
                         onPress={() => setEpisodeDrawerOpen((prev) => !prev)}
                         style={({ focused }: any) => [
                           styles.roundButton,
@@ -2539,9 +3173,9 @@ useEffect(() => {
                         ]}
                       >
                         <MaterialCommunityIcons name="playlist-play" size={22} color="#fff" />
-                      </Pressable>
+                      </TvFocusable>
                     ) : null}
-                    <Pressable
+                    <TvFocusable
                       onPress={() => {
                         if (!avControlsEnabled) return;
                         bumpControlsLife();
@@ -2555,35 +3189,53 @@ useEffect(() => {
                       ]}
                     >
                       <MaterialCommunityIcons name="subtitles-outline" size={22} color="#fff" />
-                    </Pressable>
+                    </TvFocusable>
                   </>
                 ) : (
                   <>
-                    <TouchableOpacity style={styles.roundButton}>
+                    <TvFocusable
+                      onPress={() => {
+                        // no-op (mobile-only placeholder)
+                      }}
+                      style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
+                    >
                       <MaterialCommunityIcons name="thumb-down-outline" size={22} color="#fff" />
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.roundButton}>
+                    </TvFocusable>
+                    <TvFocusable
+                      onPress={() => {
+                        // no-op (mobile-only placeholder)
+                      }}
+                      style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
+                    >
                       <MaterialCommunityIcons name="thumb-up-outline" size={22} color="#fff" />
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.roundButton}>
+                    </TvFocusable>
+                    <TvFocusable
+                      onPress={() => {
+                        // no-op (mobile-only placeholder)
+                      }}
+                      style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
+                    >
                       <MaterialCommunityIcons name="monitor-share" size={22} color="#fff" />
-                    </TouchableOpacity>
+                    </TvFocusable>
                     {roomCode ? (
-                      <TouchableOpacity style={styles.roundButton} onPress={() => setShowChat((prev) => !prev)}>
+                      <TvFocusable
+                        onPress={() => setShowChat((prev) => !prev)}
+                        style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
+                      >
                         <MaterialCommunityIcons
                           name={showChat ? 'message-text-outline' : 'message-outline'}
                           size={22}
                           color="#fff"
                         />
-                      </TouchableOpacity>
+                      </TvFocusable>
                     ) : null}
                     {isTvShow && episodeQueue.length > 0 ? (
-                      <TouchableOpacity
-                        style={styles.roundButton}
+                      <TvFocusable
                         onPress={() => setEpisodeDrawerOpen((prev) => !prev)}
+                        style={({ focused }: any) => [styles.roundButton, focused ? styles.roundButtonFocused : null]}
                       >
                         <MaterialCommunityIcons name="playlist-play" size={22} color="#fff" />
-                      </TouchableOpacity>
+                      </TvFocusable>
                     ) : null}
                   </>
                 )}
@@ -2595,75 +3247,95 @@ useEffect(() => {
               {isTvDevice ? null : (
                 <View style={styles.centerControlsWrap}>
                   <View style={styles.centerControls}>
-                    <TouchableOpacity style={styles.iconCircleSmall} onPress={() => void seekBy(-10_000)}>
+                    <TvFocusable
+                      onPress={() => void seekBy(-10_000)}
+                      style={({ focused }: any) => [
+                        styles.iconCircleSmall,
+                        focused ? styles.iconCircleSmallFocused : null,
+                      ]}
+                    >
                       <MaterialCommunityIcons name="rewind-10" size={30} color="#fff" />
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={togglePlayPause} style={styles.iconCircle}>
+                    </TvFocusable>
+                    <TvFocusable
+                      onPress={togglePlayPause}
+                      tvPreferredFocus
+                      style={({ focused }: any) => [styles.iconCircle, focused ? styles.iconCircleFocused : null]}
+                    >
                       <MaterialCommunityIcons name={isPlaying ? 'pause' : 'play'} size={48} color="#fff" />
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.iconCircleSmall} onPress={() => void seekBy(10_000)}>
+                    </TvFocusable>
+                    <TvFocusable
+                      onPress={() => void seekBy(10_000)}
+                      style={({ focused }: any) => [
+                        styles.iconCircleSmall,
+                        focused ? styles.iconCircleSmallFocused : null,
+                      ]}
+                    >
                       <MaterialCommunityIcons name="fast-forward-10" size={30} color="#fff" />
-                    </TouchableOpacity>
+                    </TvFocusable>
                   </View>
                 </View>
               )}
               {isTvDevice ? null : (
-              <View style={[styles.sideCluster, styles.sideClusterRight]}>
-                {/* Watch party chat (only when in a room) */}
-                {roomCode && showChat ? (
-                <View style={styles.chatPanel}>
-                  <Text style={styles.chatTitle}>Party chat</Text>
-                  <FlatList
-                    data={chatMessages}
-                    keyExtractor={(item) => item.id}
-                    style={styles.chatList}
-                    contentContainerStyle={styles.chatListContent}
-                    renderItem={({ item }) => (
-                      <View style={styles.chatMessageRow}>
-                        {item.avatar ? (
-                          <Image
-                            source={{ uri: item.avatar }}
-                            style={styles.chatAvatar}
-                          />
-                        ) : (
-                          <View style={styles.chatAvatarFallback}>
-                            <Text style={styles.chatAvatarFallbackText}>
-                              {item.user.charAt(0).toUpperCase()}
-                            </Text>
+                <View style={[styles.sideCluster, styles.sideClusterRight]}>
+                  {/* Watch party chat (only when in a room) */}
+                  {roomCode && showChat ? (
+                    <View style={styles.chatPanel}>
+                      <Text style={styles.chatTitle}>Party chat</Text>
+                      <FlatList
+                        data={chatMessages}
+                        keyExtractor={(item) => item.id}
+                        style={styles.chatList}
+                        contentContainerStyle={styles.chatListContent}
+                        renderItem={({ item }) => (
+                          <View style={styles.chatMessageRow}>
+                            {item.avatar ? (
+                              <Image
+                                source={{ uri: item.avatar }}
+                                style={styles.chatAvatar}
+                              />
+                            ) : (
+                              <View style={styles.chatAvatarFallback}>
+                                <Text style={styles.chatAvatarFallbackText}>
+                                  {item.user.charAt(0).toUpperCase()}
+                                </Text>
+                              </View>
+                            )}
+                            <View style={styles.chatBubble}>
+                              <Text style={styles.chatUser}>{item.user}</Text>
+                              <Text style={styles.chatText}>{item.text}</Text>
+                            </View>
                           </View>
                         )}
-                        <View style={styles.chatBubble}>
-                          <Text style={styles.chatUser}>{item.user}</Text>
-                          <Text style={styles.chatText}>{item.text}</Text>
-                        </View>
+                      />
+                      <View style={styles.chatInputRow}>
+                        <TextInput
+                          style={styles.chatInput}
+                          placeholder="Say something…"
+                          placeholderTextColor="rgba(255,255,255,0.5)"
+                          value={chatInput}
+                          onChangeText={setChatInput}
+                          onSubmitEditing={handleSendChat}
+                          editable={!chatSending}
+                        />
+                        <TvFocusable
+                          onPress={handleSendChat}
+                          disabled={chatSending || !chatInput.trim()}
+                          style={({ focused }: any) => [
+                            styles.chatSendButton,
+                            focused ? styles.drawerCloseFocused : null,
+                          ]}
+                        >
+                          <Ionicons name="send" size={16} color="#fff" />
+                        </TvFocusable>
                       </View>
-                    )}
-                  />
-                  <View style={styles.chatInputRow}>
-                    <TextInput
-                      style={styles.chatInput}
-                      placeholder="Say something…"
-                      placeholderTextColor="rgba(255,255,255,0.5)"
-                      value={chatInput}
-                      onChangeText={setChatInput}
-                      onSubmitEditing={handleSendChat}
-                      editable={!chatSending}
-                    />
-                    <TouchableOpacity
-                      style={styles.chatSendButton}
-                      onPress={handleSendChat}
-                      disabled={chatSending || !chatInput.trim()}
-                    >
-                      <Ionicons name="send" size={16} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
+                    </View>
+                  ) : (
+                    <View style={styles.middleRightPlaceholder} />
+                  )}
                 </View>
-                ) : (
-                <View style={styles.middleRightPlaceholder} />
-              )}
-              </View>
               )}
             </View>
+
             {episodeDrawerOpen && isTvShow && episodeQueue.length > 0 && (
               <View style={styles.episodeDrawer}>
                 <View style={styles.episodeDrawerHeader}>
@@ -2674,7 +3346,7 @@ useEffect(() => {
                     </Text>
                   </View>
                   {isTvDevice ? (
-                    <Pressable
+                    <TvFocusable
                       onPress={() => setEpisodeDrawerOpen(false)}
                       style={({ focused }: any) => [
                         styles.episodeDrawerClose,
@@ -2682,11 +3354,17 @@ useEffect(() => {
                       ]}
                     >
                       <Ionicons name="close" size={18} color="#fff" />
-                    </Pressable>
+                    </TvFocusable>
                   ) : (
-                    <TouchableOpacity style={styles.episodeDrawerClose} onPress={() => setEpisodeDrawerOpen(false)}>
+                    <TvFocusable
+                      onPress={() => setEpisodeDrawerOpen(false)}
+                      style={({ focused }: any) => [
+                        styles.episodeDrawerClose,
+                        focused ? styles.drawerCloseFocused : null,
+                      ]}
+                    >
                       <Ionicons name="close" size={18} color="#fff" />
-                    </TouchableOpacity>
+                    </TvFocusable>
                   )}
                 </View>
                 <ScrollView
@@ -2701,7 +3379,36 @@ useEffect(() => {
                     const fallbackEpisodeNumber = episode.episodeNumber ?? index + 2;
                     return (
                       isTvDevice ? (
-                        <Pressable
+                        <TvFocusable
+                          key={key}
+                          tvPreferredFocus={index === 0}
+                          onPress={() => void handleEpisodePlay(episode, index)}
+                          disabled={scrapingEpisode}
+                          style={({ focused }: any) => [
+                            styles.episodeDrawerCard,
+                            focused ? styles.drawerItemFocused : null,
+                          ]}
+                        >
+                          <Image source={{ uri: posterUri }} style={styles.episodeDrawerThumb} />
+                          <View style={styles.episodeDrawerMeta}>
+                            <Text style={styles.episodeDrawerSeason}>
+                              {(episode.seasonName ?? `Season ${episode.seasonNumber ?? ''}`)?.trim() || 'Season'} · Ep {fallbackEpisodeNumber}
+                            </Text>
+                            <Text style={styles.episodeDrawerName} numberOfLines={1}>
+                              {episode.title || 'Episode'}
+                            </Text>
+                            {episode.overview ? (
+                              <Text style={styles.episodeDrawerOverview} numberOfLines={2}>
+                                {episode.overview}
+                              </Text>
+                            ) : null}
+                            {episode.runtime ? (
+                              <Text style={styles.episodeDrawerRuntime}>{episode.runtime} min</Text>
+                            ) : null}
+                          </View>
+                        </TvFocusable>
+                      ) : (
+                        <TvFocusable
                           key={key}
                           onPress={() => void handleEpisodePlay(episode, index)}
                           disabled={scrapingEpisode}
@@ -2727,33 +3434,7 @@ useEffect(() => {
                               <Text style={styles.episodeDrawerRuntime}>{episode.runtime} min</Text>
                             ) : null}
                           </View>
-                        </Pressable>
-                      ) : (
-                        <TouchableOpacity
-                          key={key}
-                          style={styles.episodeDrawerCard}
-                          onPress={() => void handleEpisodePlay(episode, index)}
-                          disabled={scrapingEpisode}
-                          activeOpacity={0.85}
-                        >
-                          <Image source={{ uri: posterUri }} style={styles.episodeDrawerThumb} />
-                          <View style={styles.episodeDrawerMeta}>
-                            <Text style={styles.episodeDrawerSeason}>
-                              {(episode.seasonName ?? `Season ${episode.seasonNumber ?? ''}`)?.trim() || 'Season'} · Ep {fallbackEpisodeNumber}
-                            </Text>
-                            <Text style={styles.episodeDrawerName} numberOfLines={1}>
-                              {episode.title || 'Episode'}
-                            </Text>
-                            {episode.overview ? (
-                              <Text style={styles.episodeDrawerOverview} numberOfLines={2}>
-                                {episode.overview}
-                              </Text>
-                            ) : null}
-                            {episode.runtime ? (
-                              <Text style={styles.episodeDrawerRuntime}>{episode.runtime} min</Text>
-                            ) : null}
-                          </View>
-                        </TouchableOpacity>
+                        </TvFocusable>
                       )
                     );
                   })}
@@ -2764,19 +3445,20 @@ useEffect(() => {
               <View style={styles.avDrawer}>
                 <View style={styles.avDrawerHeader}>
                   <Text style={styles.avDrawerTitle}>Audio & Subtitles</Text>
-                  <Pressable
+                  <TvFocusable
                     onPress={() => setAvDrawerOpen(false)}
                     style={({ focused }: any) => [styles.avDrawerClose, focused ? styles.drawerCloseFocused : null]}
                   >
                     <Ionicons name="close" size={18} color="#fff" />
-                  </Pressable>
+                  </TvFocusable>
                 </View>
                 <View style={styles.avDrawerColumns}>
                   <View style={styles.avDrawerColumn}>
                     <Text style={styles.avDrawerColumnTitle}>Subtitles</Text>
                     {hasSubtitleOptions ? (
                       <ScrollView style={styles.avDrawerList} showsVerticalScrollIndicator={false}>
-                        <Pressable
+                        <TvFocusable
+                          tvPreferredFocus={true}
                           style={({ focused }: any) => [
                             styles.avOptionRow,
                             selectedCaptionId === 'off' && styles.avOptionRowActive,
@@ -2790,9 +3472,9 @@ useEffect(() => {
                             ) : null}
                           </View>
                           <Text style={styles.avOptionLabel}>Off</Text>
-                        </Pressable>
+                        </TvFocusable>
                         {captionSources.map((caption) => (
-                          <Pressable
+                          <TvFocusable
                             key={caption.id}
                             style={({ focused }: any) => [
                               styles.avOptionRow,
@@ -2810,7 +3492,7 @@ useEffect(() => {
                             {captionLoadingId === caption.id ? (
                               <ActivityIndicator size="small" color="#fff" style={styles.avOptionSpinner} />
                             ) : null}
-                          </Pressable>
+                          </TvFocusable>
                         ))}
                       </ScrollView>
                     ) : (
@@ -2821,7 +3503,7 @@ useEffect(() => {
                     <Text style={styles.avDrawerColumnTitle}>Audio</Text>
                     {hasAudioOptions ? (
                       <ScrollView style={styles.avDrawerList} showsVerticalScrollIndicator={false}>
-                        <Pressable
+                        <TvFocusable
                           style={({ focused }: any) => [
                             styles.avOptionRow,
                             selectedAudioKey === 'auto' && styles.avOptionRowActive,
@@ -2835,9 +3517,9 @@ useEffect(() => {
                             ) : null}
                           </View>
                           <Text style={styles.avOptionLabel}>Auto</Text>
-                        </Pressable>
+                        </TvFocusable>
                         {audioTrackOptions.map((track) => (
-                          <Pressable
+                          <TvFocusable
                             key={track.id}
                             style={({ focused }: any) => [
                               styles.avOptionRow,
@@ -2854,7 +3536,7 @@ useEffect(() => {
                             <Text style={styles.avOptionLabel}>
                               {track.name || track.language?.toUpperCase() || 'Audio'}
                             </Text>
-                          </Pressable>
+                          </TvFocusable>
                         ))}
                       </ScrollView>
                     ) : (
@@ -2865,7 +3547,7 @@ useEffect(() => {
                     <Text style={styles.avDrawerColumnTitle}>Quality</Text>
                     {hasQualityOptions ? (
                       <ScrollView style={styles.avDrawerList} showsVerticalScrollIndicator={false}>
-                        <Pressable
+                        <TvFocusable
                           style={({ focused }: any) => [
                             styles.avOptionRow,
                             selectedQualityId === 'auto' && styles.avOptionRowActive,
@@ -2879,9 +3561,9 @@ useEffect(() => {
                             ) : null}
                           </View>
                           <Text style={styles.avOptionLabel}>Auto (Adaptive)</Text>
-                        </Pressable>
+                        </TvFocusable>
                         {qualityOptions.map((option) => (
-                          <Pressable
+                          <TvFocusable
                             key={option.id}
                             style={({ focused }: any) => [
                               styles.avOptionRow,
@@ -2904,7 +3586,7 @@ useEffect(() => {
                             {qualityLoadingId === option.id ? (
                               <ActivityIndicator size="small" color="#fff" style={styles.avOptionSpinner} />
                             ) : null}
-                          </Pressable>
+                          </TvFocusable>
                         ))}
                       </ScrollView>
                     ) : (
@@ -2970,7 +3652,7 @@ useEffect(() => {
               <View style={[styles.bottomActions, isTvDevice ? styles.bottomActionsTv : null]}>
                 {isTvDevice ? (
                   <>
-                    <Pressable
+                    <TvFocusable
                       onPress={() => void seekBy(-10_000)}
                       style={({ focused }: any) => [
                         styles.tvBottomIconBtn,
@@ -2978,18 +3660,18 @@ useEffect(() => {
                       ]}
                     >
                       <MaterialCommunityIcons name="rewind-10" size={26} color="#fff" />
-                    </Pressable>
-                    <Pressable
+                    </TvFocusable>
+                    <TvFocusable
                       onPress={togglePlayPause}
-                      hasTVPreferredFocus
+                      tvPreferredFocus
                       style={({ focused }: any) => [
                         styles.tvBottomIconBtn,
                         focused ? styles.tvBottomBtnFocused : null,
                       ]}
                     >
                       <MaterialCommunityIcons name={isPlaying ? 'pause' : 'play'} size={26} color="#fff" />
-                    </Pressable>
-                    <Pressable
+                    </TvFocusable>
+                    <TvFocusable
                       onPress={() => void seekBy(10_000)}
                       style={({ focused }: any) => [
                         styles.tvBottomIconBtn,
@@ -2997,8 +3679,8 @@ useEffect(() => {
                       ]}
                     >
                       <MaterialCommunityIcons name="fast-forward-10" size={26} color="#fff" />
-                    </Pressable>
-                    <Pressable
+                    </TvFocusable>
+                    <TvFocusable
                       onPress={handleRateToggle}
                       style={({ focused }: any) => [
                         styles.tvBottomPillBtn,
@@ -3007,8 +3689,8 @@ useEffect(() => {
                     >
                       <MaterialCommunityIcons name="speedometer" size={18} color="#fff" />
                       <Text style={styles.tvBottomPillText}>{`Speed ${playbackRate.toFixed(1)}x`}</Text>
-                    </Pressable>
-                    <Pressable
+                    </TvFocusable>
+                    <TvFocusable
                       onPress={() => {
                         if (!avControlsEnabled) return;
                         bumpControlsLife();
@@ -3023,24 +3705,33 @@ useEffect(() => {
                     >
                       <MaterialCommunityIcons name="subtitles-outline" size={18} color="#fff" />
                       <Text style={styles.tvBottomPillText}>{avDrawerOpen ? 'Hide A/V' : 'Audio & Subs'}</Text>
-                    </Pressable>
+                    </TvFocusable>
                   </>
                 ) : (
                   <>
-                    <TouchableOpacity style={styles.bottomButton} onPress={handleRateToggle}>
+                    <TvFocusable
+                      onPress={handleRateToggle}
+                      style={({ focused }: any) => [styles.bottomButton, focused ? styles.tvBottomPillBtnFocused : null]}
+                    >
                       <MaterialCommunityIcons name="speedometer" size={18} color="#fff" />
                       <Text style={styles.bottomText}>{`Speed (${playbackRate.toFixed(1)}x)`}</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.bottomButton} onPress={toggleLock}>
+                    </TvFocusable>
+                    <TvFocusable
+                      onPress={toggleLock}
+                      style={({ focused }: any) => [styles.bottomButton, focused ? styles.tvBottomPillBtnFocused : null]}
+                    >
                       <MaterialCommunityIcons
                         name={isLocked ? 'lock' : 'lock-outline'}
                         size={18}
                         color="#fff"
                       />
                       <Text style={styles.bottomText}>{isLocked ? 'Locked' : 'Lock'}</Text>
-                    </TouchableOpacity>
+                    </TvFocusable>
                     {pipUiEnabled ? (
-                      <TouchableOpacity style={styles.bottomButton} onPress={handlePipToggle}>
+                      <TvFocusable
+                        onPress={handlePipToggle}
+                        style={({ focused }: any) => [styles.bottomButton, focused ? styles.tvBottomPillBtnFocused : null]}
+                      >
                         <MaterialCommunityIcons
                           name={
                             isPipActive
@@ -3051,10 +3742,14 @@ useEffect(() => {
                           color="#fff"
                         />
                         <Text style={styles.bottomText}>{isPipActive ? 'Exit PiP' : 'PiP'}</Text>
-                      </TouchableOpacity>
+                      </TvFocusable>
                     ) : null}
-                    <TouchableOpacity
-                      style={[styles.bottomButton, !avControlsEnabled && styles.bottomButtonDisabled]}
+                    <TvFocusable
+                      style={({ focused }: any) => [
+                        styles.bottomButton,
+                        !avControlsEnabled ? styles.bottomButtonDisabled : null,
+                        focused && avControlsEnabled ? styles.tvBottomPillBtnFocused : null,
+                      ]}
                       onPress={() => {
                         if (!avControlsEnabled) return;
                         bumpControlsLife();
@@ -3066,7 +3761,7 @@ useEffect(() => {
                       <Text style={styles.bottomText}>
                         {avDrawerOpen ? 'Hide' : 'Audio & Subtitles'}
                       </Text>
-                    </TouchableOpacity>
+                    </TvFocusable>
                   </>
                 )}
               </View>
@@ -3075,14 +3770,18 @@ useEffect(() => {
         )}
         {isLocked && (
           <View pointerEvents="box-none" style={styles.lockBadgeWrapper}>
-            <TouchableOpacity style={styles.lockBadge} onPress={toggleLock} activeOpacity={0.85}>
+            <TvFocusable
+              tvPreferredFocus
+              onPress={toggleLock}
+              style={({ focused }: any) => [styles.lockBadge, focused ? styles.lockBadgeFocused : null]}
+            >
               <MaterialCommunityIcons name="lock" size={20} color="#fff" />
               <View style={styles.lockBadgeTextWrap}>
                 <Text style={styles.lockBadgeTitle}>Screen locked</Text>
                 <Text style={styles.lockBadgeHint}>Tap to unlock</Text>
               </View>
               <MaterialCommunityIcons name="lock-open-variant" size={20} color="#fff" />
-            </TouchableOpacity>
+            </TvFocusable>
           </View>
         )}
         {activeCaptionText ? (
@@ -3090,7 +3789,7 @@ useEffect(() => {
             <Text style={styles.subtitleText}>{activeCaptionText}</Text>
           </View>
         ) : null}
-      </TouchableOpacity>
+      </View>
     </View>
   );
 };
@@ -3098,50 +3797,27 @@ const MovieFlixLoader: React.FC<{ message: string; variant?: 'solid' | 'transpar
   message,
   variant = 'solid',
 }) => {
-  const scale = useRef(new Animated.Value(0.88)).current;
-  const opacity = useRef(new Animated.Value(0.4)).current;
+  // Lightweight loader with subtle opacity pulse - no scale animation for old TV performance
+  const opacity = useRef(new Animated.Value(0.7)).current;
+
   useEffect(() => {
     const animation = Animated.loop(
       Animated.sequence([
-        Animated.parallel([
-          Animated.timing(scale, {
-            toValue: 1.05,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-          Animated.timing(opacity, {
-            toValue: 1,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-        ]),
-        Animated.parallel([
-          Animated.timing(scale, {
-            toValue: 0.88,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-          Animated.timing(opacity, {
-            toValue: 0.4,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-        ]),
+        Animated.timing(opacity, { toValue: 1, duration: 800, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.7, duration: 800, useNativeDriver: true }),
       ]),
     );
     animation.start();
-    return () => {
-      animation.stop();
-    };
-  }, [scale, opacity]);
+    return () => animation.stop();
+  }, [opacity]);
+
   return (
     <View
       pointerEvents={variant === 'solid' ? 'auto' : 'none'}
       style={[styles.loaderOverlay, variant === 'transparent' && styles.loaderOverlayTransparent]}
     >
-      <Animated.Text style={[styles.loaderTitle, { transform: [{ scale }], opacity }]}>
-        MovieFlix
-      </Animated.Text>
+      <Animated.Text style={[styles.loaderTitle, { opacity }]}>MOVIEFLIX</Animated.Text>
+      <ActivityIndicator size="small" color="#e50914" style={{ marginTop: 16 }} />
       {message ? <Text style={styles.loaderSubtitle}>{message}</Text> : null}
     </View>
   );
@@ -3605,6 +4281,10 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  surfacePressLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
   touchCatcher: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 2,
@@ -3634,6 +4314,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#fff',
   },
+  videoFallbackButtonFocused: {
+    borderColor: 'rgba(255,255,255,0.85)',
+    backgroundColor: 'rgba(255,255,255,0.10)',
+    transform: [{ scale: 1.04 }],
+  },
   videoFallbackButtonText: {
     color: '#fff',
     fontWeight: '600',
@@ -3644,6 +4329,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 18,
     justifyContent: 'space-between',
+    zIndex: 3,
   },
   midrollOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -3771,19 +4457,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   roundButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: 'rgba(10,12,25,0.85)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(10,12,25,0.9)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 10,
+    marginLeft: 12,
   },
   roundButtonFocused: {
-    borderColor: 'rgba(255,255,255,0.7)',
-    transform: [{ scale: 1.06 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+    transform: [{ scale: 1.12 }],
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 8,
   },
   roundButtonDisabled: {
     opacity: 0.45,
@@ -3905,8 +4598,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
   },
   iconCircleFocused: {
-    borderColor: 'rgba(255,255,255,0.95)',
-    transform: [{ scale: 1.07 }],
+    borderColor: '#fff',
+    backgroundColor: '#ff1a26',
+    transform: [{ scale: 1.12 }],
   },
   iconCircleSmall: {
     width: 52,
@@ -3920,8 +4614,9 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.35)',
   },
   iconCircleSmallFocused: {
-    borderColor: 'rgba(255,255,255,0.85)',
-    transform: [{ scale: 1.08 }],
+    borderColor: '#fff',
+    backgroundColor: 'rgba(229,9,20,0.8)',
+    transform: [{ scale: 1.12 }],
   },
   tvHint: {
     marginTop: 14,
@@ -4113,38 +4808,112 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
   tvBottomIconBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(10,12,25,0.85)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(10,12,25,0.9)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.15)',
   },
   tvBottomPillBtn: {
-    height: 46,
-    paddingHorizontal: 14,
-    borderRadius: 23,
+    height: 52,
+    paddingHorizontal: 18,
+    borderRadius: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(10,12,25,0.85)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(10,12,25,0.9)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.15)',
   },
   tvBottomBtnFocused: {
-    borderColor: 'rgba(255,255,255,0.75)',
-    transform: [{ scale: 1.06 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+    transform: [{ scale: 1.12 }],
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 12,
+    elevation: 10,
   },
   tvBottomPillBtnFocused: {
-    borderColor: 'rgba(255,255,255,0.75)',
-    transform: [{ scale: 1.04 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+    transform: [{ scale: 1.08 }],
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 12,
+    elevation: 10,
   },
   tvBottomPillText: {
     color: '#fff',
-    fontSize: 12,
+    fontSize: 14,
+    fontWeight: '900',
+    marginLeft: 8,
+  },
+  pausedOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+  },
+  pausedGradient: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  pausedContent: {
+    paddingHorizontal: 60,
+  },
+  pausedBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 24,
+    marginBottom: 20,
+  },
+  pausedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(229,9,20,0.9)',
+  },
+  pausedBadgeText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '800',
-    marginLeft: 6,
+    letterSpacing: 2,
+  },
+  pausedTime: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 22,
+    fontWeight: '600',
+  },
+  pausedTitle: {
+    color: '#fff',
+    fontSize: 48,
+    fontWeight: '900',
+    marginBottom: 12,
+  },
+  pausedEpisode: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 22,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  pausedDesc: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 20,
+    lineHeight: 32,
+    maxWidth: 900,
+  },
+  pausedHint: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: 32,
   },
   episodeDrawer: {
     position: 'absolute',
@@ -4183,8 +4952,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.08)',
   },
   drawerCloseFocused: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    transform: [{ scale: 1.06 }],
+    backgroundColor: 'rgba(229,9,20,0.6)',
+    borderWidth: 2,
+    borderColor: '#fff',
+    transform: [{ scale: 1.1 }],
   },
   episodeDrawerList: {
     paddingBottom: 12,
@@ -4199,9 +4970,9 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   drawerItemFocused: {
-    borderColor: 'rgba(255,255,255,0.7)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    transform: [{ scale: 1.02 }],
+    borderColor: '#fff',
+    backgroundColor: 'rgba(229,9,20,0.25)',
+    transform: [{ scale: 1.03 }],
   },
   episodeDrawerThumb: {
     width: 90,
@@ -4289,12 +5060,14 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   avOptionRowFocused: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(229,9,20,0.35)',
     borderRadius: 12,
     paddingHorizontal: 6,
+    borderWidth: 2,
+    borderColor: '#fff',
   },
   avOptionRowActive: {
-    backgroundColor: 'rgba(229,9,20,0.08)',
+    backgroundColor: 'rgba(229,9,20,0.15)',
     borderRadius: 12,
     paddingHorizontal: 6,
   },
@@ -4338,6 +5111,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.16)',
     gap: 10,
+  },
+  lockBadgeFocused: {
+    borderColor: 'rgba(255,255,255,0.75)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    transform: [{ scale: 1.04 }],
   },
   lockBadgeTextWrap: {
     flexShrink: 1,
@@ -4407,10 +5185,9 @@ const styles = StyleSheet.create({
   },
   loaderTitle: {
     color: '#e50914',
-    fontSize: 42,
+    fontSize: 38,
     fontWeight: '900',
-    letterSpacing: 6,
-    textTransform: 'uppercase',
+    letterSpacing: 8,
   },
   loaderSubtitle: {
     color: '#ffffff',
@@ -4419,42 +5196,76 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   ccWrapper: {
-  alignItems: 'center',
-},
-ccTrack: {
-  width: 68,
-  borderRadius: 34,
-  backgroundColor: 'rgba(20,22,32,0.85)',
-  overflow: 'hidden',
-  borderWidth: 1,
-  borderColor: 'rgba(255,255,255,0.12)',
-  position: 'relative',
-},
-ccFill: {
-  position: 'absolute',
-  left: 0,
-  right: 0,
-  bottom: 0,
-},
-ccThumb: {
-  position: 'absolute',
-  left: 8,
-  right: 8,
-  height: 44,
-  borderRadius: 22,
-  alignItems: 'center',
-  justifyContent: 'center',
-  shadowColor: '#000',
-  shadowOpacity: 0.35,
-  shadowRadius: 6,
-  shadowOffset: { width: 0, height: 2 },
-},
-ccLabel: {
-  marginTop: 10,
-  fontSize: 12,
-  fontWeight: '600',
-  color: 'rgba(255,255,255,0.9)',
-},
+    alignItems: 'center',
+  },
+  ccTrack: {
+    width: 68,
+    borderRadius: 34,
+    backgroundColor: 'rgba(20,22,32,0.85)',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    position: 'relative',
+  },
+  ccFill: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  ccThumb: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  ccLabel: {
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+  },
+  faceCamRow: {
+    position: 'absolute',
+    top: 60,
+    right: 20,
+    flexDirection: 'row',
+    gap: 10,
+    zIndex: 100,
+  },
+  faceCamContainer: {
+    width: 140,
+    height: 80,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  faceCamView: {
+    flex: 1,
+  },
+  faceCamLabel: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    right: 4,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 4,
+    borderRadius: 4,
+  },
+  faceCamLabelText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
 });
 // Add this helper near other helpers (after parseHlsQualityOptions or similar)
 

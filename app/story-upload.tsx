@@ -1,49 +1,122 @@
-import { updateStreakForContext } from '@/lib/streaks/streakManager';
 import { notifyPush } from '@/lib/pushApi';
+import { updateStreakForContext } from '@/lib/streaks/streakManager';
 
-import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
+import { Ionicons } from '@expo/vector-icons';
+import BottomSheet from '@gorhom/bottom-sheet';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { ResizeMode, Video } from 'expo-av';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
-import { ResizeMode, Video } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { addDoc, collection, serverTimestamp, Timestamp, doc, getDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Ionicons } from '@expo/vector-icons';
-import { Alert, Image, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { addDoc, collection, doc, getDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Alert,
+  Animated,
+  Image,
+  InteractionManager,
+  Keyboard,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ScreenWrapper from '../components/ScreenWrapper';
+import StoryMusicPicker, { MusicTrack } from '../components/story/StoryMusicPicker';
+import StoryStepIndicator from '../components/story/StoryStepIndicator';
 import { firestore } from '../constants/firebase';
 import { supabase, supabaseConfigured } from '../constants/supabase';
 import { useUser } from '../hooks/use-user';
 
+type UploadStep = 'media' | 'edit' | 'music' | 'share';
+
 export default function StoryUpload() {
   const insets = useSafeAreaInsets();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [currentStep, setCurrentStep] = useState<UploadStep>('media');
   const [pickedUri, setPickedUri] = useState<string | null>(null);
   const [pickedType, setPickedType] = useState<'image' | 'video' | null>(null);
   const [pickedMimeType, setPickedMimeType] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [caption, setCaption] = useState('');
   const [overlayText, setOverlayText] = useState('');
+  const deferredOverlayText = useDeferredValue(overlayText);
   const [shareToFeed, setShareToFeed] = useState(false);
+
+  // Music state
+  const [selectedMusic, setSelectedMusic] = useState<MusicTrack | null>(null);
+  const [musicStartTime, setMusicStartTime] = useState(0);
+
+  const DRAFT_KEY = '@story_draft_v2';
   const router = useRouter();
   const { user } = useUser();
   const fallbackUser = { uid: 'dev-user', displayName: 'You', photoURL: '' };
   const effectiveUser = (user as any) ?? fallbackUser;
 
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const shareSheetRef = useRef<BottomSheet | null>(null);
-  const shareSheetSnapPoints = useMemo(() => ['40%'], []);
+  const shareSheetIndexRef = useRef(-1);
+  const shareSheetSnapPoints = useMemo(() => ['45%'], []);
+  const pickerInFlightRef = useRef(false);
+  const scrollRef = useRef<ScrollView | null>(null);
 
-  const openShareSheet = useCallback(() => {
-    shareSheetRef.current?.snapToIndex(0);
+  // Animation for step transitions
+  const slideAnim = useRef(new Animated.Value(0)).current;
+  const keyboardHeightAnim = useRef(new Animated.Value(0)).current;
+
+  // Animate step changes
+  useEffect(() => {
+    Animated.spring(slideAnim, {
+      toValue: 0,
+      useNativeDriver: true,
+      friction: 8,
+      tension: 100,
+    }).start();
+  }, [currentStep]);
+
+  // Restore draft on mount
+  useEffect(() => {
+    void (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(DRAFT_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.pickedUri) {
+          setPickedUri(parsed.pickedUri);
+          setPickedType(parsed.pickedType ?? null);
+          setPickedMimeType(parsed.pickedMimeType ?? null);
+          setCurrentStep('edit');
+        }
+        if (parsed?.caption) setCaption(parsed.caption);
+        if (parsed?.overlayText) setOverlayText(parsed.overlayText);
+        if (typeof parsed?.shareToFeed === 'boolean') setShareToFeed(parsed.shareToFeed);
+        if (parsed?.selectedMusic) setSelectedMusic(parsed.selectedMusic);
+      } catch (err) {
+        console.warn('[story-upload] restore draft failed', err);
+      }
+    })();
   }, []);
 
-  const closeShareSheet = useCallback(() => {
-    shareSheetRef.current?.close();
-  }, []);
+  // Persist draft when fields change
+  useEffect(() => {
+    const payload = {
+      pickedUri,
+      pickedType,
+      pickedMimeType,
+      caption,
+      overlayText,
+      shareToFeed,
+      selectedMusic,
+    };
+    void AsyncStorage.setItem(DRAFT_KEY, JSON.stringify(payload)).catch(() => { });
+  }, [pickedUri, pickedType, pickedMimeType, caption, overlayText, shareToFeed, selectedMusic]);
 
   useEffect(() => {
     (async () => {
@@ -52,7 +125,7 @@ export default function StoryUpload() {
         if (status !== 'granted') {
           Alert.alert(
             'Permission required',
-            'Media access is needed to pick a story image. You can enable this later in system settings.'
+            'Media access is needed to pick a story image.'
           );
         }
       }
@@ -65,23 +138,71 @@ export default function StoryUpload() {
     void requestCameraPermission();
   }, [cameraPermission?.granted, requestCameraPermission]);
 
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => {
+        setKeyboardVisible(true);
+        Animated.timing(keyboardHeightAnim, {
+          toValue: e.endCoordinates.height,
+          duration: e.duration || 250,
+          useNativeDriver: false,
+        }).start();
+      }
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      (e) => {
+        setKeyboardVisible(false);
+        Animated.timing(keyboardHeightAnim, {
+          toValue: 0,
+          duration: e.duration || 250,
+          useNativeDriver: false,
+        }).start();
+      }
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   const pickImage = async () => {
+    if (pickerInFlightRef.current) return;
+    pickerInFlightRef.current = true;
     try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (permission.status !== 'granted') {
+        Alert.alert('Permission required', 'Media access is needed to pick a story photo or video.');
+        return;
+      }
+
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => InteractionManager.runAfterInteractions(() => resolve()));
+
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.All,
         allowsEditing: false,
-        videoExportPreset: ImagePicker.VideoExportPreset.HEVC_1920x1080,
-        quality: 1,
+        videoExportPreset: ImagePicker.VideoExportPreset.H264_640x480,
+        quality: 0.85,
       });
 
       if (!result.canceled) {
         const asset = result.assets[0];
         const uri = asset.uri;
-        const type = asset.type === 'video' ? 'video' : 'image';
-        const mimeType = (asset as any)?.mimeType ? String((asset as any).mimeType) : null;
+        const rawMimeType = (asset as any)?.mimeType ? String((asset as any).mimeType) : null;
+        const uriLower = uri.toLowerCase();
+        const looksLikeVideo =
+          rawMimeType?.startsWith('video/') ||
+          uriLower.endsWith('.mp4') ||
+          uriLower.endsWith('.mov') ||
+          uriLower.endsWith('.m4v') ||
+          uriLower.endsWith('.webm') ||
+          uriLower.endsWith('.mkv');
+        const type = asset.type === 'video' || looksLikeVideo ? 'video' : 'image';
+        const mimeType = rawMimeType;
 
         if (uri.startsWith('file://')) {
-          // Copy to a stable path to avoid Android cache issues
           const safeDir = FileSystem.documentDirectory + 'uploads/';
           await FileSystem.makeDirectoryAsync(safeDir, { intermediates: true });
           const ext = type === 'video' ? 'mp4' : 'jpg';
@@ -95,12 +216,44 @@ export default function StoryUpload() {
 
         setPickedType(type);
         setPickedMimeType(mimeType);
+        setCurrentStep('edit'); // Move to edit step
       }
     } catch (error) {
       console.error('Error picking image:', error);
       Alert.alert('Error', 'Could not open your media library.');
+    } finally {
+      pickerInFlightRef.current = false;
     }
   };
+
+  const handleMusicSelect = useCallback((track: MusicTrack, startTime: number) => {
+    setSelectedMusic(track);
+    setMusicStartTime(startTime);
+    setCurrentStep('share');
+  }, []);
+
+  const handleMusicSkip = useCallback(() => {
+    setSelectedMusic(null);
+    setCurrentStep('share');
+  }, []);
+
+  const goToNextStep = useCallback(() => {
+    const steps: UploadStep[] = ['media', 'edit', 'music', 'share'];
+    const idx = steps.indexOf(currentStep);
+    if (idx < steps.length - 1) {
+      setCurrentStep(steps[idx + 1]);
+    }
+  }, [currentStep]);
+
+  const goToPrevStep = useCallback(() => {
+    const steps: UploadStep[] = ['media', 'edit', 'music', 'share'];
+    const idx = steps.indexOf(currentStep);
+    if (idx > 0) {
+      setCurrentStep(steps[idx - 1]);
+    } else {
+      router.back();
+    }
+  }, [currentStep, router]);
 
   const handleUpload = async (options?: { alsoShareToFeed?: boolean }) => {
     if (!pickedUri || !pickedType) {
@@ -115,14 +268,12 @@ export default function StoryUpload() {
     try {
       setIsUploading(true);
       const alsoShareToFeed = Boolean(options?.alsoShareToFeed);
-
       const isVideo = pickedType === 'video';
 
       let finalUri = pickedUri;
-      let contentType = pickedMimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
+      let contentType = isVideo ? 'video/mp4' : pickedMimeType || 'image/jpeg';
 
       if (!isVideo) {
-        // Manipulate the image (resize and compress)
         const manipResult = await manipulateAsync(
           pickedUri,
           [{ resize: { width: 900 } }],
@@ -135,24 +286,40 @@ export default function StoryUpload() {
       const rawName = finalUri.split('/').pop() || `story-${Date.now()}`;
       const fileName = `${effectiveUser.uid}/${Date.now()}-${rawName}`.replace(/\s+/g, '_');
 
-      // Use Blob upload to avoid base64 memory spikes (esp. for video)
-      const blob = await (await fetch(finalUri)).blob();
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+      const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+      if (!supabaseUrl || !supabaseAnonKey) {
+        throw new Error('Missing Supabase env vars.');
+      }
 
-      const { error } = await supabase.storage.from('stories').upload(fileName, blob, {
-        contentType,
-        upsert: true,
+      const safePath = fileName
+        .split('/')
+        .map((segment) => encodeURIComponent(segment))
+        .join('/');
+
+      const uploadUrl = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/stories/${safePath}`;
+      const result = await (FileSystem as any).uploadAsync(uploadUrl, finalUri, {
+        httpMethod: 'POST',
+        uploadType: (FileSystem as any).FileSystemUploadType?.BINARY_CONTENT,
+        headers: {
+          'content-type': contentType,
+          authorization: `Bearer ${supabaseAnonKey}`,
+          apikey: supabaseAnonKey,
+          'x-upsert': 'true',
+        },
       });
 
-      if (error) throw error;
+      if (!result || (typeof result.status === 'number' && result.status >= 300)) {
+        throw new Error(`Upload failed (status ${result?.status ?? 'unknown'})`);
+      }
 
       const { data: publicUrl } = supabase.storage.from('stories').getPublicUrl(fileName);
-
       const expiresAt = Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000);
 
-      const newStoryDoc = await addDoc(collection(firestore, 'stories'), {
+      // Build story document with optional music
+      const storyData: any = {
         userId: effectiveUser.uid,
         username: (effectiveUser.displayName as string) || 'You',
-        // legacy + new fields
         photoURL: !isVideo ? publicUrl.publicUrl : null,
         mediaType: isVideo ? 'video' : 'image',
         mediaUrl: publicUrl.publicUrl,
@@ -161,9 +328,22 @@ export default function StoryUpload() {
         overlayText,
         createdAt: serverTimestamp(),
         expiresAt,
-      });
+      };
 
-      // Push notify followers
+      // Add music data if selected
+      if (selectedMusic) {
+        storyData.musicTrack = {
+          videoId: selectedMusic.videoId,
+          title: selectedMusic.title,
+          artist: selectedMusic.artist,
+          thumbnail: selectedMusic.thumbnail,
+          startTime: musicStartTime,
+          duration: 15, // 15 seconds for stories
+        };
+      }
+
+      const newStoryDoc = await addDoc(collection(firestore, 'stories'), storyData);
+
       void notifyPush({ kind: 'story', storyId: newStoryDoc.id });
 
       // Notify followers
@@ -178,7 +358,7 @@ export default function StoryUpload() {
           .filter((id) => !blocked.includes(id));
 
         for (const followerId of recipients) {
-          await addDoc(collection(firestore, 'notifications'), {
+          const ref = await addDoc(collection(firestore, 'notifications'), {
             type: 'new_story',
             scope: 'social',
             channel: 'community',
@@ -192,11 +372,11 @@ export default function StoryUpload() {
             read: false,
             createdAt: serverTimestamp(),
           });
+          void notifyPush({ kind: 'notification', notificationId: ref.id });
         }
       }
 
       if (alsoShareToFeed) {
-        // Optional: also show in feed cards
         try {
           await addDoc(collection(firestore, 'reviews'), {
             userId: effectiveUser.uid,
@@ -214,13 +394,26 @@ export default function StoryUpload() {
         }
       }
 
-      // Update local streak state for posting a story
       try {
         void updateStreakForContext({ kind: 'story', userId: effectiveUser.uid, username: (effectiveUser.displayName as string) || 'You' });
       } catch (err) {
-        console.warn('Failed to update streak after story upload', err);
+        console.warn('Failed to update streak', err);
       }
-      Alert.alert('Story posted', 'Your story is now live.');
+
+      // Clear draft on success
+      try {
+        await AsyncStorage.removeItem(DRAFT_KEY);
+      } catch { }
+      setPickedUri(null);
+      setPickedType(null);
+      setPickedMimeType(null);
+      setCaption('');
+      setOverlayText('');
+      setShareToFeed(false);
+      setSelectedMusic(null);
+      setCurrentStep('media');
+
+      Alert.alert('Story posted', 'Your story is now live!');
       router.replace('/social-feed');
     } catch (err: any) {
       console.error('Story upload error', err);
@@ -230,210 +423,268 @@ export default function StoryUpload() {
     }
   };
 
+  const closeShareSheet = useCallback(() => {
+    shareSheetRef.current?.close();
+  }, []);
+
+  const openShareSheet = useCallback(() => {
+    shareSheetRef.current?.snapToIndex(0);
+  }, []);
+
+  // Render step content
+  const renderStepContent = () => {
+    switch (currentStep) {
+      case 'media':
+        return (
+          <View style={styles.stepContent}>
+            {Platform.OS !== 'web' && cameraPermission?.granted && !keyboardVisible ? (
+              <CameraView style={styles.cameraPreview} facing="back" />
+            ) : (
+              <LinearGradient
+                colors={['#1a1a2e', '#16213e']}
+                style={styles.cameraPreview}
+              />
+            )}
+            <View style={styles.mediaPickerOverlay}>
+              <TouchableOpacity style={styles.pickBtn} onPress={pickImage} activeOpacity={0.9}>
+                <LinearGradient
+                  colors={['rgba(229,9,20,0.9)', 'rgba(255,138,0,0.9)']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.pickBtnGradient}
+                >
+                  <Ionicons name="images" size={28} color="#fff" />
+                  <Text style={styles.pickBtnText}>Choose from Gallery</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+              <Text style={styles.mediaHint}>Select a photo or video for your story</Text>
+            </View>
+          </View>
+        );
+
+      case 'edit':
+        return (
+          <View style={styles.stepContent}>
+            <ScrollView
+              ref={(r) => { scrollRef.current = r; }}
+              style={{ flex: 1 }}
+              contentContainerStyle={styles.editScrollContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Preview */}
+              {pickedUri && (
+                <View style={styles.previewWrap}>
+                  {pickedType === 'video' ? (
+                    <Video
+                      source={{ uri: pickedUri }}
+                      style={styles.previewMedia}
+                      resizeMode={ResizeMode.COVER}
+                      shouldPlay={!keyboardVisible}
+                      isLooping
+                      isMuted
+                    />
+                  ) : (
+                    <Image source={{ uri: pickedUri }} style={styles.previewMedia} />
+                  )}
+                  {deferredOverlayText ? (
+                    <View style={styles.overlayTextChip}>
+                      <Text style={styles.overlayTextPreview} numberOfLines={2}>
+                        {deferredOverlayText}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              )}
+            </ScrollView>
+
+            {/* Overlay Text Input - Flexbox layout for KeyboardAvoidingView */}
+            <View style={styles.dockedInputSection}>
+              <Text style={styles.inputLabel}>Overlay Text</Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder="Add text to your story..."
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={overlayText}
+                onChangeText={setOverlayText}
+                returnKeyType="done"
+              />
+            </View>
+          </View>
+        );
+
+      case 'music':
+        return (
+          <View style={styles.stepContent}>
+            <StoryMusicPicker
+              accent="#e50914"
+              onSelect={handleMusicSelect}
+              onSkip={handleMusicSkip}
+            />
+          </View>
+        );
+
+      case 'share':
+        return (
+          <ScrollView
+            style={styles.stepContent}
+            contentContainerStyle={styles.shareScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Preview with music indicator */}
+            {pickedUri && (
+              <View style={styles.previewWrap}>
+                {pickedType === 'video' ? (
+                  <Video
+                    source={{ uri: pickedUri }}
+                    style={styles.previewMedia}
+                    resizeMode={ResizeMode.COVER}
+                    shouldPlay={!keyboardVisible}
+                    isLooping
+                    isMuted
+                  />
+                ) : (
+                  <Image source={{ uri: pickedUri }} style={styles.previewMedia} />
+                )}
+                {deferredOverlayText ? (
+                  <View style={styles.overlayTextChip}>
+                    <Text style={styles.overlayTextPreview} numberOfLines={2}>
+                      {deferredOverlayText}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {/* Music badge */}
+                {selectedMusic && (
+                  <View style={styles.musicBadge}>
+                    <Ionicons name="musical-note" size={14} color="#fff" />
+                    <Text style={styles.musicBadgeText} numberOfLines={1}>
+                      {selectedMusic.title}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Caption */}
+            <View style={styles.inputSection}>
+              <Text style={styles.inputLabel}>Caption</Text>
+              <TextInput
+                style={[styles.textInput, styles.captionInput]}
+                placeholder="Write something about your story..."
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                multiline
+                value={caption}
+                onChangeText={setCaption}
+                textAlignVertical="top"
+              />
+            </View>
+
+            {/* Share Options */}
+            <TouchableOpacity
+              style={[styles.shareOption, !shareToFeed && styles.shareOptionActive]}
+              onPress={() => setShareToFeed(false)}
+              activeOpacity={0.8}
+            >
+              <Ionicons
+                name={!shareToFeed ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={!shareToFeed ? '#e50914' : 'rgba(255,255,255,0.5)'}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.shareOptionTitle}>Story only</Text>
+                <Text style={styles.shareOptionSub}>Disappears after 24 hours</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.shareOption, shareToFeed && styles.shareOptionActive]}
+              onPress={() => setShareToFeed(true)}
+              activeOpacity={0.8}
+            >
+              <Ionicons
+                name={shareToFeed ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={shareToFeed ? '#e50914' : 'rgba(255,255,255,0.5)'}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.shareOptionTitle}>Story + Feed</Text>
+                <Text style={styles.shareOptionSub}>Also appears in your feed</Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* Post Button */}
+            <TouchableOpacity
+              style={[styles.postBtn, isUploading && { opacity: 0.6 }]}
+              onPress={() => handleUpload({ alsoShareToFeed: shareToFeed })}
+              disabled={isUploading}
+              activeOpacity={0.9}
+            >
+              <LinearGradient
+                colors={['#ff8a00', '#e50914']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.postBtnGradient}
+              >
+                <Text style={styles.postBtnText}>
+                  {isUploading ? 'Posting...' : 'Share Story'}
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </ScrollView>
+        );
+    }
+  };
+
   return (
     <ScreenWrapper style={styles.wrapper}>
-      {Platform.OS !== 'web' && cameraPermission?.granted ? (
-        <CameraView style={StyleSheet.absoluteFillObject} facing="back" />
-      ) : (
+      <Animated.View
+        style={[styles.container, { paddingBottom: keyboardHeightAnim }]}
+      >
+        {/* Background */}
         <LinearGradient
           colors={['#e50914', '#150a13', '#05060f']}
           start={[0, 0]}
           end={[1, 1]}
           style={styles.gradient}
         />
-      )}
+        <LinearGradient
+          colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.8, y: 1 }}
+          style={styles.gradientOverlay}
+        />
 
-      {/* Keep UI readable on top of the camera */}
-      <LinearGradient
-        colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0.88)']}
-        start={{ x: 0.2, y: 0 }}
-        end={{ x: 0.8, y: 1 }}
-        style={styles.cameraTint}
-      />
-      <LinearGradient
-        colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 1 }}
-        style={styles.bgOrbPrimary}
-      />
-      <LinearGradient
-        colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
-        start={{ x: 0.8, y: 0 }}
-        end={{ x: 0.2, y: 1 }}
-        style={styles.bgOrbSecondary}
-      />
-
-      <View style={styles.container}>
-        <View style={[styles.headerWrap, { marginTop: Platform.OS === 'ios' ? Math.max(12, insets.top + 6) : 12 }]}>
-          <LinearGradient
-            colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.4)']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.headerGlow}
-          />
-          <View style={styles.headerBar}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.iconBtn} accessibilityLabel="Back">
-              <Ionicons name="chevron-back" size={22} color="#fff" />
+        <View style={styles.container}>
+          {/* Header */}
+          <View style={[styles.header, { marginTop: Platform.OS === 'ios' ? insets.top : 12 }]}>
+            <TouchableOpacity onPress={goToPrevStep} style={styles.headerBtn}>
+              <Ionicons name="chevron-back" size={24} color="#fff" />
             </TouchableOpacity>
-            <View style={styles.headerTitleWrap}>
-              <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">Share to stories</Text>
-              <Text style={styles.headerTitle} numberOfLines={1} ellipsizeMode="tail">New Story</Text>
-            </View>
-            <View style={styles.iconBtnPlaceholder} />
+            <Text style={styles.headerTitle}>New Story</Text>
+            {currentStep === 'edit' ? (
+              <TouchableOpacity onPress={goToNextStep} style={styles.headerBtn}>
+                <Ionicons name="musical-notes" size={24} color="#e50914" />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.headerBtn} />
+            )}
           </View>
-        </View>
 
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: 140 + Math.max(0, insets.bottom) }]}
-        >
-          <TouchableOpacity style={styles.pickCard} onPress={pickImage} activeOpacity={0.9}>
-            <LinearGradient
-              colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.9)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={StyleSheet.absoluteFillObject}
-            />
-            <Text style={styles.pickTitle}>{pickedUri ? 'Change story media' : 'Pick story media'}</Text>
-            <Text style={styles.pickSubtitle}>Choose a photo or video from your gallery</Text>
-          </TouchableOpacity>
+          {/* Step Indicator */}
+          <StoryStepIndicator currentStep={currentStep} accent="#e50914" />
 
-          {pickedUri && (
-            <View style={styles.previewWrap}>
-              {pickedType === 'video' ? (
-                <Video
-                  source={{ uri: pickedUri }}
-                  style={styles.image}
-                  resizeMode={ResizeMode.COVER}
-                  shouldPlay
-                  isLooping
-                  isMuted
-                />
-              ) : (
-                <Image source={{ uri: pickedUri }} style={styles.image} />
-              )}
-              {overlayText ? (
-                <View style={styles.overlayTextChip}>
-                  <Text style={styles.overlayTextPreview} numberOfLines={2} ellipsizeMode="tail">
-                    {overlayText}
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          )}
-
-          <View style={styles.inputsWrap}>
-            <Text style={styles.label}>Overlay text</Text>
-            <TextInput
-              style={styles.textInput}
-              placeholder="Add a short phrase on top of your story…"
-              placeholderTextColor="rgba(255,255,255,0.5)"
-              value={overlayText}
-              onChangeText={setOverlayText}
-              returnKeyType="done"
-            />
-
-            <Text style={[styles.label, { marginTop: 12 }]}>Caption</Text>
-            <TextInput
-              style={[styles.textInput, styles.captionInput]}
-              placeholder="Write a caption for your story…"
-              placeholderTextColor="rgba(255,255,255,0.5)"
-              multiline
-              value={caption}
-              onChangeText={setCaption}
-            />
-          </View>
-        </ScrollView>
-
-        <View style={[styles.bottomBar, { paddingBottom: Math.max(12, insets.bottom + 10) }]}>
-          <TouchableOpacity
-            style={[styles.uploadButton, (!pickedUri || isUploading) && styles.uploadButtonDisabled]}
-            disabled={!pickedUri || isUploading}
-            onPress={openShareSheet}
-            activeOpacity={0.92}
+          {/* Step Content */}
+          <Animated.View
+            style={[
+              styles.contentContainer,
+              { transform: [{ translateX: slideAnim }] },
+            ]}
           >
-            <LinearGradient
-              colors={['#ff8a00', '#e50914']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.uploadGradient}
-            >
-              <Text style={styles.uploadText}>{isUploading ? 'Uploading…' : 'Post Story'}</Text>
-            </LinearGradient>
-          </TouchableOpacity>
+            {renderStepContent()}
+          </Animated.View>
         </View>
-
-        <BottomSheet
-          ref={shareSheetRef}
-          index={-1}
-          snapPoints={shareSheetSnapPoints}
-          enablePanDownToClose
-          backdropComponent={(props) => (
-            <BottomSheetBackdrop {...props} appearsOnIndex={0} disappearsOnIndex={-1} opacity={0.55} />
-          )}
-          backgroundStyle={styles.sheetBg}
-          handleIndicatorStyle={styles.sheetHandle}
-        >
-          <View style={styles.sheetContent}>
-            <Text style={styles.sheetTitle}>Where should this go?</Text>
-            <Text style={styles.sheetSubtitle}>You can share to Stories only, or also add it to your feed.</Text>
-
-            <TouchableOpacity
-              style={[styles.sheetOption, !shareToFeed && styles.sheetOptionActive]}
-              activeOpacity={0.88}
-              onPress={() => setShareToFeed(false)}
-              disabled={isUploading}
-            >
-              <Ionicons name={!shareToFeed ? 'radio-button-on' : 'radio-button-off'} size={20} color="#fff" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.sheetOptionTitle}>Story only</Text>
-                <Text style={styles.sheetOptionSub}>Won{"'"}t appear in your feed cards.</Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.sheetOption, shareToFeed && styles.sheetOptionActive]}
-              activeOpacity={0.88}
-              onPress={() => setShareToFeed(true)}
-              disabled={isUploading}
-            >
-              <Ionicons name={shareToFeed ? 'radio-button-on' : 'radio-button-off'} size={20} color="#fff" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.sheetOptionTitle}>Story + Feed</Text>
-                <Text style={styles.sheetOptionSub}>Also shows up in your feed cards.</Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.sheetPrimaryBtn, isUploading && { opacity: 0.6 }]}
-              activeOpacity={0.9}
-              disabled={isUploading}
-              onPress={async () => {
-                closeShareSheet();
-                await handleUpload({ alsoShareToFeed: shareToFeed });
-              }}
-            >
-              <LinearGradient
-                colors={['#ff8a00', '#e50914']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.sheetPrimaryGradient}
-              >
-                <Text style={styles.sheetPrimaryText}>{isUploading ? 'Uploading…' : 'Post now'}</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.sheetSecondaryBtn}
-              activeOpacity={0.9}
-              onPress={closeShareSheet}
-              disabled={isUploading}
-            >
-              <Text style={styles.sheetSecondaryText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </BottomSheet>
-      </View>
+      </Animated.View>
     </ScreenWrapper>
   );
 }
@@ -442,134 +693,107 @@ const styles = StyleSheet.create({
   wrapper: {
     paddingTop: 0,
   },
+  keyboardAvoid: {
+    flex: 1,
+  },
   gradient: {
     ...StyleSheet.absoluteFillObject,
   },
-  cameraTint: {
+  gradientOverlay: {
     ...StyleSheet.absoluteFillObject,
-  },
-  bgOrbPrimary: {
-    position: 'absolute',
-    width: 360,
-    height: 360,
-    borderRadius: 180,
-    top: -60,
-    left: -60,
-    opacity: 0.6,
-    transform: [{ rotate: '15deg' }],
-  },
-  bgOrbSecondary: {
-    position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    bottom: -90,
-    right: -40,
-    opacity: 0.55,
-    transform: [{ rotate: '-12deg' }],
   },
   container: {
     flex: 1,
   },
-  headerWrap: {
-    marginHorizontal: 12,
-    marginBottom: 12,
-    borderRadius: 18,
-    overflow: 'hidden',
-  },
-  headerGlow: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.7,
-  },
-  headerBar: {
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
-  headerTitleWrap: {
-    flex: 1,
-    minWidth: 0,
+  headerBtn: {
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 10,
-  },
-  headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 0.6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   headerTitle: {
-    color: '#fff',
     fontSize: 18,
     fontWeight: '800',
-    letterSpacing: 0.3,
+    color: '#fff',
   },
-  iconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+  contentContainer: {
+    flex: 1,
   },
-  iconBtnPlaceholder: {
-    width: 40,
-    height: 40,
+  stepContent: {
+    flex: 1,
   },
-  scrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 6,
-  },
-  pickCard: {
-    width: '100%',
-    borderRadius: 18,
-    paddingVertical: 16,
-    paddingHorizontal: 16,
+  cameraPreview: {
+    flex: 1,
+    borderRadius: 20,
+    margin: 16,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    marginBottom: 18,
   },
-  pickTitle: {
+  mediaPickerOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 40,
+    alignItems: 'center',
+    gap: 12,
+  },
+  pickBtn: {
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  pickBtnGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+  },
+  pickBtnText: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 4,
+    fontSize: 16,
+    fontWeight: '700',
   },
-  pickSubtitle: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 13,
+  mediaHint: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
+  },
+  editScrollContent: {
+    padding: 16,
+    paddingBottom: 40,
+  },
+  shareScrollContent: {
+    padding: 16,
+    paddingBottom: 40,
   },
   previewWrap: {
     width: '100%',
-    aspectRatio: 3 / 4,
-    borderRadius: 18,
+    aspectRatio: 9 / 16,
+    borderRadius: 20,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    marginBottom: 18,
+    marginBottom: 20,
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  image: {
+  previewMedia: {
     width: '100%',
     height: '100%',
   },
   overlayTextChip: {
     position: 'absolute',
-    bottom: 18,
+    bottom: 20,
     left: 16,
     right: 16,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
   overlayTextPreview: {
     color: '#fff',
@@ -577,105 +801,111 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textAlign: 'center',
   },
-  inputsWrap: {
-    width: '100%',
-    marginBottom: 18,
+  musicBadge: {
+    position: 'absolute',
+    bottom: 70,
+    left: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: 'rgba(229,9,20,0.8)',
   },
-  label: {
-    color: 'rgba(255,255,255,0.78)',
-    fontSize: 13,
+  musicBadgeText: {
+    color: '#fff',
+    fontSize: 12,
     fontWeight: '600',
-    marginBottom: 6,
+    maxWidth: 120,
+  },
+  inputSection: {
+    marginBottom: 16,
+  },
+  inputLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   textInput: {
-    width: '100%',
-    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderColor: 'rgba(255,255,255,0.15)',
     color: '#fff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
   },
   captionInput: {
-    minHeight: 70,
+    minHeight: 80,
     textAlignVertical: 'top',
   },
-  uploadButton: {
-    width: '100%',
-    borderRadius: 18,
+  dockedInputSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 20, // Add explicit bottom padding
+    backgroundColor: '#05060f',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  nextBtn: {
+    borderRadius: 16,
     overflow: 'hidden',
+    marginTop: 8,
   },
-  uploadButtonDisabled: {
-    opacity: 0.5,
-  },
-  uploadGradient: {
-    paddingVertical: 14,
+  nextBtnGradient: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 16,
   },
-  uploadText: {
+  nextBtnText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
   },
-  bottomBar: {
-    position: 'absolute',
-    left: 12,
-    right: 12,
-    bottom: 0,
-    paddingTop: 10,
-  },
-
-  sheetBg: {
-    backgroundColor: '#101320',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
-  },
-  sheetHandle: {
-    backgroundColor: 'rgba(255,255,255,0.25)',
-    width: 44,
-  },
-  sheetContent: {
-    paddingHorizontal: 16,
-    paddingTop: 4,
-    paddingBottom: 16,
-    gap: 10,
-  },
-  sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '900' },
-  sheetSubtitle: { color: 'rgba(255,255,255,0.72)', marginTop: -4, marginBottom: 4 },
-  sheetOption: {
+  shareOption: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.05)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+    borderColor: 'transparent',
+    marginBottom: 10,
   },
-  sheetOptionActive: {
-    borderColor: 'rgba(255,138,0,0.55)',
-    backgroundColor: 'rgba(255,138,0,0.10)',
+  shareOptionActive: {
+    borderColor: 'rgba(229,9,20,0.5)',
+    backgroundColor: 'rgba(229,9,20,0.1)',
   },
-  sheetOptionTitle: { color: '#fff', fontSize: 15, fontWeight: '800' },
-  sheetOptionSub: { color: 'rgba(255,255,255,0.68)', fontSize: 12, marginTop: 2 },
-  sheetPrimaryBtn: { width: '100%', borderRadius: 18, overflow: 'hidden', marginTop: 6 },
-  sheetPrimaryGradient: { paddingVertical: 14, alignItems: 'center', justifyContent: 'center' },
-  sheetPrimaryText: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  sheetSecondaryBtn: {
-    width: '100%',
-    paddingVertical: 12,
+  shareOptionTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  shareOptionSub: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  postBtn: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginTop: 16,
+  },
+  postBtnGradient: {
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+    paddingVertical: 16,
   },
-  sheetSecondaryText: { color: 'rgba(255,255,255,0.92)', fontWeight: '800' },
+  postBtnText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '800',
+  },
 });

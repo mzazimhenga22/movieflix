@@ -1,5 +1,35 @@
+import { Audio } from 'expo-av';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
 import { Platform, Pressable, type PressableProps } from 'react-native';
+
+// Navigation feedback sound
+let tickSound: Audio.Sound | null = null;
+let lastTickTime = 0;
+const TICK_THROTTLE_MS = 50;
+
+const loadTickSound = async () => {
+  if (tickSound) return;
+  try {
+    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+    const { sound } = await Audio.Sound.createAsync(
+      require('../../assets/sounds/tick.wav'),
+      { volume: 0.15, shouldPlay: false }
+    );
+    tickSound = sound;
+  } catch { }
+};
+
+const playTickSound = () => {
+  const now = Date.now();
+  if (now - lastTickTime < TICK_THROTTLE_MS) return;
+  lastTickTime = now;
+  if (tickSound) {
+    tickSound.setPositionAsync(0).then(() => tickSound?.playAsync()).catch(() => { });
+  }
+};
+
+// Preload on module load
+loadTickSound();
 
 type NodeInfo = {
   disabled: boolean;
@@ -30,6 +60,15 @@ function isEditableElement(el: Element | null): boolean {
 
 type Direction = 'left' | 'right' | 'up' | 'down';
 
+type NavZone = 'sidenav' | 'content' | null;
+
+function getNavZone(el: HTMLElement | null): NavZone {
+  if (!el || !el.closest) return null;
+  const zoneEl = el.closest('[data-tv-region]') as HTMLElement | null;
+  const zone = (zoneEl?.getAttribute('data-tv-region') ?? '').toLowerCase();
+  return zone === 'sidenav' || zone === 'content' ? (zone as NavZone) : null;
+}
+
 function keyToDirection(e: KeyboardEvent): Direction | null {
   // Normalize both modern key values and older ones.
   const key = e.key;
@@ -53,11 +92,12 @@ function centerOf(rect: DOMRect) {
 
 function focusNode(node: HTMLElement) {
   try {
-    node.focus?.();
-  } catch {}
+    node.focus?.({ preventScroll: true });
+  } catch { }
   try {
-    node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  } catch {}
+    // scrollIntoView with 'center' is much better for TV interfaces to keep context
+    node.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'center' });
+  } catch { }
 }
 
 function domFocusableEntries(): RegistryEntry[] {
@@ -65,7 +105,7 @@ function domFocusableEntries(): RegistryEntry[] {
   const nodes = Array.from(
     document.querySelectorAll(
       // Covers react-native-web Pressables (tabindex), and a few native DOM interactables.
-      '[tabindex],button,[role="button"],a[href]'
+      '[data-tv-focusable="true"],[tabindex],button,[role="button"],a[href]'
     ),
   );
 
@@ -73,7 +113,7 @@ function domFocusableEntries(): RegistryEntry[] {
     .filter((n): n is HTMLElement => n instanceof HTMLElement)
     .filter((el) => {
       // Avoid grabbing hidden/offscreen elements.
-      if (el.tabIndex < 0) return false;
+      if (el.tabIndex < 0 && el.getAttribute('data-tv-focusable') !== 'true') return false;
       const ariaDisabled = (el.getAttribute('aria-disabled') ?? '').toLowerCase() === 'true';
       const disabled = ariaDisabled || (el as any).disabled === true;
       if (disabled) return false;
@@ -107,6 +147,7 @@ function findNext(entries: RegistryEntry[], active: HTMLElement | null, dir: Dir
   const activeRect = active.getBoundingClientRect?.();
   if (!activeRect) return null;
   const cur = centerOf(activeRect);
+  const activeZone = getNavZone(active);
 
   const candidates = usable
     .filter((e) => e.node !== active)
@@ -114,9 +155,10 @@ function findNext(entries: RegistryEntry[], active: HTMLElement | null, dir: Dir
       const rect = e.node.getBoundingClientRect?.();
       if (!rect) return null;
       const c = centerOf(rect);
-      return { node: e.node, c };
+      const zone = getNavZone(e.node);
+      return { node: e.node, c, rect, zone };
     })
-    .filter(Boolean) as { node: HTMLElement; c: { x: number; y: number } }[];
+    .filter(Boolean) as { node: HTMLElement; c: { x: number; y: number }; rect: DOMRect; zone: NavZone }[];
 
   const eps = 1;
   const filtered = candidates.filter((it) => {
@@ -125,27 +167,136 @@ function findNext(entries: RegistryEntry[], active: HTMLElement | null, dir: Dir
     if (dir === 'up') return it.c.y < cur.y - eps;
     return it.c.y > cur.y + eps;
   });
-  if (!filtered.length) return null;
 
-  let best: { node: HTMLElement; primary: number; secondary: number } | null = null;
-  for (const it of filtered) {
+  // Prefer moving between navigation zones when using left/right
+  if (activeZone && (dir === 'left' || dir === 'right')) {
+    // When in sidenav going right, find ANY item in content zone (not just filtered)
+    // This ensures we can always reach content even if it's not strictly to our right
+    if (dir === 'right' && activeZone === 'sidenav') {
+      const contentCandidates = candidates.filter((it) => it.zone === 'content');
+      if (contentCandidates.length) {
+        return findNextFromCandidates(contentCandidates, cur, dir);
+      }
+    }
+
+    // When in content going left, find sidenav
+    if (dir === 'left' && activeZone === 'content') {
+      const sidenavCandidates = candidates.filter((it) => it.zone === 'sidenav');
+      if (sidenavCandidates.length) {
+        return findNextFromCandidates(sidenavCandidates, cur, dir);
+      }
+    }
+
+    // Don't allow navigating left when in sidenav - nowhere to go
+    if (dir === 'left' && activeZone === 'sidenav') {
+      return null;
+    }
+
+    // Standard zone-crossing for other cases
+    const desiredZone: NavZone = activeZone === 'sidenav' ? 'content' : 'sidenav';
+    const zoneCandidates = filtered.filter((it) => it.zone === desiredZone);
+    if (zoneCandidates.length) {
+      return findNextFromCandidates(zoneCandidates, cur, dir);
+    }
+  }
+
+
+  // If no candidates in strict direction, try with looser constraints for left/right
+  // This helps jumping from SideNav (narrow vertical strip) to main content area
+  let searchCandidates = filtered;
+  if (!searchCandidates.length && (dir === 'left' || dir === 'right')) {
+    // Allow candidates that overlap vertically with current element - use very generous tolerance
+    // for jumping between navigation zones (SideNav <-> Content)
+    const activeTop = activeRect.top;
+    const activeBottom = activeRect.bottom;
+    const windowHeight = typeof window !== 'undefined' ? window.innerHeight : 1080;
+    // Use half the window height as tolerance to ensure we can always jump to content
+    const tolerance = Math.max(400, windowHeight / 2);
+    searchCandidates = candidates.filter((it) => {
+      const overlapsVertically = it.rect.bottom > activeTop - tolerance && it.rect.top < activeBottom + tolerance;
+      if (dir === 'left') return it.c.x < cur.x - eps && overlapsVertically;
+      if (dir === 'right') return it.c.x > cur.x + eps && overlapsVertically;
+      return false;
+    });
+  }
+
+  // Still no candidates? For left/right, just find the closest item in that direction (no vertical constraint)
+  if (!searchCandidates.length && (dir === 'left' || dir === 'right')) {
+    searchCandidates = candidates.filter((it) => {
+      if (dir === 'left') return it.c.x < cur.x - eps;
+      if (dir === 'right') return it.c.x > cur.x + eps;
+      return false;
+    });
+  }
+
+  // For up/down navigation, use generous horizontal tolerance to find items in top bar or content rails
+  if (!searchCandidates.length && (dir === 'up' || dir === 'down')) {
+    const activeLeft = activeRect.left;
+    const activeRight = activeRect.right;
+    const windowWidth = typeof window !== 'undefined' ? window.innerWidth : 1920;
+    // Use half the window width as tolerance to ensure we can reach top bar tabs from anywhere
+    const tolerance = Math.max(400, windowWidth / 2);
+    searchCandidates = candidates.filter((it) => {
+      const overlapsHorizontally = it.rect.right > activeLeft - tolerance && it.rect.left < activeRight + tolerance;
+      if (dir === 'up') return it.c.y < cur.y - eps && overlapsHorizontally;
+      if (dir === 'down') return it.c.y > cur.y + eps && overlapsHorizontally;
+      return false;
+    });
+  }
+
+  // Final fallback for up/down - find closest item in that direction with no horizontal constraint
+  if (!searchCandidates.length && (dir === 'up' || dir === 'down')) {
+    searchCandidates = candidates.filter((it) => {
+      if (dir === 'up') return it.c.y < cur.y - eps;
+      if (dir === 'down') return it.c.y > cur.y + eps;
+      return false;
+    });
+  }
+
+  if (!searchCandidates.length) return null;
+
+  return findNextFromCandidates(searchCandidates, cur, dir);
+}
+
+function findNextFromCandidates(
+  candidates: { node: HTMLElement; c: { x: number; y: number } }[],
+  cur: { x: number; y: number },
+  dir: Direction,
+): HTMLElement | null {
+  let best: { node: HTMLElement; score: number } | null = null;
+  for (const it of candidates) {
     const dx = Math.abs(it.c.x - cur.x);
     const dy = Math.abs(it.c.y - cur.y);
     const primary = dir === 'left' || dir === 'right' ? dx : dy;
     const secondary = dir === 'left' || dir === 'right' ? dy : dx;
-    if (!best) {
-      best = { node: it.node, primary, secondary };
-      continue;
-    }
-    if (primary < best.primary - 0.01) {
-      best = { node: it.node, primary, secondary };
-      continue;
-    }
-    if (Math.abs(primary - best.primary) <= 0.01 && secondary < best.secondary) {
-      best = { node: it.node, primary, secondary };
+
+    // Use a weighted score: primary distance + (secondary distance * weight).
+    // A weight of 3.0 strongly penalizes off-axis candidates, ensuring navigation
+    // prefers items that are aligned in the direction of travel (e.g. directly below).
+    const score = primary + (secondary * 3.0);
+
+    if (!best || score < best.score) {
+      best = { node: it.node, score };
     }
   }
   return best?.node ?? null;
+}
+
+function resolveActiveElement(entries: RegistryEntry[], active: HTMLElement | null): HTMLElement | null {
+  if (!active) return null;
+  if (active === document.body || active.tagName === 'HTML') return null;
+  if (entries.some((it) => it.node === active)) return active;
+  if (active.closest) {
+    const closest = active.closest('[data-tv-focusable="true"],[tabindex],[role="button"],button,a[href]') as HTMLElement | null;
+    if (closest && entries.some((it) => it.node === closest)) return closest;
+  }
+  let node: HTMLElement | null = active;
+  while (node && node !== document.body) {
+    const parent = node.parentElement;
+    if (parent && entries.some((it) => it.node === parent)) return parent;
+    node = parent as HTMLElement | null;
+  }
+  return active;
 }
 
 export function TvSpatialNavigationProvider({ children }: { children: React.ReactNode }) {
@@ -186,26 +337,30 @@ export function TvSpatialNavigationProvider({ children }: { children: React.Reac
       const entries = mergeEntries(getAll(), domFocusableEntries()).filter((it) => it.node && !it.info.disabled);
       if (!entries.length) return;
 
-      const active = document.activeElement as HTMLElement | null;
+      const rawActive = document.activeElement as HTMLElement | null;
+      const active = resolveActiveElement(entries, rawActive);
 
       if (isSelect) {
         if (active && entries.some((it) => it.node === active)) {
           e.preventDefault();
           e.stopPropagation();
+          playTickSound();
           try {
             active.click?.();
-          } catch {}
+          } catch { }
         }
         return;
       }
 
       if (!dir) return;
 
-      e.preventDefault();
-      e.stopPropagation();
-
       const next = findNext(entries, active, dir);
-      if (next) focusNode(next);
+      if (next) {
+        e.preventDefault();
+        e.stopPropagation();
+        playTickSound();
+        focusNode(next);
+      }
     };
 
     window.addEventListener('keydown', onKeyDown, true);
@@ -222,14 +377,17 @@ export function TvSpatialNavigationProvider({ children }: { children: React.Reac
 
 export type TvFocusableProps = PressableProps & {
   tvPreferredFocus?: boolean;
+  isTVSelectable?: boolean;
+  tvParallaxProperties?: any;
 };
 
 export const TvFocusable = React.forwardRef<any, TvFocusableProps>(function TvFocusable(
-  { tvPreferredFocus, disabled, onFocus, onBlur, ...props },
+  { tvPreferredFocus, isTVSelectable = true, disabled, onFocus, onBlur, style, ...props },
   forwardedRef,
 ) {
   const ctx = useContext(TvSpatialNavContext);
   const nodeRef = useRef<HTMLElement | null>(null);
+  const [isFocused, setIsFocused] = React.useState(false);
 
   const setRef = useCallback(
     (node: any) => {
@@ -255,44 +413,92 @@ export const TvFocusable = React.forwardRef<any, TvFocusableProps>(function TvFo
     ctx.update(node, { disabled: Boolean(disabled), preferred: Boolean(tvPreferredFocus) });
   }, [ctx, disabled, tvPreferredFocus]);
 
+  // Track if we've already done initial focus to prevent stealing focus on re-renders
+  const hasInitialFocusedRef = useRef(false);
+
   useEffect(() => {
     if (Platform.OS !== 'web') return;
-    if (!tvPreferredFocus) return;
+    if (!tvPreferredFocus) {
+      // Reset when tvPreferredFocus becomes false so it can focus again if it becomes true
+      hasInitialFocusedRef.current = false;
+      return;
+    }
+    // Only auto-focus once on initial mount, not on subsequent re-renders
+    if (hasInitialFocusedRef.current) return;
+
+    // Check if something else already has focus - don't steal it
+    const activeElement = document.activeElement;
+    const hasExistingFocus = activeElement &&
+      activeElement !== document.body &&
+      activeElement.tagName !== 'HTML';
+
+    if (hasExistingFocus) {
+      hasInitialFocusedRef.current = true;
+      return;
+    }
+
     const t = setTimeout(() => {
       const node = nodeRef.current;
-      if (node) focusNode(node);
+      if (node) {
+        hasInitialFocusedRef.current = true;
+        focusNode(node);
+      }
     }, 60);
     return () => clearTimeout(t);
   }, [tvPreferredFocus]);
 
+  // Calculated style if it's a function
+  const computedStyle = useMemo(() => {
+    if (typeof style === 'function') {
+      return style({ pressed: false, focused: isFocused } as any);
+    }
+    return style;
+  }, [style, isFocused]);
+
   return (
     <Pressable
       {...props}
+      style={computedStyle}
       ref={setRef}
       disabled={disabled}
       focusable={!disabled}
+      // Native TV platforms (Android TV / tvOS) use `hasTVPreferredFocus` and `isTVSelectable`.
+      {...(Platform.OS !== 'web' ? ({
+        hasTVPreferredFocus: Boolean(tvPreferredFocus),
+        isTVSelectable: isTVSelectable,
+      } as any) : null)}
       // react-native-web: ensure elements are focusable via D-pad/keyboard.
       {...(Platform.OS === 'web'
         ? ({
-            tabIndex: disabled ? -1 : 0,
-            accessibilityRole: 'button',
-            ...(tvPreferredFocus ? { 'data-tv-preferred': 'true' } : null),
-          } as any)
+          tabIndex: disabled ? -1 : 0,
+          accessibilityRole: 'button',
+          'data-tv-focusable': 'true',
+          ...(tvPreferredFocus ? { 'data-tv-preferred': 'true' } : null),
+        } as any)
         : null)}
+      // Keep role consistent for screen readers / TV focus engines.
+      accessibilityRole={(props as any).accessibilityRole ?? 'button'}
       onFocus={(e: any) => {
+        setIsFocused(true);
         if (Platform.OS === 'web') {
           const node = nodeRef.current;
           if (node) {
             try {
               node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-            } catch {}
+            } catch { }
           }
         }
         onFocus?.(e);
       }}
       onBlur={(e: any) => {
+        setIsFocused(false);
         onBlur?.(e);
       }}
     />
   );
 });
+
+// Dummy default export to satisfy expo-router (this file is in app/ but not a route)
+export default function TvSpatialNavigationRoute() {
+  return null;
+}

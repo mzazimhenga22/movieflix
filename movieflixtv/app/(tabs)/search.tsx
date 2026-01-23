@@ -194,6 +194,8 @@ export default function SearchTv() {
 
               <TvFocusable
                 onPress={() => setQuery('')}
+                isTVSelectable={true}
+                accessibilityLabel="Clear search"
                 style={({ focused }: any) => [styles.clearBtn, focused ? styles.clearBtnFocused : null]}
               >
                 <Text style={styles.clearText}>Clear</Text>
@@ -214,13 +216,25 @@ export default function SearchTv() {
                   </View>
                 ) : query.trim().length <= 2 ? (
                   <View style={styles.center}>
+                    <Ionicons name="search-outline" size={48} color="rgba(255,255,255,0.4)" />
                     <Text style={styles.centerTitle}>Start typing</Text>
                     <Text style={styles.centerText}>Use the keyboard to enter a title.</Text>
                   </View>
                 ) : combined.length === 0 ? (
                   <View style={styles.center}>
+                    <Ionicons name="alert-circle-outline" size={48} color="rgba(255,255,255,0.4)" />
                     <Text style={styles.centerTitle}>No results</Text>
                     <Text style={styles.centerText}>Try a different spelling.</Text>
+                    <TvFocusable
+                      onPress={() => setQuery('')}
+                      tvPreferredFocus
+                      isTVSelectable={true}
+                      accessibilityLabel="Clear and try again"
+                      style={({ focused }: any) => [styles.retryBtn, focused && styles.retryBtnFocused]}
+                    >
+                      <Ionicons name="refresh-outline" size={18} color="#fff" />
+                      <Text style={styles.retryBtnText}>Clear and try again</Text>
+                    </TvFocusable>
                   </View>
                 ) : (
                   <FlatList
@@ -270,11 +284,11 @@ export default function SearchTv() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  shell: { flex: 1, paddingLeft: 0, paddingRight: 34, paddingTop: 22, paddingBottom: 22, alignItems: 'center' },
-  panel: { flex: 1, width: '100%', maxWidth: 1520 },
-  panelInner: { flex: 1, padding: 18 },
-  topBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 6, paddingBottom: 14 },
+  container: { flex: 1, backgroundColor: '#030408' },
+  shell: { flex: 1, paddingLeft: 108, paddingRight: 40, paddingTop: 28, paddingBottom: 28, alignItems: 'center' },
+  panel: { flex: 1, width: '100%', maxWidth: 1560 },
+  panelInner: { flex: 1, padding: 22 },
+  topBar: { flexDirection: 'row', alignItems: 'center', gap: 16, paddingHorizontal: 8, paddingBottom: 18 },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   title: { color: '#fff', fontSize: 18, fontWeight: '900' },
   searchPill: {
@@ -311,9 +325,36 @@ const styles = StyleSheet.create({
   clearBtnFocused: { transform: [{ scale: 1.03 }], borderColor: '#fff' },
   clearText: { color: '#fff', fontSize: 13, fontWeight: '900' },
   tip: { marginTop: 12, color: 'rgba(255,255,255,0.65)', fontSize: 12, fontWeight: '700' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  centerTitle: { color: '#fff', fontSize: 26, fontWeight: '900', marginBottom: 8 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  centerTitle: { color: '#fff', fontSize: 26, fontWeight: '900', marginTop: 12 },
   centerText: { color: 'rgba(255,255,255,0.75)', fontSize: 16, fontWeight: '700' },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: 'rgba(229,9,20,0.8)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  retryBtnFocused: {
+    transform: [{ scale: 1.08 }],
+    borderColor: '#fff',
+    borderWidth: 3,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  retryBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '900',
+  },
   grid: { paddingTop: 10, paddingBottom: 20 },
   gridRow: { gap: 14 },
 });

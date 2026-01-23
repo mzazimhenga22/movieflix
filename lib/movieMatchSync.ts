@@ -20,7 +20,7 @@ type SyncArgs = {
   entry: MatchEntryInput;
 };
 
-const ENTRY_LIMIT = 40;
+const ENTRY_LIMIT = 60;
 
 const sanitizeEntry = (input: MatchEntryInput) => {
   const baseId = input.tmdbId ?? input.title ?? Date.now();

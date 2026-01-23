@@ -162,6 +162,11 @@ export default function MiniChatSheet(props: {
   }, [conversationId, settings.readReceipts, user?.uid, messages.length]);
 
   useEffect(() => {
+    if (settings.hibernate) {
+      setOtherPresence(null);
+      setIsOtherTyping(false);
+      return;
+    }
     if (!conversation || !user?.uid) return;
     if (conversation.isGroup) return;
     const members = Array.isArray(conversation.members) ? conversation.members : [];
@@ -188,13 +193,27 @@ export default function MiniChatSheet(props: {
         unsubTyping?.();
       } catch {}
     };
-  }, [conversation, sellerProfile?.id, user?.uid]);
+  }, [conversation, sellerProfile?.id, settings.hibernate, user?.uid]);
 
   const visibleMessages = useMemo(() => {
     const combined = [...messages, ...pendingMessages];
     combined.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
     return combined;
   }, [messages, pendingMessages]);
+
+  const pendingClientIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of pendingMessages) {
+      if (m.clientId) ids.add(String(m.clientId));
+    }
+    return ids;
+  }, [pendingMessages]);
+
+  const otherLastReadAtMs = useMemo(() => {
+    const otherId = otherUser?.id;
+    if (!otherId) return 0;
+    return toMillis((conversation as any)?.lastReadAtBy?.[otherId]);
+  }, [conversation, otherUser?.id]);
 
   const uploadChatMedia = useCallback(
     async (uri: string, type: PendingMedia['type']): Promise<{ url: string; mediaType: PendingMedia['type'] } | null> => {
@@ -274,13 +293,20 @@ export default function MiniChatSheet(props: {
         pending.replyToMessageId = replyTo.id;
         pending.replyToText = replyTo.text;
         pending.replyToSenderId = replyTo.sender;
-        pending.replyToSenderName = replyTo.replyToSenderName;
+        // Resolve the sender name: if it's the current user, use their name, otherwise use otherUser
+        const replySenderName = replyTo.sender === user.uid 
+          ? (user.displayName || 'You')
+          : (otherUser?.displayName || 'Unknown');
+        pending.replyToSenderName = replySenderName;
       }
 
       setPendingMessages((prev) => [...prev, pending]);
       setReplyTo(null);
 
       try {
+        const replySenderName = replyTo?.sender === user.uid 
+          ? (user.displayName || 'You')
+          : (otherUser?.displayName || 'Unknown');
         await sendMessage(conversationId, {
           text: trimmed,
           clientId,
@@ -289,7 +315,7 @@ export default function MiniChatSheet(props: {
                 replyToMessageId: replyTo.id,
                 replyToText: replyTo.text,
                 replyToSenderId: replyTo.sender,
-                replyToSenderName: replyTo.replyToSenderName,
+                replyToSenderName: replySenderName,
               }
             : null),
         } as any);
@@ -298,7 +324,7 @@ export default function MiniChatSheet(props: {
         setPendingMessages((prev) => prev.map((m) => (m.clientId === clientId ? { ...m, failed: true } : m)));
       }
     },
-    [conversationId, editingMessage?.id, replyTo, user?.uid]
+    [conversationId, editingMessage?.id, replyTo, user?.uid, user?.displayName, otherUser?.displayName]
   );
 
   const handlePickMedia = useCallback((uri: string, type: 'image' | 'video') => {
@@ -410,6 +436,7 @@ export default function MiniChatSheet(props: {
 
   const renderHeaderSubtitle = () => {
     if (isOtherTyping) return 'Typing…';
+    if (settings.hibernate) return '—';
     if (otherPresence?.state === 'online') return 'Online';
     return 'Offline';
   };
@@ -477,14 +504,32 @@ export default function MiniChatSheet(props: {
                 keyExtractor={(item: ChatMessage, idx: number) => item.id || item.clientId || String(idx)}
                 contentContainerStyle={styles.listContent}
                 renderItem={({ item }: { item: ChatMessage }) => {
-                  const senderId = item.sender || '';
-                  const isMe = !!user?.uid && senderId === user.uid;
+                  const senderId = String((item as any).sender ?? (item as any).from ?? '').trim();
+                  const isMe = Boolean(senderId && user?.uid && senderId === user.uid);
                   const avatar = !isMe ? otherUser?.photoURL : undefined;
                   const senderName = !isMe ? otherUser?.displayName : user?.displayName ?? 'You';
 
+                  const createdAtMs = toMillis((item as any).createdAt);
+                  const isPendingLocal = Boolean(item.clientId && pendingClientIds.has(String(item.clientId)));
+                  const computedStatus = (() => {
+                    if (!isMe) return undefined;
+                    if ((item as any).failed === true) return 'sending' as const;
+                    if (isPendingLocal || String((item as any).id || '').startsWith('temp-')) return 'sending' as const;
+
+                    const canUseReadReceipts = Boolean(settings.readReceipts && otherUser?.id);
+                    const didRead = canUseReadReceipts && otherLastReadAtMs > 0 && otherLastReadAtMs >= createdAtMs;
+                    if (didRead) return 'read' as const;
+                    const delivered = Boolean(otherUser?.id && otherPresence?.state === 'online');
+                    return delivered ? ('delivered' as const) : ('sent' as const);
+                  })();
+
+                  const statusDecorated = isMe
+                    ? ({ ...(item as any), status: computedStatus, __offline: false } as any)
+                    : item;
+
                   return (
                     <MessageBubble
-                      item={item as any}
+                      item={statusDecorated}
                       isMe={isMe}
                       avatar={avatar}
                       senderName={senderName}

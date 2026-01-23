@@ -5,13 +5,12 @@
     "version": "1.0.0",
     "runtimeVersion": "1.0.0",
     "updates": {
-      "url": "https://u.expo.dev/56b697d6-b709-4b80-909a-27b3a97856c1",
       "enabled": true,
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
     },
     "orientation": "landscape",
-    "icon": "./assets/images/logo-safe.png",
+    "icon": "./assets/images/app-icon.png",
     "scheme": "movieflixtv",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -24,15 +23,15 @@
       "package": "com.movieflix.tv",
       "adaptiveIcon": {
         "backgroundColor": "#E53935",
-        "foregroundImage": "./assets/images/logo-safe.png"
+        "foregroundImage": "./assets/images/adaptive-foreground.png"
       },
       "backgroundColor": "#05060f",
       "edgeToEdgeEnabled": true
     },
     "splash": {
-      "image": "./assets/images/logo-safe.png",
+      "image": "./assets/images/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#E53935"
+      "backgroundColor": "#05060f"
     },
     "web": {
       "output": "static",
@@ -43,12 +42,12 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/logo-safe.png",
+          "image": "./assets/images/splash.png",
           "resizeMode": "contain",
-          "backgroundColor": "#E53935",
+          "backgroundColor": "#05060f",
           "dark": {
-            "image": "./assets/images/logo-safe.png",
-            "backgroundColor": "#E53935"
+            "image": "./assets/images/splash.png",
+            "backgroundColor": "#05060f"
           }
         }
       ],
@@ -56,6 +55,7 @@
         "expo-build-properties",
         {
           "android": {
+            "minSdkVersion": 24,
             "usesCleartextTraffic": true
           }
         }
@@ -68,9 +68,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "56b697d6-b709-4b80-909a-27b3a97856c1"
+        "projectId": "fec9b894-ee58-40d6-bae2-b8e839912ee4"
       }
     },
-    "owner": "vivescharris"
+    "owner": "mzazimhenga"
   }
 }

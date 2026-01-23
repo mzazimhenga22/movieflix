@@ -35,7 +35,8 @@ type UserDoc = {
   photoPath?: string | null;
   favoriteGenres?: string[];
   favoriteColor?: string;
-  status?: string;
+  bio?: string;
+  status?: string; // legacy
 };
 
 const USER_AVATAR_BUCKET = 'profiles';
@@ -84,7 +85,7 @@ const EditProfileScreen: React.FC = () => {
 
         setUserDoc(data);
         setDisplayName(String(data.displayName ?? user?.displayName ?? '').trim());
-        setStatus(String((data as any)?.status ?? '').trim());
+        setStatus(String((data as any)?.bio ?? (data as any)?.status ?? '').trim());
         setSelectedColor(String(data.favoriteColor ?? palette[0]));
         setAvatarUri(data.photoURL ?? null);
       } catch (err) {
@@ -200,6 +201,7 @@ const EditProfileScreen: React.FC = () => {
 
       const payload: Record<string, any> = {
         displayName: trimmedName,
+        bio: status.trim(),
         status: status.trim(),
         favoriteColor: selectedColor,
         updatedAt: serverTimestamp(),
@@ -226,7 +228,7 @@ const EditProfileScreen: React.FC = () => {
   const headerSubtitle = useMemo(() => {
     const bits: string[] = [];
     if (favoriteGenres.length) bits.push(`${favoriteGenres.length} genres`);
-    if (status.trim()) bits.push('Status set');
+    if (status.trim()) bits.push('Bio set');
     return bits.length ? bits.join(' • ') : 'Photo, bio & personalization';
   }, [favoriteGenres.length, status]);
 
@@ -356,12 +358,12 @@ const EditProfileScreen: React.FC = () => {
                   />
                 </View>
 
-                <Text style={[styles.inputLabel, { marginTop: 12 }]}>Status</Text>
+                <Text style={[styles.inputLabel, { marginTop: 12 }]}>Bio</Text>
                 <View style={styles.inputWrap}>
                   <TextInput
                     value={status}
                     onChangeText={setStatus}
-                    placeholder="Watching movies and loving it…"
+                    placeholder="Tell people about you…"
                     placeholderTextColor="rgba(255,255,255,0.5)"
                     style={[styles.input, styles.inputMultiline]}
                     multiline

@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Animated, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Animated, ScrollView, StyleSheet, Text, TouchableOpacity, View, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import ScreenWrapper from '../../../../components/ScreenWrapper';
 import { useAccent } from '../../AccentContext';
 import { accentGradient } from '../../../../lib/colorUtils';
 import StoriesRow from '../StoriesRow';
+import { getPersistedCache } from '@/lib/persistedCache';
+import { useUser } from '../../../../hooks/use-user';
 
 export default function StoriesScreen() {
   const router = useRouter();
@@ -14,6 +16,10 @@ export default function StoriesScreen() {
   const accent = accentColor || '#e50914';
   const buttonGradient = accentGradient('#e50914', 0.25);
   const gradientFade = useRef(new Animated.Value(0)).current;
+  const { user } = useUser();
+  const [archivedStories, setArchivedStories] = useState<any[]>([]);
+  const viewerId = (user as any)?.uid ? String((user as any).uid) : 'anon';
+  const archiveCacheKey = useMemo(() => `__movieflix_stories_archive_v1:${viewerId}`, [viewerId]);
   const gradientPalettes = useMemo(() => (
     [
       [accent, '#150a13', '#05060f'],
@@ -28,6 +34,18 @@ export default function StoriesScreen() {
   useEffect(() => {
     setAccentColor('#e50914');
   }, [setAccentColor]);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const cached = await getPersistedCache<any[]>(archiveCacheKey, { maxAgeMs: 1000 * 60 * 60 * 24 * 7 });
+      if (!active) return;
+      if (cached?.value?.length) setArchivedStories(cached.value as any);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [archiveCacheKey]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -111,6 +129,32 @@ export default function StoriesScreen() {
                 <Ionicons name="flame" size={20} color="#fff" />
               </LinearGradient>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              activeOpacity={0.9}
+              onPress={() => {
+                if (archivedStories.length === 0) {
+                  Alert.alert('No archive yet', 'Once you view stories, we will keep a highlights-style archive here.');
+                  return;
+                }
+                router.push({
+                  pathname: '/story-viewer',
+                  params: {
+                    stories: JSON.stringify(archivedStories),
+                    initialStoryId: String(archivedStories[0]?.id || ''),
+                  },
+                } as any);
+              }}
+            >
+              <LinearGradient
+                colors={['#7dd8ff', '#22c55e']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.iconGradient}
+              >
+                <Ionicons name="albums-outline" size={20} color="#fff" />
+              </LinearGradient>
+            </TouchableOpacity>
             <TouchableOpacity style={[styles.iconBtn, { shadowColor: accent }]} activeOpacity={0.9} onPress={() => router.push('/story-upload')}>
               <LinearGradient
                 colors={buttonGradient}
@@ -130,8 +174,9 @@ export default function StoriesScreen() {
           contentContainerStyle={styles.contentContainer}
           showsVerticalScrollIndicator={false}
         >
-          <StoriesRow showAddStory />
-          {/* TODO: Add story highlights and archived stories sections */}
+          <StoriesRow showAddStory title="Your circle" limit={12} />
+          <StoriesRow title="Archive highlights" seedStories={archivedStories} disableLiveFetch hideSeeAll emptyHint="No archived stories yet" />
+          <StoriesRow title="More from creators" offset={12} limit={12} hideSeeAll emptyHint="More stories coming soon" />
         </ScrollView>
       </View>
     </ScreenWrapper>

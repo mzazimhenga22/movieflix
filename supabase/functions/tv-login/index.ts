@@ -1,8 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { createRemoteJWKSet, jwtVerify } from 'npm:jose@5.9.6';
-import { cert, getApps, initializeApp } from 'npm:firebase-admin/app';
-import { getAuth } from 'npm:firebase-admin/auth';
-import { getFirestore } from 'npm:firebase-admin/firestore';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SignJWT, createRemoteJWKSet, jwtVerify, importPKCS8 } from 'npm:jose@5.9.6';
 
 import { corsHeaders } from '../_shared/cors.ts';
 
@@ -19,6 +17,9 @@ const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`;
 const FIREBASE_JWKS = createRemoteJWKSet(
   new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com'),
 );
+
+const CUSTOM_TOKEN_AUD = 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit';
+const SESSION_TTL_MS = 5 * 60 * 1000;
 
 const jsonResponse = (payload: unknown, status = 200, extraHeaders: Record<string, string> = {}) =>
   new Response(JSON.stringify(payload), {
@@ -40,7 +41,9 @@ function randomCode(len: number) {
 }
 
 function parseBearer(req: Request) {
-  const header = req.headers.get('authorization') ?? '';
+  // On the client we may need to use `authorization: Bearer <supabase anon key>` to pass Supabase gateway,
+  // so the Firebase ID token can be sent via `x-firebase-authorization`.
+  const header = req.headers.get('x-firebase-authorization') ?? req.headers.get('authorization') ?? '';
   if (!header.startsWith('Bearer ')) return '';
   return header.slice('Bearer '.length).trim();
 }
@@ -59,7 +62,18 @@ async function requireFirebaseAuth(req: Request) {
   return { uid: String(uid) };
 }
 
-function initAdminApp() {
+type ServiceAccount = {
+  project_id: string;
+  client_email: string;
+  private_key: string;
+};
+
+let cachedServiceAccount: ServiceAccount | null = null;
+let cachedPrivateKey: CryptoKey | null = null;
+
+async function getServiceAccount(): Promise<{ account: ServiceAccount; key: CryptoKey }> {
+  if (cachedServiceAccount && cachedPrivateKey) return { account: cachedServiceAccount, key: cachedPrivateKey };
+
   const json = (
     Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON_TV') ??
     Deno.env.get('FIREBASE_SERVICE_ACCOUNT_TV') ??
@@ -73,42 +87,62 @@ function initAdminApp() {
     Deno.env.get('FIREBASE_SERVICE_ACCOUNT_BASE64') ??
     ''
   ).trim();
+
   if (!json && !b64) {
     throw new HttpError(
       500,
       'Missing Firebase service account env (FIREBASE_SERVICE_ACCOUNT_JSON_TV/BASE64_TV or FIREBASE_SERVICE_ACCOUNT_JSON/BASE64)',
     );
   }
-  const raw = json || atob(b64);
 
+  const raw = json || atob(b64);
   let credentials: any;
   try {
     credentials = JSON.parse(raw);
   } catch {
-    throw new HttpError(500, 'Invalid Firebase service account JSON (expected Admin SDK service account key)');
+    throw new HttpError(500, 'Invalid Firebase service account JSON');
   }
 
-  // firebase-admin expects a service account key JSON with top-level `project_id`, `client_email`, `private_key`, etc.
-  // If you accidentally paste google-services.json, it will not work here.
-  if (!credentials || typeof credentials.project_id !== 'string' || !credentials.project_id.trim()) {
-    const maybeGoogleServicesProjectId =
-      credentials?.project_info && typeof credentials.project_info.project_id === 'string'
-        ? String(credentials.project_info.project_id)
-        : '';
-
-    throw new HttpError(
-      500,
-      maybeGoogleServicesProjectId
-        ? 'Invalid Firebase Admin credentials: looks like google-services.json was provided. Use a Firebase Admin SDK service account key JSON (must include top-level "project_id").'
-        : 'Invalid Firebase Admin credentials: missing top-level "project_id". Use a Firebase Admin SDK service account key JSON.',
-    );
+  if (!credentials?.project_id || !credentials?.client_email || !credentials?.private_key) {
+    throw new HttpError(500, 'Invalid Firebase service account JSON: missing project_id/client_email/private_key');
   }
 
-  return getApps()[0] ?? initializeApp({ credential: cert(credentials as Record<string, unknown>) });
+  const account: ServiceAccount = {
+    project_id: String(credentials.project_id),
+    client_email: String(credentials.client_email),
+    private_key: String(credentials.private_key),
+  };
+
+  // firebase private_key is PKCS8 PEM
+  const key = await importPKCS8(account.private_key, 'RS256');
+
+  cachedServiceAccount = account;
+  cachedPrivateKey = key;
+  return { account, key };
 }
 
-const COLLECTION = 'tvLoginSessions';
-const SESSION_TTL_MS = 5 * 60 * 1000;
+function getSupabaseAdmin() {
+  const SUPABASE_URL = (Deno.env.get('SUPABASE_URL') ?? '').trim();
+  const SUPABASE_SERVICE_ROLE_KEY = (Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '').trim();
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new HttpError(500, 'Server misconfigured: missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY');
+  }
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+}
+
+async function createFirebaseCustomToken(uid: string) {
+  const { account, key } = await getServiceAccount();
+  const now = Math.floor(Date.now() / 1000);
+
+  return await new SignJWT({ uid })
+    .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60 * 60)
+    .setIssuer(account.client_email)
+    .setSubject(account.client_email)
+    .setAudience(CUSTOM_TOKEN_AUD)
+    .sign(key);
+}
 
 serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -121,69 +155,101 @@ serve(async (req: Request) => {
     const code = String(body?.code ?? '').trim().toUpperCase();
     const nonce = String(body?.nonce ?? '').trim();
 
-    const app = initAdminApp();
-    const db = getFirestore(app);
-    const adminAuth = getAuth(app);
+    const supabaseAdmin = getSupabaseAdmin();
 
     if (action === 'create') {
-      const createdAt = Date.now();
-      const expiresAt = createdAt + SESSION_TTL_MS;
+      const createdAtMs = Date.now();
+      const expiresAtMs = createdAtMs + SESSION_TTL_MS;
 
-      const sessionCode = randomCode(8);
-      const sessionNonce = crypto.randomUUID();
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const sessionCode = randomCode(8);
+        const sessionNonce = crypto.randomUUID();
 
-      await db.collection(COLLECTION).doc(sessionCode).set({
-        code: sessionCode,
-        nonce: sessionNonce,
-        createdAt,
-        expiresAt,
-        status: 'pending',
-        approvedUid: null,
-        approvedAt: null,
-        claimedAt: null,
-      });
+        const { error } = await supabaseAdmin.from('tv_login_sessions').insert({
+          code: sessionCode,
+          nonce: sessionNonce,
+          created_at_ms: createdAtMs,
+          expires_at_ms: expiresAtMs,
+          status: 'pending',
+          approved_uid: null,
+          approved_at_ms: null,
+          claimed_at_ms: null,
+        });
 
-      return jsonResponse({
-        code: sessionCode,
-        nonce: sessionNonce,
-        expiresAt,
-      });
+        if (!error) {
+          return jsonResponse({ code: sessionCode, nonce: sessionNonce, expiresAt: expiresAtMs });
+        }
+
+        // 23505 = unique_violation (code collision) → retry
+        const pg = (error as any)?.code;
+        if (pg !== '23505') {
+          if (pg === '42P01') {
+            throw new HttpError(
+              500,
+              'Missing tv_login_sessions table. Create it using supabase/functions/tv-login/schema.sql',
+            );
+          }
+          throw new HttpError(500, `Failed to create session: ${error.message}`);
+        }
+      }
+
+      throw new HttpError(503, 'Failed to allocate a unique session code. Try again.');
     }
 
     if (!code || !nonce) throw new HttpError(400, 'Missing code/nonce');
-    const ref = db.collection(COLLECTION).doc(code);
-    const snap = await ref.get();
-    if (!snap.exists) throw new HttpError(404, 'Session not found');
-    const data = snap.data() as any;
-    if (!data || data.nonce !== nonce) throw new HttpError(401, 'Invalid session');
-    if (typeof data.expiresAt === 'number' && Date.now() > data.expiresAt) throw new HttpError(410, 'Session expired');
+
+    const { data: session, error: sessionError } = await supabaseAdmin
+      .from('tv_login_sessions')
+      .select('*')
+      .eq('code', code)
+      .maybeSingle();
+
+    if (sessionError) {
+      const pg = (sessionError as any)?.code;
+      if (pg === '42P01') {
+        throw new HttpError(500, 'Missing tv_login_sessions table. Create it using supabase/functions/tv-login/schema.sql');
+      }
+      throw new HttpError(500, `Failed to load session: ${sessionError.message}`);
+    }
+    if (!session) throw new HttpError(404, 'Session not found');
+    if (String((session as any).nonce) !== nonce) throw new HttpError(401, 'Invalid session');
+    if (typeof (session as any).expires_at_ms === 'number' && Date.now() > Number((session as any).expires_at_ms)) {
+      throw new HttpError(410, 'Session expired');
+    }
+
+    const status = String((session as any).status ?? 'pending');
 
     if (action === 'approve') {
       const decoded = await requireFirebaseAuth(req);
 
-      if (data.status === 'claimed') return jsonResponse({ ok: true, status: 'claimed' });
+      if (status === 'claimed') return jsonResponse({ ok: true, status: 'claimed' });
 
-      await ref.set(
-        {
-          status: 'approved',
-          approvedUid: decoded.uid,
-          approvedAt: Date.now(),
-        },
-        { merge: true },
-      );
+      const { error } = await supabaseAdmin
+        .from('tv_login_sessions')
+        .update({ status: 'approved', approved_uid: decoded.uid, approved_at_ms: Date.now() })
+        .eq('code', code)
+        .eq('nonce', nonce);
 
+      if (error) throw new HttpError(500, `Failed to approve: ${error.message}`);
       return jsonResponse({ ok: true, status: 'approved' });
     }
 
     if (action === 'claim') {
-      if (data.status !== 'approved' || !data.approvedUid) {
-        return jsonResponse({ ok: true, status: data.status ?? 'pending' });
+      if (status !== 'approved' || !(session as any).approved_uid) {
+        return jsonResponse({ ok: true, status });
       }
-      if (data.claimedAt) return jsonResponse({ ok: true, status: 'claimed' });
+      if ((session as any).claimed_at_ms) return jsonResponse({ ok: true, status: 'claimed' });
 
-      const customToken = await adminAuth.createCustomToken(String(data.approvedUid));
-      await ref.set({ status: 'claimed', claimedAt: Date.now() }, { merge: true });
+      const customToken = await createFirebaseCustomToken(String((session as any).approved_uid));
 
+      const { error } = await supabaseAdmin
+        .from('tv_login_sessions')
+        .update({ status: 'claimed', claimed_at_ms: Date.now() })
+        .eq('code', code)
+        .eq('nonce', nonce)
+        .is('claimed_at_ms', null);
+
+      if (error) throw new HttpError(500, `Failed to claim: ${error.message}`);
       return jsonResponse({ ok: true, status: 'claimed', customToken });
     }
 

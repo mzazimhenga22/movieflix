@@ -35,34 +35,32 @@ function GradientText({ children, colors }: GradientTextProps) {
 }
 
 const buildRows = (mode: TvKeyboardMode): KeyDef[][] => {
+  // QWERTY layout like phone keyboard
   const base: KeyDef[][] = [
-    'ABCDEFGHIJ'.split('').map((c) => ({ id: c, label: c, value: c })),
-    'KLMNOPQRST'.split('').map((c) => ({ id: c, label: c, value: c })),
-    'UVWXYZ0123'.split('').map((c) => ({ id: c, label: c, value: c })),
-    '456789'.split('').map((c) => ({ id: c, label: c, value: c })),
+    '1234567890'.split('').map((c) => ({ id: c, label: c, value: c })),
+    'QWERTYUIOP'.split('').map((c) => ({ id: c, label: c, value: c })),
+    'ASDFGHJKL'.split('').map((c) => ({ id: c, label: c, value: c })),
+    'ZXCVBNM'.split('').map((c) => ({ id: c, label: c, value: c })),
   ];
 
+  // Add symbols to the Z row
   const symbols: KeyDef[] =
     mode === 'email'
       ? [
-          { id: '@', label: '@', value: '@' },
-          { id: '.', label: '.', value: '.' },
-          { id: '-', label: '-', value: '-' },
-          { id: '_', label: '_', value: '_' },
-          { id: '+', label: '+', value: '+' },
-        ]
+        { id: '@', label: '@', value: '@' },
+        { id: '.', label: '.', value: '.' },
+        { id: '_', label: '_', value: '_' },
+      ]
       : [
-          { id: '-', label: '-', value: '-' },
-          { id: "'", label: "'", value: "'" },
-          { id: '.', label: '.', value: '.' },
-          { id: ',', label: ',', value: ',' },
-          { id: '!', label: '!', value: '!' },
-        ];
+        { id: '.', label: '.', value: '.' },
+        { id: ',', label: ',', value: ',' },
+        { id: "'", label: "'", value: "'" },
+      ];
 
   base[3] = [...base[3], ...symbols];
 
   base.push([
-    { id: 'space', label: 'Space', value: ' ', flex: 3 },
+    { id: 'space', label: 'Space', value: ' ', flex: 4 },
     { id: 'del', label: 'Delete', value: 'DEL', flex: 2 },
     { id: 'clear', label: 'Clear', value: 'CLEAR', flex: 2 },
   ]);
@@ -78,11 +76,14 @@ export default function TvVirtualKeyboard({ onKeyPress, mode = 'default', disabl
   return (
     <View style={styles.wrap}>
       {rows.map((row, rowIndex) => (
-        <View key={`row-${rowIndex}`} style={styles.row}>
+        <View key={`row-${rowIndex}`} style={styles.row} focusable={false}>
           {row.map((key) => (
             <TvFocusable
               key={key.id}
               disabled={disabled}
+              isTVSelectable={true}
+              tvParallaxProperties={{ enabled: false }}
+              accessibilityLabel={key.label}
               onPress={() => onKeyPress(key.value)}
               style={({ focused }: any) => [
                 styles.key,

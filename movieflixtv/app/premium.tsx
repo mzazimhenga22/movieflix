@@ -56,6 +56,14 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: '#e50914',
   },
-  btnFocused: { transform: [{ scale: 1.03 }], borderWidth: 1, borderColor: '#fff' },
+  btnFocused: { 
+    transform: [{ scale: 1.08 }], 
+    borderWidth: 2, 
+    borderColor: '#fff',
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 10,
+  },
   primaryText: { color: '#fff', fontSize: 16, fontWeight: '800' },
 });

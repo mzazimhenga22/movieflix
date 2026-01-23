@@ -12,6 +12,8 @@ type ControlProps = {
   onToggleVideo: () => void;
   onToggleSpeaker: () => void;
   onEnd: () => void;
+  onOpenFilters?: () => void;
+  filterLabel?: string;
 };
 
 const CallControls = ({
@@ -23,6 +25,8 @@ const CallControls = ({
   onToggleVideo,
   onToggleSpeaker,
   onEnd,
+  onOpenFilters,
+  filterLabel,
 }: ControlProps) => (
   <View style={styles.container}>
     <ControlButton
@@ -42,6 +46,9 @@ const CallControls = ({
       label="Speaker"
       onPress={onToggleSpeaker}
     />
+    {callType === 'video' && onOpenFilters ? (
+      <ControlButton icon="color-filter" label={filterLabel ? `Filter: ${filterLabel}` : 'Filters'} onPress={onOpenFilters} />
+    ) : null}
     <TouchableOpacity style={[styles.controlButton, styles.hangup]} onPress={onEnd}>
       <Ionicons name="call" size={24} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
       <Text style={styles.controlLabel}>Hang up</Text>

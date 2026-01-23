@@ -6,8 +6,6 @@ import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 
-import googleServices from '../google-services.json';
-
 function getEnv(name: string): string | undefined {
   const value = (process.env[name] ?? '').trim();
   return value ? value : undefined;
@@ -32,8 +30,52 @@ type GoogleServicesJson = {
   }>;
 };
 
+function decodeBase64Utf8(input: string): string | null {
+  try {
+    if (typeof (globalThis as any)?.atob === 'function') {
+      return (globalThis as any).atob(input);
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Buffer } = require('buffer');
+    return Buffer.from(input, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+function loadGoogleServicesJson(): GoogleServicesJson | null {
+  // For the TV app, prefer TV-scoped google-services base64 to avoid accidentally
+  // using the mobile app's google-services.json.
+  const b64 = (process.env.GOOGLE_SERVICES_JSON_BASE64_TV ?? '').trim();
+  if (b64) {
+    const text = decodeBase64Utf8(b64);
+    if (text) {
+      try {
+        return JSON.parse(text) as GoogleServicesJson;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // Avoid a static import so bundling/typecheck doesn't require the file to exist.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('../' + 'google-services.json');
+    return (mod?.default ?? mod) as GoogleServicesJson;
+  } catch {
+    return null;
+  }
+}
+
 function deriveFromGoogleServices(): Partial<FirebaseOptions> {
-  const gs = googleServices as unknown as GoogleServicesJson;
+  const gs = loadGoogleServicesJson();
+  if (!gs) return {};
   const projectId = gs.project_info?.project_id;
   const storageBucket = gs.project_info?.storage_bucket;
   const messagingSenderId = gs.project_info?.project_number;

@@ -4,10 +4,12 @@ import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { trackPromotionClick, trackPromotionImpression } from '../../app/marketplace/api';
 import { usePromotedProducts } from '../../hooks/use-promoted-products';
+import { useNavigationGuard } from '../../hooks/use-navigation-guard';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 
 export default function AdBanner({ placement = 'feed' }: { placement?: 'feed' | 'story' | 'search' }) {
   const router = useRouter();
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const { currentPlan } = useSubscription();
   const { products } = usePromotedProducts({ placement, limit: 20 });
 
@@ -35,7 +37,7 @@ export default function AdBanner({ placement = 'feed' }: { placement?: 'feed' | 
       activeOpacity={0.9}
       onPress={() => {
         void trackPromotionClick({ productId: product.id, placement }).catch(() => {});
-        router.push((`/marketplace/${product.id}`) as any);
+        deferNav(() => router.push((`/marketplace/${product.id}`) as any));
       }}
       style={styles.wrap}
     >

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   FlatList,
   InteractionManager,
@@ -22,8 +22,9 @@ type EmojiItem = {
 };
 
 let cachedEmojiItems: EmojiItem[] | null = null;
+let cachedEmojiItemsPromise: Promise<EmojiItem[]> | null = null;
 
-const PRELOAD_BATCH = 700;
+const PRELOAD_BATCH = 260;
 
 const PEOPLE_HINTS = [
   'grinning',
@@ -63,6 +64,56 @@ const peopleSortKey = (e: EmojiItem) => {
 const charFromUtf16 = (utf16: string) =>
   String.fromCodePoint(...utf16.split('-').map((u) => Number(`0x${u}`)));
 
+const buildEmojiItems = (): EmojiItem[] => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const emojiData = require('emoji-datasource') as EmojiDataItem[];
+  const preparedUnsorted: EmojiItem[] = emojiData
+    .filter((e) => !e.obsoleted_by)
+    .map((e) => ({
+      unified: e.unified,
+      short_names: Array.isArray(e.short_names) ? e.short_names : [],
+      glyph: charFromUtf16(e.unified),
+    }));
+
+  return preparedUnsorted.slice().sort((a, b) => {
+    const ka = peopleSortKey(a);
+    const kb = peopleSortKey(b);
+    if (ka !== kb) return ka - kb;
+    return a.unified.localeCompare(b.unified);
+  });
+};
+
+const getEmojiItems = (): EmojiItem[] => {
+  if (cachedEmojiItems) return cachedEmojiItems;
+  const prepared = buildEmojiItems();
+  cachedEmojiItems = prepared;
+  return prepared;
+};
+
+export const preloadEmojiData = (options?: { immediate?: boolean }) => {
+  if (cachedEmojiItems) return Promise.resolve(cachedEmojiItems);
+  if (options?.immediate) {
+    try {
+      const prepared = getEmojiItems();
+      return Promise.resolve(prepared);
+    } catch {
+      return Promise.resolve([]);
+    }
+  }
+  if (!cachedEmojiItemsPromise) {
+    cachedEmojiItemsPromise = new Promise((resolve) => {
+      const task = InteractionManager.runAfterInteractions(() => {
+        try {
+          resolve(getEmojiItems());
+        } catch {
+          resolve([]);
+        }
+      });
+    });
+  }
+  return cachedEmojiItemsPromise;
+};
+
 export type SafeEmojiPickerProps = {
   onEmojiSelected: (emoji: string) => void;
   columns?: number;
@@ -88,25 +139,7 @@ export default function SafeEmojiPicker({
     }
 
     try {
-      // Load synchronously to avoid showing a loader; then backfill the full list after interactions.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const emojiData = require('emoji-datasource') as EmojiDataItem[];
-      const preparedUnsorted: EmojiItem[] = emojiData
-        .filter((e) => !e.obsoleted_by)
-        .map((e) => ({
-          unified: e.unified,
-          short_names: Array.isArray(e.short_names) ? e.short_names : [],
-          glyph: charFromUtf16(e.unified),
-        }));
-
-      // Ensure we "start with people" instead of ending with it.
-      const prepared = preparedUnsorted.slice().sort((a, b) => {
-        const ka = peopleSortKey(a);
-        const kb = peopleSortKey(b);
-        if (ka !== kb) return ka - kb;
-        return a.unified.localeCompare(b.unified);
-      });
-      cachedEmojiItems = prepared;
+      const prepared = getEmojiItems();
       setItems(prepared.slice(0, PRELOAD_BATCH));
 
       const task = InteractionManager.runAfterInteractions(() => {
@@ -139,6 +172,34 @@ export default function SafeEmojiPicker({
     return items.filter((e) => e.short_names?.some((n) => n.includes(q)));
   }, [items, query]);
 
+  const renderItem = useCallback(
+    ({ item }: { item: EmojiItem }) => (
+      <TouchableOpacity
+        activeOpacity={0.6}
+        onPress={() => onEmojiSelected(item.glyph)}
+        style={[styles.cell, { width: colSize, height: colSize }]}
+      >
+        <Text
+          style={{
+            fontSize: Math.max(16, Math.floor(colSize * 0.62)),
+            color: '#fff',
+          }}
+        >
+          {item.glyph}
+        </Text>
+      </TouchableOpacity>
+    ),
+    [colSize, onEmojiSelected],
+  );
+
+  const getItemLayout = useCallback(
+    (_: EmojiItem[] | null, index: number) => {
+      const row = Math.floor(index / Math.max(1, columns));
+      return { length: colSize, offset: colSize * row, index };
+    },
+    [colSize, columns],
+  );
+
   return (
     <View
       style={styles.frame}
@@ -167,27 +228,13 @@ export default function SafeEmojiPicker({
         numColumns={Math.max(1, columns)}
         keyboardShouldPersistTaps="always"
         removeClippedSubviews
-        initialNumToRender={48}
-        maxToRenderPerBatch={48}
-        updateCellsBatchingPeriod={40}
-        windowSize={7}
+        initialNumToRender={36}
+        maxToRenderPerBatch={36}
+        updateCellsBatchingPeriod={32}
+        windowSize={6}
+        getItemLayout={getItemLayout}
         contentContainerStyle={{ paddingBottom: 10 }}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            activeOpacity={0.6}
-            onPress={() => onEmojiSelected(item.glyph)}
-            style={[styles.cell, { width: colSize, height: colSize }]}
-          >
-            <Text
-              style={{
-                fontSize: Math.max(16, Math.floor(colSize * 0.62)),
-                color: '#fff',
-              }}
-            >
-              {item.glyph}
-            </Text>
-          </TouchableOpacity>
-        )}
+        renderItem={renderItem}
       />
     </View>
   );

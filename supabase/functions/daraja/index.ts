@@ -9,6 +9,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 type PlanTier = 'plus' | 'premium';
 type DarajaAction =
   | 'stkpush'
+  | 'stkquery'
   | 'query'
   | 'marketplace_stkpush'
   | 'marketplace_query'
@@ -26,7 +27,7 @@ class HttpError extends Error {
   }
 }
 
-const FIREBASE_PROJECT_ID = Deno.env.get('FIREBASE_PROJECT_ID') ?? 'movieflixreactnative';
+const FIREBASE_PROJECT_ID = (Deno.env.get('FIREBASE_PROJECT_ID') ?? 'movieflixreactnative').trim();
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`;
 const FIREBASE_JWKS = createRemoteJWKSet(
   new URL('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com')
@@ -35,6 +36,11 @@ const FIREBASE_JWKS = createRemoteJWKSet(
 const firebaseServiceAccountJson = (Deno.env.get('FIREBASE_SERVICE_ACCOUNT_JSON') ?? '').trim();
 const firebaseServiceAccountBase64 = (Deno.env.get('FIREBASE_SERVICE_ACCOUNT_BASE64') ?? '').trim();
 let adminFirestore: Firestore | null = null;
+
+const cleanEnv = (value: string | undefined | null) => {
+  const v = String(value ?? '').trim();
+  return v.replace(/^['"]/, '').replace(/['"]$/, '');
+};
 
 if (firebaseServiceAccountJson || firebaseServiceAccountBase64) {
   try {
@@ -49,15 +55,27 @@ if (firebaseServiceAccountJson || firebaseServiceAccountBase64) {
   console.warn('[daraja] FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_BASE64 not set; secure Daraja handling disabled');
 }
 
-const env = (Deno.env.get('DARAJA_ENV') ?? 'live').toLowerCase().trim();
+// Safety: default to sandbox; only allow production when explicitly enabled.
+const requestedEnv = cleanEnv(Deno.env.get('DARAJA_ENV') ?? 'sandbox').toLowerCase();
+const allowProduction = cleanEnv(Deno.env.get('DARAJA_ALLOW_PRODUCTION') ?? '').toLowerCase() === 'true';
+const env = requestedEnv === 'production' && allowProduction ? 'production' : 'sandbox';
+if (requestedEnv === 'production' && !allowProduction) {
+  console.warn('[daraja] forcing sandbox because DARAJA_ALLOW_PRODUCTION is not true');
+}
 const baseUrl = env === 'sandbox' ? 'https://sandbox.safaricom.co.ke' : 'https://api.safaricom.co.ke';
 
-const CONSUMER_KEY = Deno.env.get('DARAJA_CONSUMER_KEY') ?? '';
-const CONSUMER_SECRET = Deno.env.get('DARAJA_CONSUMER_SECRET') ?? '';
-const BUSINESS_SHORTCODE = Deno.env.get('DARAJA_BUSINESS_SHORTCODE') ?? '';
-const PASSKEY = Deno.env.get('DARAJA_PASSKEY') ?? '';
+const CONSUMER_KEY = cleanEnv(Deno.env.get('DARAJA_CONSUMER_KEY'));
+const CONSUMER_SECRET = cleanEnv(Deno.env.get('DARAJA_CONSUMER_SECRET'));
+
+// Sandbox defaults so you can test without requesting your own shortcode/passkey.
+const SANDBOX_DEFAULT_SHORTCODE = '174379';
+const SANDBOX_DEFAULT_PASSKEY = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919';
+
+const BUSINESS_SHORTCODE =
+  cleanEnv(Deno.env.get('DARAJA_BUSINESS_SHORTCODE')) || (env === 'sandbox' ? SANDBOX_DEFAULT_SHORTCODE : '');
+const PASSKEY = cleanEnv(Deno.env.get('DARAJA_PASSKEY')) || (env === 'sandbox' ? SANDBOX_DEFAULT_PASSKEY : '');
 const TRANSACTION_TYPE =
-  (Deno.env.get('DARAJA_TRANSACTION_TYPE') ?? 'CustomerPayBillOnline').trim() || 'CustomerPayBillOnline';
+  cleanEnv(Deno.env.get('DARAJA_TRANSACTION_TYPE') ?? 'CustomerPayBillOnline') || 'CustomerPayBillOnline';
 
 const PLATFORM_WALLET_ID =
   (Deno.env.get('MARKETPLACE_PLATFORM_WALLET_ID') ?? 'movieflix-platform').trim() || 'movieflix-platform';
@@ -239,18 +257,63 @@ function mpesaPassword(shortcode: string, passkey: string, timestamp: string) {
 }
 
 async function requireFirebaseAuth(req: Request) {
-  const header = req.headers.get('authorization') ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-  if (!token) throw new HttpError(401, 'Missing Authorization Bearer token');
+  // NOTE: Supabase Edge Functions may be configured with verify_jwt=true (Supabase JWT),
+  // so we accept the Firebase ID token via a separate header to avoid gateway rejections.
+  const firebaseHeader = (req.headers.get('x-firebase-token') ?? req.headers.get('x-firebase-auth') ?? '').trim();
+  const authHeader = (req.headers.get('authorization') ?? '').trim();
 
-  const { payload } = await jwtVerify(token, FIREBASE_JWKS, {
-    issuer: FIREBASE_ISSUER,
-    audience: FIREBASE_PROJECT_ID,
-  });
+  const token = (() => {
+    const raw = firebaseHeader || authHeader;
+    if (!raw) return '';
+    return raw.startsWith('Bearer ') ? raw.slice('Bearer '.length).trim() : raw;
+  })();
 
-  const uid = (payload as any)?.user_id ?? (payload as any)?.sub;
-  if (!uid) throw new HttpError(401, 'Invalid Firebase token (missing uid)');
-  return { uid: String(uid) };
+  if (!token) {
+    throw new HttpError(401, 'Missing Firebase token (send x-firebase-token or Authorization: Bearer <firebase>)');
+  }
+
+  const decodeJwtPayloadUnsafe = (raw: string): Record<string, unknown> | null => {
+    try {
+      const parts = raw.split('.');
+      if (parts.length < 2) return null;
+      let payload = parts[1];
+      payload = payload.replace(/-/g, '+').replace(/_/g, '/');
+      while (payload.length % 4) payload += '=';
+      const json = atob(payload);
+      const parsed = JSON.parse(json);
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  try {
+    const { payload } = await jwtVerify(token, FIREBASE_JWKS, {
+      issuer: FIREBASE_ISSUER,
+      audience: FIREBASE_PROJECT_ID,
+    });
+
+    const uid = (payload as any)?.user_id ?? (payload as any)?.sub;
+    if (!uid) throw new HttpError(401, 'Invalid Firebase token (missing uid)');
+    return { uid: String(uid) };
+  } catch (err) {
+    const decoded = decodeJwtPayloadUnsafe(token);
+    const gotAud = decoded?.aud;
+    const gotIss = decoded?.iss;
+    const gotExp = decoded?.exp;
+    const gotIat = decoded?.iat;
+
+    console.error('[daraja] jwt verify failed', {
+      expected: { aud: FIREBASE_PROJECT_ID, iss: FIREBASE_ISSUER },
+      got: { aud: gotAud ?? null, iss: gotIss ?? null, exp: gotExp ?? null, iat: gotIat ?? null },
+      error: err instanceof Error ? err.message : String(err),
+    });
+
+    throw new HttpError(
+      401,
+      `Invalid JWT. Expected aud=${FIREBASE_PROJECT_ID} iss=${FIREBASE_ISSUER}. Got aud=${String(gotAud ?? 'unknown')} iss=${String(gotIss ?? 'unknown')}.`,
+    );
+  }
 }
 
 async function getDarajaAccessToken(): Promise<string> {
@@ -265,12 +328,41 @@ async function getDarajaAccessToken(): Promise<string> {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new HttpError(502, `Daraja auth failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+    console.error('[daraja] oauth failed', {
+      env,
+      baseUrl,
+      status: res.status,
+      body: data,
+      consumerKeyLength: CONSUMER_KEY.length,
+      consumerSecretLength: CONSUMER_SECRET.length,
+    });
+    throw new HttpError(502, `Daraja auth failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText}`);
   }
 
-  const token = (data as any)?.access_token;
-  if (!token) throw new HttpError(502, 'Daraja auth failed: missing access_token');
-  return String(token);
+  const token = cleanEnv((data as any)?.access_token);
+  if (!token) {
+    console.error('[daraja] oauth response missing access_token', {
+      env,
+      baseUrl,
+      status: res.status,
+      body: data,
+    });
+    throw new HttpError(502, 'Daraja auth failed: missing access_token');
+  }
+
+  // A real Daraja access token should be fairly long; if it's suspiciously short, treat it as a server-side auth failure.
+  if (token.length < 20) {
+    console.error('[daraja] oauth response suspicious access_token', {
+      env,
+      baseUrl,
+      status: res.status,
+      tokenLength: token.length,
+      body: data,
+    });
+    throw new HttpError(502, `Daraja auth failed (${env}): suspicious access_token (len=${token.length})`);
+  }
+
+  return token;
 }
 
 type WalletAccountRecord = {
@@ -767,7 +859,7 @@ serve(async (req: Request) => {
       const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
 
       const callbackUrl =
-        (Deno.env.get('DARAJA_CALLBACK_URL') ?? '').trim() || `${url.origin}${url.pathname}?action=callback`;
+        cleanEnv(Deno.env.get('DARAJA_CALLBACK_URL')) || `${url.origin}${url.pathname}?action=callback`;
       const accountReference = (String(body?.accountReference ?? '').trim() || `movieflix-${tier}`).slice(0, 64);
       const transactionDesc = (String(body?.transactionDesc ?? '').trim() || `MovieFlix ${tier} plan`).slice(0, 64);
 
@@ -795,7 +887,17 @@ serve(async (req: Request) => {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new HttpError(502, `Daraja STK push failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+        console.error('[daraja] stkpush failed', {
+          env,
+          baseUrl,
+          status: res.status,
+          body: data,
+          accessTokenLength: accessToken.length,
+        });
+        throw new HttpError(
+          502,
+          `Daraja STK push failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText} (http ${res.status}, tokenLen ${accessToken.length})`
+        );
       }
 
       return okResponse({
@@ -819,7 +921,7 @@ serve(async (req: Request) => {
       const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
 
       const callbackUrl =
-        (Deno.env.get('DARAJA_CALLBACK_URL') ?? '').trim() || `${url.origin}${url.pathname}?action=callback`;
+        cleanEnv(Deno.env.get('DARAJA_CALLBACK_URL')) || `${url.origin}${url.pathname}?action=callback`;
 
       const accountReference = normalizeReference(body?.accountReference, 'movieflix-marketplace');
       const transactionDesc = normalizeDesc(body?.transactionDesc, 'MovieFlix marketplace');
@@ -848,7 +950,17 @@ serve(async (req: Request) => {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new HttpError(502, `Daraja STK push failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+        console.error('[daraja] marketplace stkpush failed', {
+          env,
+          baseUrl,
+          status: res.status,
+          body: data,
+          accessTokenLength: accessToken.length,
+        });
+        throw new HttpError(
+          502,
+          `Daraja STK push failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText} (http ${res.status}, tokenLen ${accessToken.length})`
+        );
       }
 
       return okResponse({
@@ -876,7 +988,7 @@ serve(async (req: Request) => {
       const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
 
       const callbackUrl =
-        (Deno.env.get('DARAJA_CALLBACK_URL') ?? '').trim() || `${url.origin}${url.pathname}?action=callback`;
+        cleanEnv(Deno.env.get('DARAJA_CALLBACK_URL')) || `${url.origin}${url.pathname}?action=callback`;
       const accountReference = normalizeReference(body?.accountReference, `movieflix-credits-${auth.uid.slice(0, 6)}`);
       const transactionDesc = normalizeDesc(body?.transactionDesc, 'MovieFlix promo credits');
 
@@ -915,7 +1027,17 @@ serve(async (req: Request) => {
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new HttpError(502, `Daraja STK push failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+          console.error('[daraja] promo credits stkpush failed', {
+            env,
+            baseUrl,
+            status: res.status,
+            body: data,
+            accessTokenLength: accessToken.length,
+          });
+          throw new HttpError(
+            502,
+            `Daraja STK push failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText} (http ${res.status}, tokenLen ${accessToken.length})`
+          );
         }
 
         const merchantRequestId = (data as any)?.MerchantRequestID ?? null;
@@ -957,6 +1079,55 @@ serve(async (req: Request) => {
       }
     }
 
+    // Lightweight STK status query (no Firestore side-effects).
+    if (action === 'stkquery') {
+      const checkoutRequestId = String(body?.checkoutRequestId ?? '').trim();
+      if (!checkoutRequestId) return badRequest('checkoutRequestId is required');
+
+      const timestamp = timestampNow();
+      const password = mpesaPassword(BUSINESS_SHORTCODE, PASSKEY, timestamp);
+      const accessToken = await getDarajaAccessToken();
+
+      const res = await fetch(`${baseUrl}/mpesa/stkpushquery/v1/query`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          BusinessShortCode: BUSINESS_SHORTCODE,
+          Password: password,
+          Timestamp: timestamp,
+          CheckoutRequestID: checkoutRequestId,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error('[daraja] stk query failed', {
+          env,
+          baseUrl,
+          status: res.status,
+          body: data,
+        });
+        throw new HttpError(502, `Daraja query failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+      }
+
+      const resultCode = String((data as any)?.ResultCode ?? (data as any)?.resultCode ?? '').trim();
+      const resultDesc = (data as any)?.ResultDesc ?? null;
+
+      return okResponse({
+        ok: true,
+        uid: auth.uid,
+        checkoutRequestId,
+        resultCode: resultCode || null,
+        resultDesc: resultDesc ? String(resultDesc) : null,
+        responseCode: (data as any)?.ResponseCode ?? null,
+        responseDescription: (data as any)?.ResponseDescription ?? null,
+        raw: data,
+      });
+    }
+
     if (action === 'query' || action === 'marketplace_query') {
       const checkoutRequestId = String(body?.checkoutRequestId ?? '').trim();
       if (!checkoutRequestId) return badRequest('checkoutRequestId is required');
@@ -985,7 +1156,13 @@ serve(async (req: Request) => {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new HttpError(502, `Daraja query failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+        console.error('[daraja] stk query failed', {
+          env,
+          baseUrl,
+          status: res.status,
+          body: data,
+        });
+        throw new HttpError(502, `Daraja query failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText}`);
       }
 
       const resultCode = String((data as any)?.ResultCode ?? (data as any)?.resultCode ?? '').trim();
@@ -1073,7 +1250,13 @@ serve(async (req: Request) => {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new HttpError(502, `Daraja query failed: ${data?.errorMessage ?? data?.error ?? res.statusText}`);
+        console.error('[daraja] promo credits query failed', {
+          env,
+          baseUrl,
+          status: res.status,
+          body: data,
+        });
+        throw new HttpError(502, `Daraja query failed (${env}): ${data?.errorMessage ?? data?.error ?? res.statusText}`);
       }
 
       const resultCode = String((data as any)?.ResultCode ?? (data as any)?.resultCode ?? '').trim();
@@ -1342,7 +1525,7 @@ serve(async (req: Request) => {
 
     throw new HttpError(
       400,
-      'Invalid action. Expected stkpush, query, marketplace_stkpush, marketplace_query, promo_credits_stkpush, promo_credits_query, marketplace_promote_credits, marketplace_extend_promo_credits, or marketplace_cancel_promo.'
+      'Invalid action. Expected stkpush, stkquery, query, marketplace_stkpush, marketplace_query, promo_credits_stkpush, promo_credits_query, marketplace_promote_credits, marketplace_extend_promo_credits, or marketplace_cancel_promo.'
     );
   } catch (err) {
     const status = err instanceof HttpError ? err.status : 500;

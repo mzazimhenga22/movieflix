@@ -1,51 +1,53 @@
 ﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
-import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { Audio, AVPlaybackSource, AVPlaybackStatusSuccess, InterruptionModeAndroid, InterruptionModeIOS, ResizeMode, Video } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { activateKeepAwakeAsync, deactivateKeepAwake, isAvailableAsync } from 'expo-keep-awake';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AppStateStatus } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-    ActivityIndicator,
-    AppState,
-    Alert,
-    Animated,
-    FlatList,
-    Image,
-    PanResponder,
-    Platform,
-    Pressable,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    InteractionManager,
-    View,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  AppState,
+  FlatList,
+  Image,
+  InteractionManager,
+  NativeModules,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { firestore } from '../constants/firebase';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import NativeAdCard from '../components/ads/NativeAdCard';
 import { API_BASE_URL, API_KEY } from '../constants/api';
-import { useUser } from '../hooks/use-user';
+import { firestore } from '../constants/firebase';
 import { usePromotedProducts } from '../hooks/use-promoted-products';
-import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
+import { useUser } from '../hooks/use-user';
+import { checkAndAwardBadges } from '../lib/achievements/achievementManager';
 import { logInteraction } from '../lib/algo';
+import { VideoMaskingOverlay } from '../lib/engineer';
 import { syncMovieMatchProfile } from '../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../lib/profileStorage';
+import { buildScrapeDebugTag, buildSourceOrder } from '../lib/videoPlaybackShared';
+import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
+import { useSubscription } from '../providers/SubscriptionProvider';
 import { usePStream, type PStreamPlayback } from '../src/pstream/usePStream';
 import type { Media } from '../types';
-import { buildSourceOrder, buildScrapeDebugTag } from '../lib/videoPlaybackShared';
-import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
-import { VideoMaskingOverlay } from '../lib/engineer';
-import NativeAdCard from '../components/ads/NativeAdCard';
-import { useSubscription } from '../providers/SubscriptionProvider';
+import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
 
 import NewChatSheet from './messaging/components/NewChatSheet';
 import {
@@ -129,9 +131,9 @@ async function fetchFallbackSubtitles(
   episodeNum?: number,
 ): Promise<CaptionSource[]> {
   if (!imdbId && !tmdbId) return [];
-  
+
   const subs: CaptionSource[] = [];
-  
+
   // Try OpenSubtitles.org hash-less search (free endpoint)
   try {
     const imdbNum = imdbId?.replace('tt', '') || '';
@@ -139,25 +141,25 @@ async function fetchFallbackSubtitles(
     if (mediaType === 'tv' && seasonNum && episodeNum) {
       osUrl += `/season-${seasonNum}/episode-${episodeNum}`;
     }
-    
+
     const osResponse = await fetch(osUrl, {
       headers: {
         'User-Agent': 'TemporaryUserAgent',
         'X-User-Agent': 'TemporaryUserAgent',
       },
     });
-    
+
     if (osResponse.ok) {
       const osData = await osResponse.json();
       const seenLangs = new Set<string>();
-      
+
       for (const item of osData ?? []) {
         if (!item?.SubDownloadLink) continue;
-        
+
         const lang = item.ISO639?.toLowerCase() || item.LanguageName?.toLowerCase() || 'en';
         if (seenLangs.has(lang)) continue;
         seenLangs.add(lang);
-        
+
         subs.push({
           id: `os-${item.IDSubtitleFile || subs.length}`,
           type: 'srt',
@@ -165,14 +167,14 @@ async function fetchFallbackSubtitles(
           language: lang,
           display: item.LanguageName || lang.toUpperCase(),
         });
-        
+
         if (subs.length >= 10) break;
       }
     }
   } catch (err) {
     if (__DEV__) console.warn('[OpenSubs] Fetch failed', err);
   }
-  
+
   // If no subs found, try YIFY subs for movies
   if (subs.length === 0 && mediaType !== 'tv' && imdbId) {
     try {
@@ -187,7 +189,7 @@ async function fetchFallbackSubtitles(
           const subPage = match[1];
           const langMatch = subPage.match(/\/subtitles\/[^/]+\/([^/]+)/);
           const lang = langMatch?.[1] || 'english';
-          
+
           subs.push({
             id: `yify-${count}`,
             type: 'srt',
@@ -202,11 +204,11 @@ async function fetchFallbackSubtitles(
       if (__DEV__) console.warn('[YIFY] Fetch failed', err);
     }
   }
-  
+
   if (__DEV__ && subs.length > 0) {
     console.log('[Subtitles] Found fallback subs:', subs.length);
   }
-  
+
   return subs;
 }
 const DEFAULT_STREAM_UA =
@@ -223,15 +225,15 @@ function normalizePlaybackUri(uri: string): string {
       try {
         const decoded = decodeURIComponent(encodedUrl);
         if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
-      } catch {}
+      } catch { }
       try {
         const base64 = encodedUrl.replace(/-/g, '+').replace(/_/g, '/');
         const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
         const decoded = Buffer.from(padded, 'base64').toString('utf8');
         if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   return uri;
 }
 
@@ -243,8 +245,8 @@ async function fetchTmdbEnrichment(
   mediaType: 'movie' | 'tv',
   signal?: AbortSignal,
 ): Promise<TmdbEnrichment> {
-  const appendResponse = mediaType === 'movie' 
-    ? 'external_ids,release_dates' 
+  const appendResponse = mediaType === 'movie'
+    ? 'external_ids,release_dates'
     : 'external_ids,content_ratings';
   const url = `${API_BASE_URL}/${mediaType}/${tmdbId}?api_key=${API_KEY}&append_to_response=${appendResponse}`;
   const res = await fetch(url, { signal });
@@ -272,8 +274,8 @@ async function fetchTmdbEnrichment(
   }
 
   // Extract runtime
-  const runtime = typeof data?.runtime === 'number' ? data.runtime : 
-                  (Array.isArray(data?.episode_run_time) && data.episode_run_time[0]) || undefined;
+  const runtime = typeof data?.runtime === 'number' ? data.runtime :
+    (Array.isArray(data?.episode_run_time) && data.episode_run_time[0]) || undefined;
 
   return { imdbId, releaseYear, contentRating, runtime };
 }
@@ -642,10 +644,10 @@ const VideoPlayerScreen = () => {
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
     resolvedVideoUrl
       ? createPlaybackSource({
-          uri: resolvedVideoUrl,
-          headers: resolvedVideoHeaders,
-          streamType: resolvedStreamType,
-        })
+        uri: resolvedVideoUrl,
+        headers: resolvedVideoHeaders,
+        streamType: resolvedStreamType,
+      })
       : null,
   );
 
@@ -696,7 +698,7 @@ const VideoPlayerScreen = () => {
     const tag = 'MovieFlixVideoPlayer';
     return () => {
       keepAwakeActiveRef.current = false;
-      void deactivateKeepAwake(tag).catch(() => {});
+      void deactivateKeepAwake(tag).catch(() => { });
     };
   }, []);
 
@@ -707,14 +709,14 @@ const VideoPlayerScreen = () => {
       typeof player?.presentPictureInPictureAsync === 'function'
         ? player.presentPictureInPictureAsync.bind(player)
         : typeof player?.enterPictureInPictureAsync === 'function'
-        ? player.enterPictureInPictureAsync.bind(player)
-        : null;
+          ? player.enterPictureInPictureAsync.bind(player)
+          : null;
     const exitPip =
       typeof player?.dismissPictureInPictureAsync === 'function'
         ? player.dismissPictureInPictureAsync.bind(player)
         : typeof player?.exitPictureInPictureAsync === 'function'
-        ? player.exitPictureInPictureAsync.bind(player)
-        : null;
+          ? player.exitPictureInPictureAsync.bind(player)
+          : null;
     return { enterPip, exitPip };
   }, []);
 
@@ -735,78 +737,7 @@ const VideoPlayerScreen = () => {
     }
   }, []);
 
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState) => {
-      appStateRef.current = nextState;
-      const isActive = nextState === 'active';
-      setAppIsActive(isActive);
 
-      if ((nextState === 'background' || nextState === 'inactive') && pipUiEnabled) {
-        if (!isPipActiveRef.current && !pipPendingRef.current && isPlayingRef.current && !midrollActiveRef.current) {
-          setPipPending(true);
-          if (pipPendingTimeoutRef.current) {
-            clearTimeout(pipPendingTimeoutRef.current);
-            pipPendingTimeoutRef.current = null;
-          }
-          const { enterPip } = resolvePipHandlers();
-          if (enterPip) {
-            void (async () => {
-              await ensurePlaybackAudioMode(true);
-              try {
-                await enterPip();
-              } catch {
-                // ignore
-              } finally {
-                setPipPending(false);
-              }
-            })();
-          } else {
-            pipPendingTimeoutRef.current = setTimeout(() => {
-              setPipPending(false);
-              pipPendingTimeoutRef.current = null;
-            }, 1500);
-          }
-        }
-      }
-
-      if (isActive) {
-        if (pipPendingTimeoutRef.current) {
-          clearTimeout(pipPendingTimeoutRef.current);
-          pipPendingTimeoutRef.current = null;
-        }
-        setPipPending(false);
-        if (isPipActiveRef.current) {
-          const { exitPip } = resolvePipHandlers();
-          if (exitPip) {
-            void exitPip().catch(() => {});
-          }
-          setIsPipActive(false);
-        }
-      }
-
-      if (isActive && pendingAudioFocusRetryRef.current) {
-        pendingAudioFocusRetryRef.current = false;
-        const video = videoRef.current;
-        if (!video) return;
-        if (!isPlayingRef.current || midrollActiveRef.current) return;
-        void (async () => {
-          await ensurePlaybackAudioMode();
-          try {
-            await video.playAsync();
-          } catch {
-            // ignore
-          }
-        })();
-      }
-    });
-    return () => {
-      sub.remove();
-      if (pipPendingTimeoutRef.current) {
-        clearTimeout(pipPendingTimeoutRef.current);
-        pipPendingTimeoutRef.current = null;
-      }
-    };
-  }, [ensurePlaybackAudioMode, pipUiEnabled, resolvePipHandlers]);
 
   const [showControls, setShowControls] = useState(true);
   const [controlsSession, setControlsSession] = useState(0);
@@ -848,7 +779,7 @@ const VideoPlayerScreen = () => {
     if (!productId) return;
     if (midrollImpressionsRef.current.has(productId)) return;
     midrollImpressionsRef.current.add(productId);
-    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => {});
+    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => { });
   }, [currentPlan, midrollActive, midrollProduct?.id]);
   const pendingBrightnessRef = useRef(brightness);
   const pendingVolumeRef = useRef(volume);
@@ -859,7 +790,7 @@ const VideoPlayerScreen = () => {
     if (brightnessApplyTimeoutRef.current) return;
     brightnessApplyTimeoutRef.current = setTimeout(() => {
       brightnessApplyTimeoutRef.current = null;
-      Brightness.setBrightnessAsync(pendingBrightnessRef.current).catch(() => {});
+      Brightness.setBrightnessAsync(pendingBrightnessRef.current).catch(() => { });
     }, 50);
   }, []);
   const scheduleVolumeApply = useCallback(() => {
@@ -868,7 +799,7 @@ const VideoPlayerScreen = () => {
       volumeApplyTimeoutRef.current = null;
       const video = videoRef.current;
       if (!video) return;
-      video.setVolumeAsync(pendingVolumeRef.current).catch(() => {});
+      video.setVolumeAsync(pendingVolumeRef.current).catch(() => { });
     }, 50);
   }, []);
   useEffect(() => {
@@ -889,17 +820,7 @@ const VideoPlayerScreen = () => {
     };
   }, []);
 
-  useEffect(() => {
-    midrollActiveRef.current = midrollActive;
-  }, [midrollActive]);
 
-  useEffect(() => {
-    isPipActiveRef.current = isPipActive;
-  }, [isPipActive]);
-
-  useEffect(() => {
-    pipPendingRef.current = pipPending;
-  }, [pipPending]);
 
   useEffect(() => {
     positionMillisRef.current = positionMillis;
@@ -1144,7 +1065,7 @@ const VideoPlayerScreen = () => {
           updatedBy: user.uid,
           updatedAt: serverTimestamp(),
         },
-      }).catch(() => {});
+      }).catch(() => { });
     },
     [isWatchPartyHost, user?.uid, watchPartyRef],
   );
@@ -1164,7 +1085,7 @@ const VideoPlayerScreen = () => {
           updatedBy: user.uid,
           updatedAt: serverTimestamp(),
         },
-      }).catch(() => {});
+      }).catch(() => { });
     },
     [isWatchPartyHost, user?.uid, watchPartyRef],
   );
@@ -1262,11 +1183,11 @@ const VideoPlayerScreen = () => {
       videoUrl: resolvedVideoUrl ?? null,
       videoHeaders: resolvedVideoHeaders ?? null,
       streamType: resolvedStreamType ?? null,
-    }).catch(() => {});
+    }).catch(() => { });
 
     return () => {
       if (!isWatchPartyHost) return;
-      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => {});
+      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => { });
     };
   }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
 
@@ -1361,6 +1282,106 @@ const VideoPlayerScreen = () => {
   useEffect(() => {
     watchEntryRef.current = watchHistoryEntry;
   }, [watchHistoryEntry]);
+
+  const navigation = useNavigation();
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      const isActive = nextState === 'active';
+      setAppIsActive(isActive);
+
+      if ((nextState === 'background' || nextState === 'inactive') && pipUiEnabled) {
+        if (!isPipActiveRef.current && !pipPendingRef.current && isPlayingRef.current && !midrollActiveRef.current) {
+          setPipPending(true);
+          if (pipPendingTimeoutRef.current) {
+            clearTimeout(pipPendingTimeoutRef.current);
+            pipPendingTimeoutRef.current = null;
+          }
+          const { enterPip } = resolvePipHandlers();
+          if (enterPip) {
+            void (async () => {
+              await ensurePlaybackAudioMode(true);
+              try {
+                await enterPip();
+              } catch {
+                // ignore
+              } finally {
+                setPipPending(false);
+              }
+            })();
+          } else {
+            pipPendingTimeoutRef.current = setTimeout(() => {
+              setPipPending(false);
+              pipPendingTimeoutRef.current = null;
+            }, 1500);
+          }
+        }
+      }
+
+      if (isActive) {
+        if (pipPendingTimeoutRef.current) {
+          clearTimeout(pipPendingTimeoutRef.current);
+          pipPendingTimeoutRef.current = null;
+        }
+        setPipPending(false);
+        if (isPipActiveRef.current) {
+          const { exitPip } = resolvePipHandlers();
+          if (exitPip) {
+            void exitPip().catch(() => { });
+          }
+          setIsPipActive(false);
+        }
+      }
+
+      if (isActive && pendingAudioFocusRetryRef.current) {
+        pendingAudioFocusRetryRef.current = false;
+        const video = videoRef.current;
+        if (!video) return;
+        if (!isPlayingRef.current || midrollActiveRef.current) return;
+        void (async () => {
+          await ensurePlaybackAudioMode();
+          try {
+            await video.playAsync();
+          } catch {
+            // ignore
+          }
+        })();
+      }
+    });
+
+    return () => {
+      sub.remove();
+      if (pipPendingTimeoutRef.current) {
+        clearTimeout(pipPendingTimeoutRef.current);
+        pipPendingTimeoutRef.current = null;
+      }
+    };
+  }, [ensurePlaybackAudioMode, pipUiEnabled, resolvePipHandlers]);
+
+  useEffect(() => {
+    const removeListener = navigation.addListener('beforeRemove', (e: any) => {
+      // If we are playing and PiP is enabled/supported, preventing exit to enter PiP
+      if (isPlayingRef.current && pipUiEnabled && !isPipActiveRef.current && !midrollActiveRef.current) {
+        // Only prevent if we can actually enter PiP
+        // Resolve PiP handlers again just to be safe or use ref if needed, 
+        // though they are memoized.
+        const { enterPip } = resolvePipHandlers();
+        if (enterPip) {
+          e.preventDefault();
+          setPipPending(true);
+          // Ensure audio continues in background (PiP)
+          ensurePlaybackAudioMode(true).then(() => {
+            enterPip().catch(() => {
+              // If PiP fails, dispatch original action
+              navigation.dispatch(e.data.action);
+            });
+          });
+        }
+      }
+    });
+    return removeListener;
+  }, [navigation, pipUiEnabled, resolvePipHandlers, ensurePlaybackAudioMode]);
+
   const refreshPipSupport = useCallback(() => {
     const player = videoRef.current as any;
     if (!player) {
@@ -1380,6 +1401,18 @@ const VideoPlayerScreen = () => {
   const handleVideoReadyForDisplay = useCallback(() => {
     refreshPipSupport();
   }, [refreshPipSupport]);
+
+  useEffect(() => {
+    midrollActiveRef.current = midrollActive;
+  }, [midrollActive]);
+
+  useEffect(() => {
+    isPipActiveRef.current = isPipActive;
+  }, [isPipActive]);
+
+  useEffect(() => {
+    pipPendingRef.current = pipPending;
+  }, [pipPending]);
   useEffect(() => {
     return () => {
       if (bufferingOverlayTimeoutRef.current) {
@@ -1433,10 +1466,10 @@ const VideoPlayerScreen = () => {
     setPlaybackSource(
       resolvedVideoUrl
         ? createPlaybackSource({
-            uri: resolvedVideoUrl,
-            headers: resolvedVideoHeaders,
-            streamType: resolvedStreamType,
-          })
+          uri: resolvedVideoUrl,
+          headers: resolvedVideoHeaders,
+          streamType: resolvedStreamType,
+        })
         : null,
     );
     triedVariantUrisRef.current = new Set();
@@ -1493,21 +1526,21 @@ const VideoPlayerScreen = () => {
   useEffect(() => {
     nextUpEpisodeRef.current = nextUpEpisode;
   }, [nextUpEpisode]);
-  
+
   // Fetch upcoming episodes from TMDB if not provided (e.g., from Continue Watching)
   useEffect(() => {
     if (upcomingEpisodes.length > 0) {
       setEpisodeQueue(upcomingEpisodes);
       return;
     }
-    
+
     // Only fetch for TV shows with season/episode info
     if (!isTvShow || !tmdbId || !transitionReady) {
       setEpisodeQueue([]);
       setEpisodeDrawerOpen(false);
       return;
     }
-    
+
     let cancelled = false;
     const fetchEpisodesFromTmdb = async () => {
       setEpisodesFetching(true);
@@ -1517,29 +1550,29 @@ const VideoPlayerScreen = () => {
         const showRes = await fetch(showUrl);
         if (!showRes.ok) throw new Error('Failed to fetch TV show');
         const showData = await showRes.json();
-        
+
         const seasons = (showData?.seasons ?? []).filter(
           (s: any) => typeof s?.season_number === 'number' && s.season_number > 0
         );
-        
+
         if (!seasons.length || cancelled) {
           setEpisodeQueue([]);
           return;
         }
-        
+
         // Determine current season (use param or default to 1)
         const currentSeasonNum = initialSeasonNumber ?? 1;
         const currentEpisodeNum = initialEpisodeNumber ?? 1;
-        
+
         // Fetch current season details
         const seasonUrl = `${API_BASE_URL}/tv/${tmdbId}/season/${currentSeasonNum}?api_key=${API_KEY}`;
         const seasonRes = await fetch(seasonUrl);
         if (!seasonRes.ok) throw new Error('Failed to fetch season');
         const seasonData = await seasonRes.json();
-        
+
         const upcoming: UpcomingEpisode[] = [];
         const episodes = seasonData?.episodes ?? [];
-        
+
         // Add remaining episodes from current season
         episodes
           .filter((ep: any) => ep.episode_number > currentEpisodeNum)
@@ -1558,7 +1591,7 @@ const VideoPlayerScreen = () => {
               seasonEpisodeCount: episodes.length,
             });
           });
-        
+
         // Optionally fetch next season if current is almost done
         if (upcoming.length < 5 && seasons.length > currentSeasonNum) {
           const nextSeasonNum = currentSeasonNum + 1;
@@ -1588,7 +1621,7 @@ const VideoPlayerScreen = () => {
             // Ignore next season fetch errors
           }
         }
-        
+
         if (!cancelled) {
           setEpisodeQueue(upcoming);
           if (__DEV__) {
@@ -1608,9 +1641,9 @@ const VideoPlayerScreen = () => {
         }
       }
     };
-    
+
     fetchEpisodesFromTmdb();
-    
+
     return () => {
       cancelled = true;
     };
@@ -1662,7 +1695,7 @@ const VideoPlayerScreen = () => {
               }
             }
           })
-          .catch(() => {});
+          .catch(() => { });
       }
       setSelectedCaptionId('off');
       captionCacheRef.current = {};
@@ -2094,7 +2127,7 @@ const VideoPlayerScreen = () => {
           manifestUrl = originalUrl;
         }
       }
-    } catch {}
+    } catch { }
 
     const fetchManifest = async () => {
       try {
@@ -2140,51 +2173,51 @@ const VideoPlayerScreen = () => {
     };
   }, [isHlsSource, playbackSource?.uri, playbackSource?.headers]);
 
-// Base64 encode headers like providers-temp does
-function encodeHeaders(headers: Record<string, string>): string {
-  try {
-    return Buffer.from(JSON.stringify(headers)).toString('base64');
-  } catch {
-    // Fallback if Buffer not available
-    return btoa(JSON.stringify(headers));
+  // Base64 encode headers like providers-temp does
+  function encodeHeaders(headers: Record<string, string>): string {
+    try {
+      return Buffer.from(JSON.stringify(headers)).toString('base64');
+    } catch {
+      // Fallback if Buffer not available
+      return btoa(JSON.stringify(headers));
+    }
   }
-}
   function normalizeLang(lang?: string) {
-  if (!lang) return undefined;
-  return lang.toLowerCase().split('-')[0];
-}
-
-useEffect(() => {
-  if (!audioTrackOptions.length) return;
-  const video = videoRef.current;
-  if (!video) return;
-
-  // Respect manual selection
-  if (selectedAudioKey !== 'auto') return;
-
-  // Prefer English
-  let chosen = audioTrackOptions.find((t) => normalizeLang(t.language) === 'en') ??
-               audioTrackOptions.find((t) => (t.name || '').toLowerCase().includes('english'));
-
-  // If no English, fall back to default or first track
-  if (!chosen) {
-    chosen = audioTrackOptions.find((t) => t.isDefault) ?? audioTrackOptions[0];
+    if (!lang) return undefined;
+    return lang.toLowerCase().split('-')[0];
   }
 
-  if (!chosen) return;
+  useEffect(() => {
+    if (!audioTrackOptions.length) return;
+    const video = videoRef.current;
+    if (!video) return;
 
-  setSelectedAudioKey(chosen.id);
+    // Respect manual selection
+    if (selectedAudioKey !== 'auto') return;
 
-  if (chosen.language && chosen.language !== 'und') {
-    (video as any).setStatusAsync({
-      selectedAudioTrack: { type: 'language', value: chosen.language },
-    }).catch(() => {});
-  } else {
-    (video as any).setStatusAsync({
-      selectedAudioTrack: { type: 'system' },
-    }).catch(() => {});
-  }
-}, [audioTrackOptions]);
+    // Prefer English
+    let chosen = audioTrackOptions.find((t) => normalizeLang(t.language) === 'en') ??
+      audioTrackOptions.find((t) => (t.name || '').toLowerCase().includes('english'));
+
+    // If no English, fall back to default or first track
+    if (!chosen) {
+      chosen = audioTrackOptions.find((t) => t.isDefault) ?? audioTrackOptions[0];
+    }
+
+    if (!chosen) return;
+
+    setSelectedAudioKey(chosen.id);
+
+    if (chosen.language && chosen.language !== 'und') {
+      (video as any).setStatusAsync({
+        selectedAudioTrack: { type: 'language', value: chosen.language },
+      }).catch(() => { });
+    } else {
+      (video as any).setStatusAsync({
+        selectedAudioTrack: { type: 'system' },
+      }).catch(() => { });
+    }
+  }, [audioTrackOptions]);
 
   // lock orientation + setup brightness (focus-aware so the app doesn't stay landscape after leaving this screen)
   useFocusEffect(
@@ -2211,10 +2244,10 @@ useEffect(() => {
       const sub = AppState.addEventListener('change', (state) => {
         if (!lockActive) return;
         if (state === 'background' || state === 'inactive') {
-          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => { });
         }
         if (state === 'active') {
-          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
+          void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => { });
         }
       });
 
@@ -2222,9 +2255,9 @@ useEffect(() => {
         lockActive = false;
         cancelled = true;
         sub.remove();
-        void Brightness.restoreSystemBrightnessAsync().catch(() => {});
+        void Brightness.restoreSystemBrightnessAsync().catch(() => { });
         void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
-          .catch(() => ScreenOrientation.unlockAsync().catch(() => {}));
+          .catch(() => ScreenOrientation.unlockAsync().catch(() => { }));
       };
     }, []),
   );
@@ -2321,7 +2354,7 @@ useEffect(() => {
         const shouldResume = midrollWasPlayingRef.current;
         if (shouldResume) {
           setIsPlaying(true);
-          video.playAsync().catch(() => {});
+          video.playAsync().catch(() => { });
         }
       }
     }, 250);
@@ -2429,7 +2462,28 @@ useEffect(() => {
                 updatedAt: serverTimestamp(),
               },
               { merge: true },
-            ).catch(() => {});
+            ).catch(() => { });
+
+            // Check for achievements if user is logged in
+            if (options.markComplete) {
+              const genres = baseEntry.genre_ids ? baseEntry.genre_ids.map(String) : [];
+              void checkAndAwardBadges(user.uid, {
+                tmdbId: Number(baseEntry.id),
+                title: baseEntry.title || baseEntry.name || 'Unknown',
+                mediaType: baseEntry.media_type === 'tv' ? 'tv' : 'movie',
+                durationMinutes: durationValue / 60000,
+                watchedMinutes: positionValue / 60000,
+                genres,
+                completedAt: new Date(),
+              }).then((newBadges) => {
+                if (newBadges.length > 0) {
+                  Alert.alert(
+                    '🎉 Achievement Unlocked!',
+                    `You earned ${newBadges.length} new badge${newBadges.length > 1 ? 's' : ''}! Check the Streaks tab.`,
+                  );
+                }
+              });
+            }
           }
           return;
         }
@@ -2475,7 +2529,7 @@ useEffect(() => {
               updatedAt: serverTimestamp(),
             },
             { merge: true },
-          ).catch(() => {});
+          ).catch(() => { });
         }
         if (progressValue >= 0.7 && user?.uid) {
           const profileName =
@@ -2504,18 +2558,18 @@ useEffect(() => {
             },
           });
           try {
-            void logInteraction({ 
-              type: progressValue >= 0.9 ? 'watch_complete' : 'watch_partial', 
-              actorId: user.uid, 
-              targetId: enriched.id, 
+            void logInteraction({
+              type: progressValue >= 0.9 ? 'watch_complete' : 'watch_partial',
+              actorId: user.uid,
+              targetId: enriched.id,
               targetType: enriched.media_type === 'tv' ? 'tv' : 'movie',
-              meta: { 
+              meta: {
                 progress: progressValue,
                 genres: enriched.genre_ids,
                 title: enriched.title || enriched.name
-              } 
+              }
             });
-          } catch {}
+          } catch { }
         }
       } catch (err) {
         console.warn('Failed to update watch history', err);
@@ -2605,14 +2659,14 @@ useEffect(() => {
             if (shouldPlayAfter === false) return video.pauseAsync();
             return undefined;
           })
-          .catch(() => {});
+          .catch(() => { });
       }
     }
 
     // Ensure latest slider-set volume is applied once the player is ready.
     const video = videoRef.current;
     if (video) {
-      video.setVolumeAsync(pendingVolumeRef.current).catch(() => {});
+      video.setVolumeAsync(pendingVolumeRef.current).catch(() => { });
     }
 
     const pendingRemote = pendingRemotePlaybackRef.current;
@@ -2653,7 +2707,7 @@ useEffect(() => {
           lastAdvanceTsRef.current = Date.now();
         }
       }
-    } catch {}
+    } catch { }
     prevPositionRef.current = currentPos;
     // Show buffering overlay only when buffering persists and playback is effectively stalled
     if (bufferingNow && !isSeeking) {
@@ -2753,7 +2807,7 @@ useEffect(() => {
 
         if (currentPos + 1500 < desired) {
           resumeAppliedRef.current = true;
-          (videoRef.current as any)?.setPositionAsync(desired).catch(() => {});
+          (videoRef.current as any)?.setPositionAsync(desired).catch(() => { });
           setSeekPosition(desired);
         } else {
           resumeAppliedRef.current = true;
@@ -2895,7 +2949,7 @@ useEffect(() => {
       positionMillisRef.current = target;
       setSkipIntroShown(true);
       setShowSkipIntro(false);
-    } catch {}
+    } catch { }
   }, [introWindow.end]);
   const handleNextEpisodePill = useCallback(() => {
     const next = nextUpEpisodeRef.current;
@@ -3036,12 +3090,49 @@ useEffect(() => {
     if (!videoRef.current) return;
     if (!pipUiEnabled) return;
     bumpControlsLife();
+
+    // First try expo-av's native PiP methods
     const { enterPip, exitPip } = resolvePipHandlers();
+
+    // For Android, if expo-av doesn't expose PiP methods, use native module fallback
+    if (Platform.OS === 'android' && !enterPip && !exitPip) {
+      try {
+        // Try to use Android native PiP module
+        const { PipAndroidModule } = NativeModules;
+        if (PipAndroidModule?.enterPipMode) {
+          setPipPending(true);
+          await ensurePlaybackAudioMode(true);
+          await PipAndroidModule.enterPipMode();
+          setIsPipActive(true);
+          return;
+        }
+
+        // Fallback: Try triggering home button behavior to auto-enter PiP
+        // The manifest config + startsPictureInPictureAutomatically should handle this
+        Alert.alert(
+          'Picture in Picture',
+          'Press the Home button while video is playing to enter PiP mode on Android.',
+          [{ text: 'OK' }]
+        );
+        return;
+      } catch (err) {
+        console.warn('Android PiP native module failed', err);
+        Alert.alert(
+          'Picture in Picture',
+          'Press the Home button while video is playing to enter PiP mode.',
+          [{ text: 'OK' }]
+        );
+        return;
+      } finally {
+        setPipPending(false);
+      }
+    }
+
     if (!enterPip && !exitPip) {
       // If PiP functions are not available, it means the platform/device doesn't support it
       // or the Video component isn't exposing the methods as expected.
-      // We will let the try...catch block handle a more generic error message if enterPip() fails.
       setIsPipSupported(false);
+      Alert.alert('Picture in Picture', 'PiP is not supported on this device.');
       return;
     }
     try {
@@ -3060,7 +3151,7 @@ useEffect(() => {
     } finally {
       setPipPending(false);
     }
-  }, [isPipActive, pipUiEnabled, bumpControlsLife, resolvePipHandlers]);
+  }, [isPipActive, pipUiEnabled, bumpControlsLife, resolvePipHandlers, ensurePlaybackAudioMode]);
 
   const handleQualitySelect = useCallback(
     async (option: QualityOption | null) => {
@@ -3109,7 +3200,7 @@ useEffect(() => {
         setActiveCaptionText(null);
         const key = captionPreferenceKeyRef.current;
         if (key) {
-          await AsyncStorage.setItem(key, 'off').catch(() => {});
+          await AsyncStorage.setItem(key, 'off').catch(() => { });
         }
         return;
       }
@@ -3121,7 +3212,7 @@ useEffect(() => {
       setSelectedCaptionId(captionId);
       const key = captionPreferenceKeyRef.current;
       if (key) {
-        await AsyncStorage.setItem(key, captionId).catch(() => {});
+        await AsyncStorage.setItem(key, captionId).catch(() => { });
       }
       const cached = captionCacheRef.current[captionId];
       if (cached) {
@@ -3152,32 +3243,32 @@ useEffect(() => {
     [captionSources, selectedCaptionId, updateActiveCaption, bumpControlsLife],
   );
   const handleAudioSelect = useCallback(
-  async (option: AudioTrackOption | null) => {
-    bumpControlsLife();
-    const video = videoRef.current;
-    if (!video) return;
+    async (option: AudioTrackOption | null) => {
+      bumpControlsLife();
+      const video = videoRef.current;
+      if (!video) return;
 
-    setSelectedAudioKey(option?.id ?? 'auto');
+      setSelectedAudioKey(option?.id ?? 'auto');
 
-    try {
-      if (option?.language && option.language !== 'und') {
-        await (video as any).setStatusAsync({
-          selectedAudioTrack: {
-            type: 'language',
-            value: option.language,
-          },
-        });
-      } else {
-        await (video as any).setStatusAsync({
-          selectedAudioTrack: { type: 'system' },
-        });
+      try {
+        if (option?.language && option.language !== 'und') {
+          await (video as any).setStatusAsync({
+            selectedAudioTrack: {
+              type: 'language',
+              value: option.language,
+            },
+          });
+        } else {
+          await (video as any).setStatusAsync({
+            selectedAudioTrack: { type: 'system' },
+          });
+        }
+      } catch (err) {
+        console.warn('Audio track switch failed', err);
       }
-    } catch (err) {
-      console.warn('Audio track switch failed', err);
-    }
-  },
-  [bumpControlsLife],
-);
+    },
+    [bumpControlsLife],
+  );
   useEffect(() => {
     if (!captionSources.length) return;
     let cancelled = false;
@@ -3220,20 +3311,20 @@ useEffect(() => {
         typeof episode.seasonNumber === 'number'
           ? episode.seasonNumber
           : typeof seasonNumberParam === 'number'
-          ? seasonNumberParam
-          : 1;
+            ? seasonNumberParam
+            : 1;
       const normalizedEpisodeNumber =
         typeof episode.episodeNumber === 'number'
           ? episode.episodeNumber
           : typeof episodeNumberParam === 'number'
-          ? episodeNumberParam
-          : 1;
+            ? episodeNumberParam
+            : 1;
       const derivedSeasonEpisodeCount =
         typeof episode.seasonEpisodeCount === 'number'
           ? episode.seasonEpisodeCount
           : typeof seasonEpisodeCountParam === 'number'
-          ? seasonEpisodeCountParam
-          : undefined;
+            ? seasonEpisodeCountParam
+            : undefined;
       const payload = {
         type: 'show',
         title: displayTitle,
@@ -3312,6 +3403,7 @@ useEffect(() => {
               onLoad={handleVideoLoad}
               pointerEvents='none'
               {...(videoPipProps as any)}
+              startsPictureInPictureAutomatically={true}
               // @ts-ignore - presentPictureInPictureAsync exists at runtime
               onPictureInPictureStatusUpdate={handlePipStatusUpdate}
               onReadyForDisplay={handleVideoReadyForDisplay}
@@ -3375,7 +3467,7 @@ useEffect(() => {
                   product={midrollProduct}
                   onPress={() => {
                     if (!midrollProduct?.id) return;
-                    void trackPromotionClick({ productId: String(midrollProduct.id), placement: 'story' }).catch(() => {});
+                    void trackPromotionClick({ productId: String(midrollProduct.id), placement: 'story' }).catch(() => { });
                     router.push((`/marketplace/${midrollProduct.id}`) as any);
                   }}
                 />
@@ -3438,10 +3530,10 @@ useEffect(() => {
               </View>
               <View style={styles.contentRatingDivider} />
               <Text style={styles.contentRatingInfo}>
-                {tmdbEnrichment?.runtime 
+                {tmdbEnrichment?.runtime
                   ? `${tmdbEnrichment.runtime} min${isTvShow ? ' per episode' : ''}`
-                  : (isTvShow 
-                    ? 'May contain violence, language, sexual content' 
+                  : (isTvShow
+                    ? 'May contain violence, language, sexual content'
                     : 'Some material may be inappropriate for children under 13')}
               </Text>
             </View>
@@ -3485,8 +3577,8 @@ useEffect(() => {
                 <TouchableOpacity style={styles.roundButton} activeOpacity={0.7} delayPressIn={0}>
                   <Ionicons name="download-outline" size={20} color="#fff" />
                 </TouchableOpacity>
-                <TouchableOpacity 
-                  style={styles.roundButton} 
+                <TouchableOpacity
+                  style={styles.roundButton}
                   activeOpacity={0.7}
                   delayPressIn={0}
                   onPress={() => setAvDrawerOpen(true)}
@@ -3572,56 +3664,56 @@ useEffect(() => {
               <View style={[styles.sideCluster, styles.sideClusterRight]}>
                 {/* Watch party chat (only when in a room) */}
                 {roomCode && showChat ? (
-                <View style={styles.chatPanel}>
-                  <Text style={styles.chatTitle}>Party chat</Text>
-                  <FlatList
-                    data={chatMessages}
-                    keyExtractor={(item) => item.id}
-                    style={styles.chatList}
-                    contentContainerStyle={styles.chatListContent}
-                    renderItem={({ item }) => (
-                      <View style={styles.chatMessageRow}>
-                        {item.avatar ? (
-                          <Image
-                            source={{ uri: item.avatar }}
-                            style={styles.chatAvatar}
-                          />
-                        ) : (
-                          <View style={styles.chatAvatarFallback}>
-                            <Text style={styles.chatAvatarFallbackText}>
-                              {item.user.charAt(0).toUpperCase()}
-                            </Text>
+                  <View style={styles.chatPanel}>
+                    <Text style={styles.chatTitle}>Party chat</Text>
+                    <FlatList
+                      data={chatMessages}
+                      keyExtractor={(item) => item.id}
+                      style={styles.chatList}
+                      contentContainerStyle={styles.chatListContent}
+                      renderItem={({ item }) => (
+                        <View style={styles.chatMessageRow}>
+                          {item.avatar ? (
+                            <Image
+                              source={{ uri: item.avatar }}
+                              style={styles.chatAvatar}
+                            />
+                          ) : (
+                            <View style={styles.chatAvatarFallback}>
+                              <Text style={styles.chatAvatarFallbackText}>
+                                {item.user.charAt(0).toUpperCase()}
+                              </Text>
+                            </View>
+                          )}
+                          <View style={styles.chatBubble}>
+                            <Text style={styles.chatUser}>{item.user}</Text>
+                            <Text style={styles.chatText}>{item.text}</Text>
                           </View>
-                        )}
-                        <View style={styles.chatBubble}>
-                          <Text style={styles.chatUser}>{item.user}</Text>
-                          <Text style={styles.chatText}>{item.text}</Text>
                         </View>
-                      </View>
-                    )}
-                  />
-                  <View style={styles.chatInputRow}>
-                    <TextInput
-                      style={styles.chatInput}
-                      placeholder="Say something…"
-                      placeholderTextColor="rgba(255,255,255,0.5)"
-                      value={chatInput}
-                      onChangeText={setChatInput}
-                      onSubmitEditing={handleSendChat}
-                      editable={!chatSending}
+                      )}
                     />
-                    <TouchableOpacity
-                      style={styles.chatSendButton}
-                      onPress={handleSendChat}
-                      disabled={chatSending || !chatInput.trim()}
-                    >
-                      <Ionicons name="send" size={16} color="#fff" />
-                    </TouchableOpacity>
+                    <View style={styles.chatInputRow}>
+                      <TextInput
+                        style={styles.chatInput}
+                        placeholder="Say something…"
+                        placeholderTextColor="rgba(255,255,255,0.5)"
+                        value={chatInput}
+                        onChangeText={setChatInput}
+                        onSubmitEditing={handleSendChat}
+                        editable={!chatSending}
+                      />
+                      <TouchableOpacity
+                        style={styles.chatSendButton}
+                        onPress={handleSendChat}
+                        disabled={chatSending || !chatInput.trim()}
+                      >
+                        <Ionicons name="send" size={16} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                </View>
                 ) : (
-                <View style={styles.middleRightPlaceholder} />
-              )}
+                  <View style={styles.middleRightPlaceholder} />
+                )}
                 <View style={[styles.sideRail, styles.rightSideRail]}>
                   <SlidableVerticalControl
                     icon="volume-high"
@@ -4000,8 +4092,8 @@ useEffect(() => {
         )}
         {isLocked && (
           <View pointerEvents="box-none" style={styles.lockBadgeWrapper}>
-            <Pressable 
-              style={styles.lockBadge} 
+            <Pressable
+              style={styles.lockBadge}
               onPress={toggleLock}
               android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: false }}
             >
@@ -4075,7 +4167,7 @@ useEffect(() => {
               style={[
                 styles.quickReplySendButton,
                 (!quickReplyConversationId || !quickReplyText.trim() || quickReplySending) &&
-                  styles.quickReplySendButtonDisabled,
+                styles.quickReplySendButtonDisabled,
               ]}
             >
               {quickReplySending ? (
@@ -5682,83 +5774,83 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   ccWrapper: {
-  alignItems: 'center',
-},
-ccTrack: {
-  width: 68,
-  borderRadius: 34,
-  backgroundColor: 'rgba(20,22,32,0.85)',
-  overflow: 'hidden',
-  borderWidth: 1,
-  borderColor: 'rgba(255,255,255,0.12)',
-  position: 'relative',
-},
-ccFill: {
-  position: 'absolute',
-  left: 0,
-  right: 0,
-  bottom: 0,
-},
-ccThumb: {
-  position: 'absolute',
-  left: 8,
-  right: 8,
-  height: 44,
-  borderRadius: 22,
-  alignItems: 'center',
-  justifyContent: 'center',
-  shadowColor: '#000',
-  shadowOpacity: 0.35,
-  shadowRadius: 6,
-  shadowOffset: { width: 0, height: 2 },
-},
-ccLabel: {
-  marginTop: 10,
-  fontSize: 12,
-  fontWeight: '600',
-  color: 'rgba(255,255,255,0.9)',
-},
-// Netflix-style content rating badge
-contentRatingContainer: {
-  position: 'absolute',
-  top: 20,
-  left: 0,
-  zIndex: 50,
-},
-contentRatingBadge: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  backgroundColor: 'rgba(0,0,0,0.75)',
-  paddingVertical: 8,
-  paddingLeft: 0,
-  paddingRight: 16,
-  borderTopRightRadius: 4,
-  borderBottomRightRadius: 4,
-},
-contentRatingBox: {
-  backgroundColor: '#fff',
-  paddingHorizontal: 8,
-  paddingVertical: 4,
-  marginRight: 0,
-},
-contentRatingText: {
-  color: '#000',
-  fontSize: 13,
-  fontWeight: '800',
-  letterSpacing: 0.5,
-},
-contentRatingDivider: {
-  width: 2,
-  height: 20,
-  backgroundColor: '#fff',
-  marginHorizontal: 10,
-},
-contentRatingInfo: {
-  color: 'rgba(255,255,255,0.9)',
-  fontSize: 12,
-  fontWeight: '500',
-  maxWidth: 280,
-},
+    alignItems: 'center',
+  },
+  ccTrack: {
+    width: 68,
+    borderRadius: 34,
+    backgroundColor: 'rgba(20,22,32,0.85)',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    position: 'relative',
+  },
+  ccFill: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  ccThumb: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  ccLabel: {
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+  },
+  // Netflix-style content rating badge
+  contentRatingContainer: {
+    position: 'absolute',
+    top: 20,
+    left: 0,
+    zIndex: 50,
+  },
+  contentRatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingVertical: 8,
+    paddingLeft: 0,
+    paddingRight: 16,
+    borderTopRightRadius: 4,
+    borderBottomRightRadius: 4,
+  },
+  contentRatingBox: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginRight: 0,
+  },
+  contentRatingText: {
+    color: '#000',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  contentRatingDivider: {
+    width: 2,
+    height: 20,
+    backgroundColor: '#fff',
+    marginHorizontal: 10,
+  },
+  contentRatingInfo: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 12,
+    fontWeight: '500',
+    maxWidth: 280,
+  },
 });
 // Add this helper near other helpers (after parseHlsQualityOptions or similar)
 

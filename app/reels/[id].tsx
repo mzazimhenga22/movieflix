@@ -227,10 +227,15 @@ const ReelSlide = ({
   // ✅ Double tap like
   const [liked, setLiked] = useState(false)
   const [likesCount, setLikesCount] = useState<number>(item.likes ?? 0)
+  const likedRef = useRef(false)
 
   useEffect(() => {
     setLikesCount(item.likes ?? 0)
   }, [item.likes])
+
+  useEffect(() => {
+    likedRef.current = liked
+  }, [liked])
 
   // ✅ heart burst animation
   const heartAnim = useRef(new Animated.Value(0)).current
@@ -270,7 +275,8 @@ const ReelSlide = ({
       const { locationX, locationY } = e.nativeEvent
       setHeartPos({ x: locationX, y: locationY })
 
-      if (!liked) {
+      if (!likedRef.current) {
+        likedRef.current = true
         setLiked(true)
         setLikesCount((c) => c + 1)
       }
@@ -468,11 +474,13 @@ const ReelSlide = ({
               style={styles.actionBtn}
               onPress={() => {
                 // single-tap heart button also likes
-                if (!liked) {
+                if (!likedRef.current) {
+                  likedRef.current = true
                   setLiked(true)
                   setLikesCount((c) => c + 1)
                 } else {
                   // optional: allow unlike
+                  likedRef.current = false
                   setLiked(false)
                   setLikesCount((c) => Math.max(0, c - 1))
                 }

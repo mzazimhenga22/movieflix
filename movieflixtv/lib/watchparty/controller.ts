@@ -1,4 +1,4 @@
-import { deleteDoc, doc, getDoc, increment, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, increment, runTransaction, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { firestore } from '@/constants/firebase';
 
 export type WatchPartyPlayback = {
@@ -8,6 +8,16 @@ export type WatchPartyPlayback = {
   updatedBy?: string | null;
 };
 
+export type WatchPartyEpisode = {
+  seasonNumber?: number | null;
+  episodeNumber?: number | null;
+  seasonTmdbId?: string | null;
+  episodeTmdbId?: string | null;
+  seasonTitle?: string | null;
+  episodeTitle?: string | null;
+  updatedAt?: any;
+};
+
 export type WatchParty = {
   code: string;
   hostId: string;
@@ -15,6 +25,7 @@ export type WatchParty = {
   videoHeaders?: Record<string, string> | null;
   streamType?: string | null;
   playback?: WatchPartyPlayback | null;
+  episode?: WatchPartyEpisode | null;
   title?: string | null;
   mediaType?: string | null;
   createdAt?: any;
@@ -22,6 +33,13 @@ export type WatchParty = {
   maxParticipants: number;
   participantsCount: number;
   isOpen: boolean;
+};
+
+export type WatchPartyParticipant = {
+  userId: string;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  joinedAt?: any;
 };
 
 const WATCHPARTY_TTL_MINUTES = 60; // 1 hour
@@ -168,33 +186,193 @@ export const tryJoinWatchParty = async (code: string): Promise<JoinResult> => {
     };
   }
 
-  await updateDoc(ref, {
-    participantsCount: increment(1),
-  });
-
-  const updatedSnap = await getDoc(ref);
-  const updated = updatedSnap.data() as any;
-
   const party: WatchParty = {
     code,
-    hostId: updated.hostId,
-    videoUrl: updated.videoUrl,
-    videoHeaders: (updated.videoHeaders as Record<string, string> | null) ?? null,
-    streamType: (updated.streamType as string | null) ?? null,
-    playback: (updated.playback as WatchPartyPlayback | null) ?? null,
-    title: updated.title ?? null,
-    mediaType: updated.mediaType ?? null,
-    createdAt: updated.createdAt,
-    expiresAt: updated.expiresAt,
-    maxParticipants: updated.maxParticipants ?? max,
-    participantsCount: updated.participantsCount ?? currentCount + 1,
-    isOpen: updated.isOpen ?? true,
+    hostId: data.hostId,
+    videoUrl: data.videoUrl,
+    videoHeaders: (data.videoHeaders as Record<string, string> | null) ?? null,
+    streamType: (data.streamType as string | null) ?? null,
+    playback: (data.playback as WatchPartyPlayback | null) ?? null,
+    title: data.title ?? null,
+    mediaType: data.mediaType ?? null,
+    createdAt: data.createdAt,
+    expiresAt,
+    maxParticipants: max,
+    participantsCount: currentCount,
+    isOpen,
   };
 
   return { party, status: 'ok' };
 };
 
+export type TrackParticipantStatus = 'ok' | 'not_found' | 'expired' | 'closed' | 'full';
+export type TrackParticipantResult = { party: WatchParty | null; status: TrackParticipantStatus };
+
+export async function joinWatchPartyAsParticipant(args: {
+  code: string;
+  userId: string;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+}): Promise<TrackParticipantResult> {
+  const code = args.code.trim();
+  const userId = args.userId.trim();
+  if (!code || !userId) return { party: null, status: 'not_found' };
+
+  const partyRef = doc(firestore, 'watchParties', code);
+  const participantRef = doc(collection(firestore, 'watchParties', code, 'participants'), userId);
+
+  return runTransaction(firestore, async (tx) => {
+    const snap = await tx.get(partyRef);
+    if (!snap.exists()) return { party: null, status: 'not_found' as const };
+
+    const data = snap.data() as any;
+    const now = Date.now();
+    const expiresAt = data.expiresAt as number | undefined;
+    if (!expiresAt || expiresAt < now) {
+      tx.delete(partyRef);
+      return { party: null, status: 'expired' as const };
+    }
+
+    const hostId = String(data.hostId ?? '').trim();
+    const isOpen = Boolean(data.isOpen);
+    const max = (data.maxParticipants ?? FREE_MAX_PARTICIPANTS) as number;
+    const currentCount = (data.participantsCount ?? 0) as number;
+
+    // Allow host to join even before "open" (they'll open the room when playback starts).
+    const isHost = Boolean(hostId && hostId === userId);
+    if (!isOpen && !isHost) {
+      return {
+        party: {
+          code,
+          hostId,
+          videoUrl: data.videoUrl,
+          videoHeaders: (data.videoHeaders as Record<string, string> | null) ?? null,
+          streamType: (data.streamType as string | null) ?? null,
+          playback: (data.playback as WatchPartyPlayback | null) ?? null,
+          title: data.title ?? null,
+          mediaType: data.mediaType ?? null,
+          createdAt: data.createdAt,
+          expiresAt,
+          maxParticipants: max,
+          participantsCount: currentCount,
+          isOpen,
+        },
+        status: 'closed' as const,
+      };
+    }
+
+    const existingParticipant = await tx.get(participantRef);
+    if (!existingParticipant.exists()) {
+      if (currentCount >= max) {
+        return {
+          party: {
+            code,
+            hostId,
+            videoUrl: data.videoUrl,
+            videoHeaders: (data.videoHeaders as Record<string, string> | null) ?? null,
+            streamType: (data.streamType as string | null) ?? null,
+            playback: (data.playback as WatchPartyPlayback | null) ?? null,
+            title: data.title ?? null,
+            mediaType: data.mediaType ?? null,
+            createdAt: data.createdAt,
+            expiresAt,
+            maxParticipants: max,
+            participantsCount: currentCount,
+            isOpen,
+          },
+          status: 'full' as const,
+        };
+      }
+
+      tx.set(
+        participantRef,
+        {
+          userId,
+          displayName: args.displayName ?? null,
+          avatarUrl: args.avatarUrl ?? null,
+          joinedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      tx.update(partyRef, { participantsCount: increment(1) });
+    }
+
+    const updatedCount = existingParticipant.exists() ? currentCount : currentCount + 1;
+    const party: WatchParty = {
+      code,
+      hostId,
+      videoUrl: data.videoUrl,
+      videoHeaders: (data.videoHeaders as Record<string, string> | null) ?? null,
+      streamType: (data.streamType as string | null) ?? null,
+      playback: (data.playback as WatchPartyPlayback | null) ?? null,
+      title: data.title ?? null,
+      mediaType: data.mediaType ?? null,
+      createdAt: data.createdAt,
+      expiresAt,
+      maxParticipants: max,
+      participantsCount: updatedCount,
+      isOpen,
+    };
+
+    return { party, status: 'ok' as const };
+  });
+}
+
+export async function leaveWatchPartyAsParticipant(args: { code: string; userId: string }) {
+  const code = args.code.trim();
+  const userId = args.userId.trim();
+  if (!code || !userId) return;
+
+  const partyRef = doc(firestore, 'watchParties', code);
+  const participantRef = doc(collection(firestore, 'watchParties', code, 'participants'), userId);
+
+  await runTransaction(firestore, async (tx) => {
+    const partySnap = await tx.get(partyRef);
+    if (!partySnap.exists()) return;
+
+    const participantSnap = await tx.get(participantRef);
+    if (!participantSnap.exists()) return;
+
+    tx.delete(participantRef);
+    tx.update(partyRef, { participantsCount: increment(-1) });
+  });
+}
+
 export const setWatchPartyOpen = async (code: string, open: boolean) => {
   const ref = doc(firestore, 'watchParties', code);
   await updateDoc(ref, { isOpen: open });
+};
+
+export const updateWatchPartyEpisode = async (
+  code: string,
+  episode: Omit<WatchPartyEpisode, 'updatedAt'>,
+) => {
+  const ref = doc(firestore, 'watchParties', code);
+  await updateDoc(ref, {
+    episode: {
+      ...episode,
+      updatedAt: serverTimestamp(),
+    },
+    playback: {
+      isPlaying: false,
+      positionMillis: 0,
+      updatedAt: serverTimestamp(),
+    },
+  });
+};
+
+export const updateWatchPartyPlayback = async (
+  code: string,
+  playback: { isPlaying: boolean; positionMillis: number },
+  userId: string,
+) => {
+  const ref = doc(firestore, 'watchParties', code);
+  await updateDoc(ref, {
+    playback: {
+      isPlaying: playback.isPlaying,
+      positionMillis: Math.max(0, Math.floor(playback.positionMillis)),
+      updatedBy: userId,
+      updatedAt: serverTimestamp(),
+    },
+  });
 };

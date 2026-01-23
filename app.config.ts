@@ -1,12 +1,37 @@
 import type { ConfigContext, ExpoConfig } from '@expo/config';
+import { AndroidConfig, ConfigPlugin, withAndroidManifest } from '@expo/config-plugins';
 import { Buffer } from 'buffer';
 import * as fs from 'fs';
 import * as path from 'path';
 import baseMobile from './app.json';
-import baseTv from './movieflixtv/app.json';
+
+const withAndroidPiP: ConfigPlugin = (config) =>
+  withAndroidManifest(config, (config) => {
+    const mainActivity = AndroidConfig.Manifest.getMainActivityOrThrow(config.modResults);
+    mainActivity.$['android:supportsPictureInPicture'] = 'true';
+    mainActivity.$['android:resizeableActivity'] = 'true';
+    // mainActivity.$['android:autoEnterEnabled'] = 'true';
+    return config;
+  });
 
 const variant = (process.env.APP_VARIANT || process.env.EXPO_PUBLIC_APP_VARIANT || '').toLowerCase();
-const baseExpoConfig = ((variant === 'tv' ? baseTv : baseMobile) as { expo: ExpoConfig }).expo;
+
+function resolveBaseExpoConfig(): ExpoConfig {
+  if (variant === 'tv') {
+    try {
+      // Optional: TV is a standalone app and may be excluded from EAS uploads.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const baseTv = require('./movieflixtv/app.json') as { expo: ExpoConfig };
+      return baseTv.expo;
+    } catch (e) {
+      console.warn('APP_VARIANT=tv but movieflixtv/app.json is unavailable; falling back to mobile config.', e);
+    }
+  }
+
+  return (baseMobile as { expo: ExpoConfig }).expo;
+}
+
+const baseExpoConfig = resolveBaseExpoConfig();
 
 // Prefer an EAS "File" env var (path), fallback to base64, fallback to local file if present.
 function resolveGoogleServicesFile(): string | undefined {
@@ -36,9 +61,6 @@ function resolveGoogleServicesFile(): string | undefined {
 }
 
 export default ({ config }: ConfigContext): ExpoConfig => {
-  const appIdFromEnv = process.env.EXPO_PUBLIC_AGORA_APP_ID ?? '';
-  const tokenEndpointFromEnv = process.env.EXPO_PUBLIC_AGORA_TOKEN_ENDPOINT ?? '';
-
   const googleServicesFile = resolveGoogleServicesFile();
 
   const androidConfig: ExpoConfig['android'] = {
@@ -57,12 +79,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 
   // We just reuse whatever plugins are defined in app.json.
   // No Agora config plugin here, since it does not exist on npm.
-  const mergedPlugins = [
-    ...(baseExpoConfig.plugins ?? []),
-    // If in future you add a real Agora config plugin, you can push it here.
-  ];
+  // We just reuse whatever plugins are defined in app.json, filtering out the string reference
+  // to the local plugin since we will apply the inline function manually.
+  const mergedPlugins = (baseExpoConfig.plugins ?? []).filter((p) => p !== './plugins/withAndroidPiP');
 
-  return {
+  const finalConfig: ExpoConfig = {
     ...config,
     ...baseExpoConfig,
     android: androidConfig,
@@ -70,10 +91,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     extra: {
       ...(baseExpoConfig.extra ?? {}),
       ...(config.extra ?? {}),
-      agora: {
-        appId: appIdFromEnv,
-        tokenEndpoint: tokenEndpointFromEnv,
-      },
     },
   };
+
+  // Apply the inline plugin function directly
+  return withAndroidPiP(finalConfig);
 };

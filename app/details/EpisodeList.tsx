@@ -1,8 +1,9 @@
-import { FontAwesome, MaterialIcons } from '@expo/vector-icons';
-import React, { useMemo, useState } from 'react';
+import { FontAwesome, Ionicons, MaterialIcons } from '@expo/vector-icons';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Image,
+  Animated,
+  Dimensions,
   LayoutAnimation,
   Platform,
   ScrollView,
@@ -12,15 +13,23 @@ import {
   UIManager,
   View,
 } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import Animated, { FadeInUp, FadeOutDown } from 'react-native-reanimated';
+import ReanimatedView, { FadeInUp, FadeOutDown } from 'react-native-reanimated';
+import {
+  DownloadEvent,
+  getActiveDownloads,
+  subscribeToDownloadEvents,
+} from '@/lib/downloadEvents';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-interface Episode {
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+export interface Episode {
   id: number;
   episode_number: number;
   name: string;
@@ -30,7 +39,7 @@ interface Episode {
   season_number?: number;
 }
 
-interface Season {
+export interface Season {
   id: number;
   name: string;
   season_number?: number;
@@ -43,52 +52,139 @@ interface EpisodeListProps {
   onDownloadEpisode?: (episode: Episode, season: Season) => void;
   disabled?: boolean;
   episodeDownloads?: Record<string, { state: 'idle' | 'preparing' | 'downloading' | 'completed' | 'error'; progress: number; error?: string }>;
+  accentColor?: string;
+  tmdbId?: number;
 }
 
-const EpisodeList: React.FC<EpisodeListProps> = ({ seasons, onPlayEpisode, onDownloadEpisode, disabled, episodeDownloads }) => {
+const EpisodeList: React.FC<EpisodeListProps> = ({ 
+  seasons, 
+  onPlayEpisode, 
+  onDownloadEpisode, 
+  disabled, 
+  episodeDownloads,
+  accentColor = '#e50914',
+  tmdbId,
+}) => {
   const [selectedSeason, setSelectedSeason] = useState<Season | null>(seasons.length > 0 ? seasons[0] : null);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const indicatorAnim = useRef(new Animated.Value(0)).current;
+  const [seasonWidths, setSeasonWidths] = useState<number[]>([]);
+  
+  // Subscribe to global download events for real-time progress
+  const [activeDownloads, setActiveDownloads] = useState<DownloadEvent[]>([]);
+  
+  useEffect(() => {
+    setActiveDownloads(getActiveDownloads());
+    const unsub = subscribeToDownloadEvents((event) => {
+      setActiveDownloads((prev) => {
+        const rest = prev.filter((e) => e.sessionId !== event.sessionId);
+        if (event.status === 'completed' || event.status === 'error' || event.status === 'cancelled') {
+          return rest;
+        }
+        return [...rest, event];
+      });
+    });
+    return unsub;
+  }, []);
 
-  const handleSeasonChange = (season: Season) => {
+  const handleSeasonChange = (season: Season, index: number) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setSelectedSeason(season);
+    
+    // Animate indicator
+    const offset = seasonWidths.slice(0, index).reduce((a, b) => a + b, 0) + index * 8;
+    Animated.spring(indicatorAnim, {
+      toValue: offset,
+      friction: 8,
+      tension: 80,
+      useNativeDriver: true,
+    }).start();
   };
+
+  const selectedIndex = seasons.findIndex(s => s.id === selectedSeason?.id);
+  const totalEpisodes = selectedSeason?.episodes.length || 0;
+  const totalRuntime = selectedSeason?.episodes.reduce((acc, ep) => acc + (ep.runtime || 45), 0) || 0;
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Seasons & Episodes</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dropdownContainer}>
-        {seasons.map((season) => (
-          <TouchableOpacity
-            key={season.id}
-            style={[
-              styles.dropdownButton,
-              selectedSeason?.id === season.id && styles.dropdownButtonSelected,
-            ]}
-            onPress={() => handleSeasonChange(season)}
-          >
-            <Text style={styles.dropdownButtonText}>{season.name}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
+      {/* Section Header */}
+      <View style={styles.headerRow}>
+        <View style={styles.headerLeft}>
+          <View style={[styles.accentDot, { backgroundColor: accentColor }]} />
+          <Text style={styles.title}>Episodes</Text>
+        </View>
+        <View style={styles.headerMeta}>
+          <Text style={styles.metaText}>{totalEpisodes} eps</Text>
+          <View style={styles.metaDot} />
+          <Text style={styles.metaText}>{Math.floor(totalRuntime / 60)}h {totalRuntime % 60}m</Text>
+        </View>
+      </View>
 
+      {/* Season Tabs */}
+      <View style={styles.seasonTabsContainer}>
+        <ScrollView 
+          ref={scrollViewRef}
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          contentContainerStyle={styles.seasonTabs}
+        >
+          {seasons.map((season, index) => {
+            const isSelected = selectedSeason?.id === season.id;
+            return (
+              <TouchableOpacity
+                key={season.id}
+                onLayout={(e) => {
+                  const w = e.nativeEvent.layout.width;
+                  setSeasonWidths(prev => {
+                    const next = [...prev];
+                    next[index] = w;
+                    return next;
+                  });
+                }}
+                style={[
+                  styles.seasonTab,
+                  isSelected && styles.seasonTabSelected,
+                  isSelected && { borderColor: accentColor },
+                ]}
+                onPress={() => handleSeasonChange(season, index)}
+                activeOpacity={0.7}
+              >
+                <Text style={[
+                  styles.seasonTabText,
+                  isSelected && styles.seasonTabTextSelected,
+                  isSelected && { color: accentColor },
+                ]}>
+                  {season.name}
+                </Text>
+                <Text style={styles.seasonEpCount}>{season.episodes.length} ep</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+
+      {/* Episodes Grid */}
       {selectedSeason && (
-        <View style={styles.episodeListContainer}>
+        <View style={styles.episodesGrid}>
           {selectedSeason.episodes.map((episode, index) => (
-            <Animated.View
-              entering={FadeInUp.delay(index * 40)}
+            <ReanimatedView
+              entering={FadeInUp.delay(index * 30).springify()}
               exiting={FadeOutDown}
               key={episode.id}
-              style={styles.episodeCard}
+              style={styles.episodeCardWrap}
             >
               <EpisodeCard
                 episode={episode}
                 season={selectedSeason}
                 disabled={disabled}
                 downloads={episodeDownloads}
+                activeDownloads={activeDownloads}
                 onPlay={onPlayEpisode}
                 onDownload={onDownloadEpisode}
+                accentColor={accentColor}
+                tmdbId={tmdbId}
               />
-            </Animated.View>
+            </ReanimatedView>
           ))}
         </View>
       )}
@@ -96,283 +192,471 @@ const EpisodeList: React.FC<EpisodeListProps> = ({ seasons, onPlayEpisode, onDow
   );
 };
 
-const EpisodeCard = ({
+export const EpisodeCard = ({
   episode,
   season,
   disabled,
   downloads,
+  activeDownloads,
   onPlay,
   onDownload,
+  accentColor = '#e50914',
+  tmdbId,
 }: {
   episode: Episode;
   season: Season;
   disabled?: boolean;
   downloads?: EpisodeListProps['episodeDownloads'];
+  activeDownloads?: DownloadEvent[];
   onPlay?: EpisodeListProps['onPlayEpisode'];
   onDownload?: EpisodeListProps['onDownloadEpisode'];
+  accentColor?: string;
+  tmdbId?: number;
 }) => {
   const posterUrl = episode.still_path
     ? `https://image.tmdb.org/t/p/w500${episode.still_path}`
-    : 'https://image.tmdb.org/t/p/w500_and_h281_bestv2/priQW1UXQwxz6Wn1Ks64h0cR3ej.jpg';
+    : null;
 
-  const downloadState = downloads?.[String(episode.id)];
-  const isDownloading = downloadState?.state === 'downloading' || downloadState?.state === 'preparing';
-  const progress = Math.round((downloadState?.progress ?? 0) * 100);
+  // Get download state from props or active downloads
+  const localDownloadState = downloads?.[String(episode.id)];
+  
+  // Check active downloads for real-time progress (match by episode info)
+  const activeDownload = activeDownloads?.find(d => 
+    d.episodeNumber === episode.episode_number && 
+    d.seasonNumber === (episode.season_number ?? season.season_number)
+  );
+  
+  // Merge states - active downloads take precedence
+  const isDownloading = activeDownload?.status === 'downloading' || 
+    activeDownload?.status === 'preparing' ||
+    localDownloadState?.state === 'downloading' || 
+    localDownloadState?.state === 'preparing';
+  
+  const isPaused = activeDownload?.status === 'paused';
+  const isCompleted = localDownloadState?.state === 'completed';
+  
+  // Use active download progress if available (same calculation as downloads screen)
+  const progress = activeDownload 
+    ? Math.round((activeDownload.progress ?? 0) * 100)
+    : Math.round((localDownloadState?.progress ?? 0) * 100);
 
-  const cinematicNumber = useMemo(() => (episode.episode_number < 10 ? `0${episode.episode_number}` : episode.episode_number), [episode.episode_number]);
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    Animated.timing(progressAnim, {
+      toValue: progress,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  }, [progress]);
+
+  useEffect(() => {
+    if (isDownloading) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.02, duration: 800, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [isDownloading]);
+
+  const cinematicNumber = useMemo(
+    () => (episode.episode_number < 10 ? `0${episode.episode_number}` : String(episode.episode_number)), 
+    [episode.episode_number]
+  );
+
+  const formatRuntime = (mins: number) => {
+    if (mins >= 60) return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return `${mins}m`;
+  };
 
   return (
-    <View style={styles.cardOuter}>
-      <LinearGradient colors={['#ff512f', '#dd2476']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.cardGlow} />
-      <BlurView intensity={40} tint="dark" style={styles.cardInner}>
-        <View style={styles.posterWrap}>
-          <Image source={{ uri: posterUrl }} style={styles.posterImage} />
+    <Animated.View style={[styles.cardOuter, { transform: [{ scale: pulseAnim }] }]}>
+      {/* Accent glow */}
+      <LinearGradient 
+        colors={[`${accentColor}40`, `${accentColor}10`, 'transparent']} 
+        start={{ x: 0, y: 0 }} 
+        end={{ x: 1, y: 1 }} 
+        style={styles.cardGlow} 
+      />
+      
+      <View style={styles.cardInner}>
+        {/* Thumbnail Section */}
+        <View style={styles.thumbnailWrap}>
+          {posterUrl ? (
+            <ExpoImage
+              source={{ uri: posterUrl }}
+              style={styles.thumbnail}
+              contentFit="cover"
+              transition={200}
+            />
+          ) : (
+            <LinearGradient
+              colors={['#1a1a2e', '#16213e']}
+              style={styles.thumbnail}
+            >
+              <Ionicons name="film-outline" size={32} color="rgba(255,255,255,0.3)" />
+            </LinearGradient>
+          )}
+          
+          {/* Overlay gradient */}
           <LinearGradient
-            colors={['rgba(0,0,0,0)', 'rgba(5,5,18,0.85)']}
-            style={styles.posterOverlay}
+            colors={['transparent', 'rgba(0,0,0,0.8)']}
+            style={styles.thumbnailOverlay}
           />
-          <View style={styles.episodeBadge}>
-            <Text style={styles.badgeLabel}>EP</Text>
+          
+          {/* Episode badge */}
+          <View style={[styles.episodeBadge, { backgroundColor: `${accentColor}dd` }]}>
             <Text style={styles.badgeNumber}>{cinematicNumber}</Text>
           </View>
+          
+          {/* Play button overlay */}
+          <TouchableOpacity
+            style={styles.playOverlay}
+            onPress={() => !disabled && onPlay?.(episode, season)}
+            disabled={disabled}
+            activeOpacity={0.8}
+          >
+            <View style={[styles.playBtn, { backgroundColor: accentColor }]}>
+              <Ionicons name="play" size={18} color="#fff" style={{ marginLeft: 2 }} />
+            </View>
+          </TouchableOpacity>
+          
+          {/* Duration badge */}
+          <View style={styles.durationBadge}>
+            <Text style={styles.durationText}>{formatRuntime(episode.runtime || 45)}</Text>
+          </View>
         </View>
-        <View style={styles.cardContent}>
-          <Text style={styles.cardTitle} numberOfLines={1}>
+
+        {/* Content Section */}
+        <View style={styles.contentSection}>
+          <Text style={styles.episodeTitle} numberOfLines={1}>
             {episode.name}
           </Text>
-          <Text style={styles.cardOverview} numberOfLines={2}>
-            {episode.overview || 'No synopsis yet—tap play to discover the story.'}
+          
+          <Text style={styles.episodeOverview} numberOfLines={2}>
+            {episode.overview || 'No description available for this episode.'}
           </Text>
-          <View style={styles.metadataRow}>
-            <View style={styles.metaChip}>
-              <Text style={styles.metaText}>{episode.runtime || 45} min</Text>
-            </View>
+
+          {/* Meta chips */}
+          <View style={styles.metaChips}>
             {season?.season_number != null && (
-              <View style={styles.metaChipOutline}>
-                <Text style={styles.metaTextSoft}>S{season.season_number}</Text>
+              <View style={styles.metaChip}>
+                <Text style={styles.metaChipText}>S{season.season_number}</Text>
               </View>
             )}
-            <View style={styles.metaChipOutline}>
-              <Text style={styles.metaTextSoft}>Dolby Vision</Text>
+            <View style={styles.metaChip}>
+              <Text style={styles.metaChipText}>HD</Text>
+            </View>
+            <View style={styles.metaChip}>
+              <Text style={styles.metaChipText}>5.1</Text>
             </View>
           </View>
 
-          <View style={styles.actionsRow}>
+          {/* Download Progress or Button */}
+          {isDownloading || isPaused ? (
+            <View style={styles.downloadProgressWrap}>
+              <View style={styles.downloadProgressHeader}>
+                <View style={styles.downloadStatusRow}>
+                  {isDownloading && <ActivityIndicator size="small" color={accentColor} />}
+                  {isPaused && <Ionicons name="pause-circle" size={16} color="#ffa500" />}
+                  <Text style={styles.downloadStatusText}>
+                    {isPaused ? 'Paused' : 'Downloading'}
+                  </Text>
+                </View>
+                <Text style={[styles.downloadPercent, { color: accentColor }]}>{progress}%</Text>
+              </View>
+              <View style={styles.progressTrack}>
+                <Animated.View 
+                  style={[
+                    styles.progressFill, 
+                    { 
+                      backgroundColor: accentColor,
+                      width: progressAnim.interpolate({
+                        inputRange: [0, 100],
+                        outputRange: ['0%', '100%'],
+                      }),
+                    }
+                  ]} 
+                />
+              </View>
+            </View>
+          ) : isCompleted ? (
+            <View style={styles.completedRow}>
+              <Ionicons name="checkmark-circle" size={18} color="#4ade80" />
+              <Text style={styles.completedText}>Downloaded</Text>
+            </View>
+          ) : (
             <TouchableOpacity
               disabled={disabled}
-              style={[styles.primaryBtn, disabled && styles.disabledBtn]}
-              onPress={() => !disabled && onPlay?.(episode, season)}
+              style={[styles.downloadBtn, disabled && styles.disabledBtn]}
+              onPress={() => !disabled && onDownload?.(episode, season)}
+              activeOpacity={0.7}
             >
-              <FontAwesome name="play" size={16} color="#05050E" />
-              <Text style={styles.primaryBtnText}>Play</Text>
+              <MaterialIcons name="file-download" size={18} color="#fff" />
+              <Text style={styles.downloadBtnText}>Download</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              disabled={disabled || isDownloading}
-              style={[styles.secondaryBtn, (disabled || isDownloading) && styles.disabledBtn]}
-              onPress={() => !disabled && !isDownloading && onDownload?.(episode, season)}
-            >
-              {isDownloading ? (
-                <>
-                  <ActivityIndicator size="small" color="#fff" />
-                  <Text style={styles.secondaryBtnText}>{progress}%</Text>
-                </>
-              ) : (
-                <>
-                  <MaterialIcons name="file-download" size={18} color="#fff" />
-                  <Text style={styles.secondaryBtnText}>Download</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {isDownloading && (
-            <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${progress}%` }]} />
-            </View>
           )}
         </View>
-      </BlurView>
-    </View>
+      </View>
+    </Animated.View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 16,
-    paddingTop: 10,
+    paddingTop: 16,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  accentDot: {
+    width: 4,
+    height: 20,
+    borderRadius: 2,
   },
   title: {
-    color: 'white',
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 10,
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.5,
   },
-  dropdownContainer: {
+  headerMeta: {
     flexDirection: 'row',
-    marginBottom: 10,
+    alignItems: 'center',
+    gap: 8,
   },
-  dropdownButton: {
-    paddingVertical: 8,
+  metaText: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 13,
+  },
+  metaDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+  seasonTabsContainer: {
+    marginBottom: 16,
+  },
+  seasonTabs: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingRight: 16,
+  },
+  seasonTab: {
+    paddingVertical: 10,
     paddingHorizontal: 16,
-    borderRadius: 20,
-    backgroundColor: '#333',
-    marginRight: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'transparent',
+    alignItems: 'center',
   },
-  dropdownButtonSelected: {
-    backgroundColor: 'red',
+  seasonTabSelected: {
+    backgroundColor: 'rgba(229,9,20,0.12)',
   },
-  dropdownButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
+  seasonTabText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
+    fontWeight: '600',
   },
-  episodeListContainer: {
-    marginTop: 10,
-    gap: 16,
+  seasonTabTextSelected: {
+    fontWeight: '700',
   },
-  episodeCard: {
-    borderRadius: 24,
+  seasonEpCount: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  episodesGrid: {
+    gap: 12,
+  },
+  episodeCardWrap: {
+    borderRadius: 16,
     overflow: 'hidden',
   },
   cardOuter: {
-    borderRadius: 24,
-    padding: 1,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    overflow: 'hidden',
   },
   cardGlow: {
     ...StyleSheet.absoluteFillObject,
-    opacity: 0.25,
-    borderRadius: 24,
+    opacity: 0.5,
   },
   cardInner: {
     flexDirection: 'row',
-    borderRadius: 24,
+    padding: 10,
+    gap: 12,
+  },
+  thumbnailWrap: {
+    width: 130,
+    height: 90,
+    borderRadius: 10,
     overflow: 'hidden',
+    backgroundColor: '#1a1a2e',
   },
-  posterWrap: {
-    width: 150,
-    height: 160,
-  },
-  posterImage: {
+  thumbnail: {
     width: '100%',
     height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  posterOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+  thumbnailOverlay: {
+    ...StyleSheet.absoluteFillObject,
   },
   episodeBadge: {
     position: 'absolute',
-    top: 12,
-    left: 12,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignItems: 'center',
-  },
-  badgeLabel: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 10,
-    letterSpacing: 1,
+    top: 6,
+    left: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
   badgeNumber: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  cardContent: {
-    flex: 1,
-    padding: 16,
-    gap: 10,
-  },
-  cardTitle: {
-    color: '#fff',
-    fontSize: 18,
+    fontSize: 12,
     fontWeight: '800',
   },
-  cardOverview: {
-    color: 'rgba(255,255,255,0.78)',
-    fontSize: 13,
+  playOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  metadataRow: {
+  playBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  durationBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  durationText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  contentSection: {
+    flex: 1,
+    justifyContent: 'center',
+    gap: 6,
+  },
+  episodeTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  episodeOverview: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  metaChips: {
     flexDirection: 'row',
-    gap: 8,
-    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
   },
   metaChip: {
-    backgroundColor: '#fff',
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
   },
-  metaChipOutline: {
-    borderColor: 'rgba(255,255,255,0.3)',
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  metaText: {
-    color: '#05050e',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  metaTextSoft: {
-    color: 'rgba(255,255,255,0.8)',
+  metaChipText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 10,
     fontWeight: '600',
-    fontSize: 12,
   },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: 12,
+  downloadProgressWrap: {
+    marginTop: 4,
+    gap: 6,
   },
-  primaryBtn: {
-    flex: 1,
+  downloadProgressHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#fff',
-    paddingVertical: 12,
-    borderRadius: 999,
+    justifyContent: 'space-between',
   },
-  primaryBtnText: {
-    color: '#05050E',
+  downloadStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  downloadStatusText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  downloadPercent: {
+    fontSize: 13,
     fontWeight: '800',
-    fontSize: 14,
-  },
-  secondaryBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    paddingVertical: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  secondaryBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  disabledBtn: {
-    opacity: 0.5,
   },
   progressTrack: {
     height: 4,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 2,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#ff8a00',
+    borderRadius: 2,
+  },
+  completedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
+  completedText: {
+    color: '#4ade80',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  downloadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginTop: 4,
+    alignSelf: 'flex-start',
+  },
+  downloadBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  disabledBtn: {
+    opacity: 0.5,
   },
 });
 

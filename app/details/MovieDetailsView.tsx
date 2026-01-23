@@ -1,32 +1,456 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { FlashList } from '@shopify/flash-list';
+import { ResizeMode, Video } from 'expo-av';
+import { BlurView } from 'expo-blur';
+import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { Video, ResizeMode } from 'expo-av';
-import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Image, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Animated, Easing, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import Svg, { Defs, Path, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
 import { IMAGE_BASE_URL } from '../../constants/api';
+import { firestore } from '../../constants/firebase';
+import { useUser } from '../../hooks/use-user';
 import { pushWithOptionalInterstitial } from '../../lib/ads/navigate';
-import { createPrefetchKey, storePrefetchedPlayback } from '../../lib/videoPrefetchCache';
 import { enqueueDownload } from '../../lib/downloadManager';
 import { getHlsVariantOptions } from '../../lib/hlsDownloader';
+import { buildProfileScopedKey, getStoredActiveProfile } from '../../lib/profileStorage';
+import { buildScrapeDebugTag, buildSourceOrder } from '../../lib/videoPlaybackShared';
+import { createPrefetchKey, storePrefetchedPlayback } from '../../lib/videoPrefetchCache';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { scrapeImdbTrailer as scrapeIMDbTrailer } from '../../src/providers/scrapeImdbTrailer';
+import { searchClipCafe } from '../../src/providers/shortclips';
 import { scrapePStream, usePStream } from '../../src/pstream/usePStream';
 import { useAccent } from '../components/AccentContext';
-import { buildScrapeDebugTag, buildSourceOrder } from '../../lib/videoPlaybackShared';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 import { DownloadQualityPicker, type DownloadQualityOption } from '../../components/DownloadQualityPicker';
 
 import { CastMember, Media } from '../../types';
 import CastList from './CastList';
-import EpisodeList from './EpisodeList';
+import { EpisodeCard } from './EpisodeList';
 import RelatedMovies from './RelatedMovies';
 import TrailerList from './TrailerList';
+import {
+  BehindTheScenes,
+  FloatingMiniPlayer,
+  ImmersiveStats,
+  InteractiveRating,
+  WatchModes
+} from './components';
 
 interface VideoType {
   key: string;
   name: string;
 }
+
+// Stunning Story Card with Water Effect
+const StoryCardWithWater = ({
+  movie,
+  releaseDateValue,
+  storyCardAnim,
+  accentColor
+}: {
+  movie: Media | null;
+  releaseDateValue: string | undefined;
+  storyCardAnim: Animated.Value;
+  accentColor: string;
+}) => {
+  const waveAnim = useRef(new Animated.Value(0)).current;
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+  const bubbleAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Water wave animation
+    Animated.loop(
+      Animated.timing(waveAnim, {
+        toValue: 1,
+        duration: 4000,
+        easing: Easing.inOut(Easing.sin),
+        useNativeDriver: false,
+      })
+    ).start();
+
+    // Shimmer light reflection
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, { toValue: 1, duration: 3000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(shimmerAnim, { toValue: 0, duration: 3000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    ).start();
+
+    // Bubble float animation
+    Animated.loop(
+      Animated.timing(bubbleAnim, {
+        toValue: 1,
+        duration: 5000,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    ).start();
+  }, []);
+
+  const cardWidth = 350;
+  const cardHeight = 420;
+
+  const wave1Path = waveAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [
+      `M0,${cardHeight * 0.82} Q${cardWidth * 0.25},${cardHeight * 0.78} ${cardWidth * 0.5},${cardHeight * 0.82} T${cardWidth},${cardHeight * 0.8} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+      `M0,${cardHeight * 0.78} Q${cardWidth * 0.25},${cardHeight * 0.85} ${cardWidth * 0.5},${cardHeight * 0.78} T${cardWidth},${cardHeight * 0.82} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+      `M0,${cardHeight * 0.82} Q${cardWidth * 0.25},${cardHeight * 0.78} ${cardWidth * 0.5},${cardHeight * 0.82} T${cardWidth},${cardHeight * 0.8} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+    ],
+  });
+
+  const wave2Path = waveAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [
+      `M0,${cardHeight * 0.86} Q${cardWidth * 0.3},${cardHeight * 0.9} ${cardWidth * 0.6},${cardHeight * 0.86} T${cardWidth},${cardHeight * 0.88} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+      `M0,${cardHeight * 0.9} Q${cardWidth * 0.3},${cardHeight * 0.84} ${cardWidth * 0.6},${cardHeight * 0.9} T${cardWidth},${cardHeight * 0.86} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+      `M0,${cardHeight * 0.86} Q${cardWidth * 0.3},${cardHeight * 0.9} ${cardWidth * 0.6},${cardHeight * 0.86} T${cardWidth},${cardHeight * 0.88} L${cardWidth},${cardHeight} L0,${cardHeight} Z`,
+    ],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        storyCardStyles.container,
+        {
+          transform: [
+            { translateY: storyCardAnim.interpolate({ inputRange: [0, 1], outputRange: [50, 0] }) },
+          ],
+          opacity: storyCardAnim,
+        },
+      ]}
+    >
+      {/* Glass background */}
+      <View style={storyCardStyles.glassWrap}>
+        {Platform.OS === 'ios' ? (
+          <BlurView intensity={30} tint="dark" style={StyleSheet.absoluteFillObject} />
+        ) : (
+          <View style={storyCardStyles.androidGlass} />
+        )}
+      </View>
+
+      {/* Accent glow at top */}
+      <LinearGradient
+        colors={[accentColor + '40', 'transparent']}
+        style={storyCardStyles.topGlow}
+      />
+
+      {/* Water waves at bottom */}
+      <View style={storyCardStyles.waveContainer}>
+        <Svg width={cardWidth} height={cardHeight} style={StyleSheet.absoluteFillObject}>
+          <Defs>
+            <SvgGradient id="storyWaveGrad1" x1="0%" y1="0%" x2="0%" y2="100%">
+              <Stop offset="0%" stopColor="#7dd8ff" stopOpacity="0.2" />
+              <Stop offset="100%" stopColor="#06b6d4" stopOpacity="0.4" />
+            </SvgGradient>
+            <SvgGradient id="storyWaveGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+              <Stop offset="0%" stopColor="#7dd8ff" stopOpacity="0.1" />
+              <Stop offset="100%" stopColor="#0891b2" stopOpacity="0.3" />
+            </SvgGradient>
+          </Defs>
+          <AnimatedPath d={wave1Path} fill="url(#storyWaveGrad1)" />
+          <AnimatedPath d={wave2Path} fill="url(#storyWaveGrad2)" />
+        </Svg>
+      </View>
+
+      {/* Floating bubbles */}
+      <Animated.View
+        style={[
+          storyCardStyles.bubble,
+          storyCardStyles.bubble1,
+          {
+            opacity: bubbleAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.3, 0.8, 0.3] }),
+            transform: [
+              { translateY: bubbleAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -60] }) },
+            ],
+          },
+        ]}
+      />
+      <Animated.View
+        style={[
+          storyCardStyles.bubble,
+          storyCardStyles.bubble2,
+          {
+            opacity: bubbleAnim.interpolate({ inputRange: [0, 0.3, 0.7, 1], outputRange: [0.4, 0.9, 0.4, 0.4] }),
+            transform: [
+              { translateY: bubbleAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -80] }) },
+            ],
+          },
+        ]}
+      />
+      <Animated.View
+        style={[
+          storyCardStyles.bubble,
+          storyCardStyles.bubble3,
+          {
+            opacity: bubbleAnim.interpolate({ inputRange: [0, 0.4, 0.8, 1], outputRange: [0.5, 0.7, 0.5, 0.5] }),
+            transform: [
+              { translateY: bubbleAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -50] }) },
+            ],
+          },
+        ]}
+      />
+
+      {/* Shimmer reflection */}
+      <Animated.View
+        style={[
+          storyCardStyles.shimmer,
+          {
+            opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.12] }),
+            transform: [
+              { translateX: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-200, 400] }) },
+            ],
+          },
+        ]}
+      />
+
+      {/* Content */}
+      <View style={storyCardStyles.content}>
+        {/* Section title */}
+        <View style={storyCardStyles.titleRow}>
+          <View style={[storyCardStyles.titleIcon, { backgroundColor: accentColor + '30' }]}>
+            <Ionicons name="water" size={18} color="#7dd8ff" />
+          </View>
+          <Text style={storyCardStyles.sectionTitle}>Story</Text>
+        </View>
+
+        {/* Overview text */}
+        <Text style={storyCardStyles.storyText}>
+          {movie?.overview || 'No description available for this title.'}
+        </Text>
+
+        {/* Meta grid */}
+        <View style={storyCardStyles.metaGrid}>
+          <View style={storyCardStyles.metaTile}>
+            <View style={storyCardStyles.metaIconWrap}>
+              <Ionicons name="calendar-outline" size={16} color="#7dd8ff" />
+            </View>
+            <View>
+              <Text style={storyCardStyles.metaLabel}>Released</Text>
+              <Text style={storyCardStyles.metaValue}>{releaseDateValue || 'TBA'}</Text>
+            </View>
+          </View>
+          <View style={storyCardStyles.metaTile}>
+            <View style={storyCardStyles.metaIconWrap}>
+              <Ionicons name="globe-outline" size={16} color="#7dd8ff" />
+            </View>
+            <View>
+              <Text style={storyCardStyles.metaLabel}>Language</Text>
+              <Text style={storyCardStyles.metaValue}>
+                {(movie as any)?.original_language?.toUpperCase?.() || '—'}
+              </Text>
+            </View>
+          </View>
+          <View style={storyCardStyles.metaTile}>
+            <View style={storyCardStyles.metaIconWrap}>
+              <Ionicons name="trending-up-outline" size={16} color="#7dd8ff" />
+            </View>
+            <View>
+              <Text style={storyCardStyles.metaLabel}>Popularity</Text>
+              <Text style={storyCardStyles.metaValue}>{Math.round((movie as any)?.popularity ?? 0)}</Text>
+            </View>
+          </View>
+          <View style={storyCardStyles.metaTile}>
+            <View style={storyCardStyles.metaIconWrap}>
+              <Ionicons name="heart-outline" size={16} color="#7dd8ff" />
+            </View>
+            <View>
+              <Text style={storyCardStyles.metaLabel}>Votes</Text>
+              <Text style={storyCardStyles.metaValue}>{(movie as any)?.vote_count ?? 0}</Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Feature badges */}
+        <View style={storyCardStyles.badgeRow}>
+          <View style={[storyCardStyles.badge, { borderColor: '#7dd8ff40' }]}>
+            <Ionicons name="color-filter" size={14} color="#7dd8ff" />
+            <Text style={storyCardStyles.badgeText}>Dolby Vision</Text>
+          </View>
+          <View style={[storyCardStyles.badge, { borderColor: '#06b6d440' }]}>
+            <Ionicons name="flash" size={14} color="#06b6d4" />
+            <Text style={storyCardStyles.badgeText}>Instant</Text>
+          </View>
+          <View style={[storyCardStyles.badge, { borderColor: '#22d3ee40' }]}>
+            <Ionicons name="people" size={14} color="#22d3ee" />
+            <Text style={storyCardStyles.badgeText}>Party</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* Glass border */}
+      <View style={storyCardStyles.glassBorder}>
+        <LinearGradient
+          colors={['rgba(125,216,255,0.3)', 'transparent', 'rgba(125,216,255,0.15)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFillObject}
+        />
+      </View>
+    </Animated.View>
+  );
+};
+
+const storyCardStyles = StyleSheet.create({
+  container: {
+    marginHorizontal: 16,
+    marginBottom: 24,
+    borderRadius: 24,
+    overflow: 'hidden',
+    minHeight: 380,
+  },
+  glassWrap: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  androidGlass: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15,25,40,0.85)',
+  },
+  topGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 100,
+  },
+  waveContainer: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  bubble: {
+    position: 'absolute',
+    borderRadius: 50,
+    backgroundColor: 'rgba(125,216,255,0.6)',
+  },
+  bubble1: {
+    width: 8,
+    height: 8,
+    bottom: 80,
+    left: 40,
+  },
+  bubble2: {
+    width: 6,
+    height: 6,
+    bottom: 60,
+    right: 60,
+  },
+  bubble3: {
+    width: 10,
+    height: 10,
+    bottom: 100,
+    left: '50%',
+  },
+  shimmer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 150,
+    backgroundColor: '#fff',
+    transform: [{ skewX: '-20deg' }],
+  },
+  content: {
+    padding: 20,
+    zIndex: 10,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  titleIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sectionTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  storyText: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 15,
+    lineHeight: 24,
+    fontWeight: '500',
+    marginBottom: 20,
+  },
+  metaGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 20,
+  },
+  metaTile: {
+    width: '47%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: 'rgba(125,216,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(125,216,255,0.15)',
+  },
+  metaIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: 'rgba(125,216,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metaLabel: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  metaValue: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  badge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(125,216,255,0.1)',
+    borderWidth: 1,
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  glassBorder: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: 'rgba(125,216,255,0.2)',
+    overflow: 'hidden',
+    pointerEvents: 'none',
+  },
+});
 
 interface Props {
   movie: Media | null;
@@ -58,25 +482,96 @@ const MovieDetailsView: React.FC<Props> = ({
   cast,
 }) => {
   type StreamResult = { url: string; type: 'mp4' | 'hls' | 'dash' | 'unknown'; quality?: string };
+  type DetailsRow =
+    | { type: 'stickyHeader'; key: string }
+    | { type: 'hero'; key: string }
+    | { type: 'quickActions'; key: string }
+    | { type: 'rating'; key: string }
+    | { type: 'stats'; key: string }
+    | { type: 'story'; key: string }
+    | { type: 'watchModes'; key: string }
+    | { type: 'behindScenes'; key: string }
+    | { type: 'episodesHeader'; key: string; variant: 'episodes' | 'sneakPeek' }
+    | { type: 'episode'; key: string; season: any; episode: any }
+    | { type: 'trailers'; key: string }
+    | { type: 'related'; key: string }
+    | { type: 'cast'; key: string };
+
   const [imdbTrailer, setIMDbTrailer] = useState<StreamResult | null>(null);
   const [autoPlayed, setAutoPlayed] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [trailerLoading, setTrailerLoading] = useState(false);
-  const [countdownProgress, setCountdownProgress] = useState(0);
   const [autoPlaySecondsLeft, setAutoPlaySecondsLeft] = useState(5);
   const [selectedTab, setSelectedTab] = useState<'story' | 'episodes' | 'trailers' | 'related' | 'cast'>('story');
+  const [showMiniPlayer, setShowMiniPlayer] = useState(false);
+  const [isInMyList, setIsInMyList] = useState(false);
   const countdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const trailerCountdownAnim = useRef(new Animated.Value(0)).current;
   const videoRef = useRef<any>(null);
   const router = useRouter();
   const headerRef = React.useRef<any>(null);
-  const scrollViewRef = React.useRef<any>(null);
   const normalizedMediaType: 'movie' | 'tv' = typeof mediaType === 'string' && mediaType === 'tv' ? 'tv' : 'movie';
   const { accentColor } = useAccent();
   const { currentPlan } = useSubscription();
 
+  const [selectedSeasonId, setSelectedSeasonId] = useState<number | null>(() => {
+    const first = Array.isArray(seasons) && seasons.length ? seasons[0] : null;
+    const id = typeof first?.id === 'number' ? first.id : null;
+    return id;
+  });
+
+  useEffect(() => {
+    if (!Array.isArray(seasons) || seasons.length === 0) {
+      setSelectedSeasonId(null);
+      return;
+    }
+    if (selectedSeasonId != null && seasons.some((s: any) => s?.id === selectedSeasonId)) {
+      return;
+    }
+    const first = seasons[0];
+    setSelectedSeasonId(typeof first?.id === 'number' ? first.id : null);
+  }, [seasons, selectedSeasonId]);
+
+  const selectedSeason = React.useMemo(() => {
+    if (!Array.isArray(seasons) || seasons.length === 0) return null;
+    const found = selectedSeasonId != null ? seasons.find((s: any) => s?.id === selectedSeasonId) : null;
+    return found ?? seasons[0] ?? null;
+  }, [seasons, selectedSeasonId]);
+
+  const selectedSeasonEpisodes = React.useMemo(() => {
+    const list = (selectedSeason as any)?.episodes;
+    return Array.isArray(list) ? list : [];
+  }, [selectedSeason]);
+
+  const stopAnyTrailerPlayback = React.useCallback(() => {
+    // Pause any in-header trailer (MovieHeader)
+    try {
+      headerRef.current?.pauseTrailer?.();
+    } catch { }
+
+    // Pause the inline hero trailer (expo-av Video)
+    try {
+      void videoRef.current?.pauseAsync?.();
+      void videoRef.current?.stopAsync?.();
+    } catch { }
+
+    try {
+      countdownInterval.current && clearInterval(countdownInterval.current);
+    } catch { }
+
+    try {
+      trailerCountdownAnim.stopAnimation();
+      trailerCountdownAnim.setValue(0);
+    } catch { }
+
+    setShowTrailer(false);
+    setTrailerLoading(false);
+    setIsMuted(true);
+    setAutoPlayed(false);
+  }, []);
+
   // Animation values
-  const scrollY = React.useRef(new Animated.Value(0)).current;
   const heroFadeAnim = React.useRef(new Animated.Value(0)).current;
   const fabScaleAnim = React.useRef(new Animated.Value(0)).current;
   const storyCardAnim = React.useRef(new Animated.Value(0)).current;
@@ -119,43 +614,196 @@ const MovieDetailsView: React.FC<Props> = ({
   }, [heroFadeAnim, fabScaleAnim, storyCardAnim, sectionsAnim]);
   const [isLaunchingPlayer, setIsLaunchingPlayer] = React.useState(false);
   const { scrape: scrapeDownload } = usePStream();
+  const { user } = useUser();
+
+  // Watch progress state
+  type WatchProgressData = {
+    progress: number; // 0-1
+    positionMs: number;
+    durationMs: number;
+    updatedAt: number;
+    seasonNumber?: number;
+    episodeNumber?: number;
+  };
+  const [watchProgress, setWatchProgress] = React.useState<WatchProgressData | null>(null);
+  const [episodeProgress, setEpisodeProgress] = React.useState<Record<string, WatchProgressData>>({});
+  const progressBarAnim = React.useRef(new Animated.Value(0)).current;
+
+  // Load watch progress from AsyncStorage and Firestore
+  React.useEffect(() => {
+    if (!movie?.id) return;
+    let cancelled = false;
+
+    const loadProgress = async () => {
+      try {
+        const profile = await getStoredActiveProfile();
+        const key = buildProfileScopedKey('watchHistory', profile?.id ?? undefined);
+
+        // First try AsyncStorage (local)
+        const localRaw = await AsyncStorage.getItem(key);
+        let localProgress: WatchProgressData | null = null;
+
+        if (localRaw) {
+          const localHistory = JSON.parse(localRaw) as any[];
+          const entry = localHistory.find((item: any) => {
+            if (mediaType === 'tv') {
+              return item.id === movie.id || item.tmdbId === String(movie.id);
+            }
+            return item.id === movie.id || item.tmdbId === String(movie.id);
+          });
+
+          if (entry?.watchProgress) {
+            localProgress = {
+              progress: entry.watchProgress.progress ?? 0,
+              positionMs: entry.watchProgress.positionMillis ?? entry.watchProgress.positionMs ?? 0,
+              durationMs: entry.watchProgress.durationMillis ?? entry.watchProgress.durationMs ?? 0,
+              updatedAt: entry.watchProgress.updatedAt ?? entry.watchProgress.updatedAtMs ?? Date.now(),
+              seasonNumber: entry.watchProgress.seasonNumber ?? entry.seasonNumber,
+              episodeNumber: entry.watchProgress.episodeNumber ?? entry.episodeNumber,
+            };
+          }
+        }
+
+        // Then try Firestore (cloud) for logged-in users
+        if (user?.uid) {
+          try {
+            const docId = `${mediaType}-${movie.id}`;
+            const docRef = doc(firestore, 'users', user.uid, 'watchHistory', docId);
+            const docSnap = await getDoc(docRef);
+
+            if (docSnap.exists()) {
+              const data = docSnap.data();
+              const firestoreProgress: WatchProgressData = {
+                progress: data?.watchProgress?.progress ?? data?.progress ?? 0,
+                positionMs: data?.watchProgress?.positionMillis ?? data?.watchProgress?.positionMs ?? 0,
+                durationMs: data?.watchProgress?.durationMillis ?? data?.watchProgress?.durationMs ?? 0,
+                updatedAt: data?.watchProgress?.updatedAtMs ?? data?.watchProgress?.updatedAt ?? data?.updatedAtMs ?? Date.now(),
+                seasonNumber: data?.watchProgress?.seasonNumber ?? data?.seasonNumber,
+                episodeNumber: data?.watchProgress?.episodeNumber ?? data?.episodeNumber,
+              };
+
+              // Use Firestore data if it's more recent
+              if (!localProgress || firestoreProgress.updatedAt > localProgress.updatedAt) {
+                localProgress = firestoreProgress;
+              }
+            }
+
+            // For TV shows, also load episode-specific progress
+            if (mediaType === 'tv') {
+              const episodesQuery = query(
+                collection(firestore, 'users', user.uid, 'watchHistory'),
+                where('tmdbId', '==', String(movie.id))
+              );
+              const episodesSnap = await getDocs(episodesQuery);
+              const epProgress: Record<string, WatchProgressData> = {};
+
+              episodesSnap.forEach((epDoc) => {
+                const data = epDoc.data();
+                if (data?.seasonNumber && data?.episodeNumber) {
+                  const epKey = `s${data.seasonNumber}e${data.episodeNumber}`;
+                  epProgress[epKey] = {
+                    progress: data?.watchProgress?.progress ?? data?.progress ?? 0,
+                    positionMs: data?.watchProgress?.positionMillis ?? data?.watchProgress?.positionMs ?? 0,
+                    durationMs: data?.watchProgress?.durationMillis ?? data?.watchProgress?.durationMs ?? 0,
+                    updatedAt: data?.watchProgress?.updatedAtMs ?? data?.watchProgress?.updatedAt ?? data?.updatedAtMs ?? Date.now(),
+                    seasonNumber: data.seasonNumber,
+                    episodeNumber: data.episodeNumber,
+                  };
+                }
+              });
+
+              if (!cancelled && Object.keys(epProgress).length > 0) {
+                setEpisodeProgress(epProgress);
+              }
+            }
+          } catch (err) {
+            console.warn('[MovieDetails] Failed to load Firestore watch progress', err);
+          }
+        }
+
+        if (!cancelled && localProgress && localProgress.progress > 0.01 && localProgress.progress < 0.98) {
+          setWatchProgress(localProgress);
+          // Animate progress bar
+          Animated.timing(progressBarAnim, {
+            toValue: localProgress.progress,
+            duration: 800,
+            useNativeDriver: false,
+          }).start();
+        }
+      } catch (err) {
+        console.warn('[MovieDetails] Failed to load watch progress', err);
+      }
+    };
+
+    loadProgress();
+    return () => { cancelled = true; };
+  }, [movie?.id, mediaType, user?.uid, progressBarAnim]);
+
+  // Format time helper
+  const formatRemainingTime = useCallback((progressData: WatchProgressData) => {
+    if (!progressData.durationMs || progressData.durationMs <= 0) return '';
+    const remainingMs = progressData.durationMs - progressData.positionMs;
+    const remainingMin = Math.max(0, Math.round(remainingMs / 60000));
+    if (remainingMin < 1) return 'Less than 1 min left';
+    if (remainingMin === 1) return '1 min left';
+    return `${remainingMin} min left`;
+  }, []);
   // Auto-fetch IMDb trailer and auto-play after a delay
   useEffect(() => {
     setIMDbTrailer(null);
     setAutoPlayed(false);
     setShowTrailer(false);
-    setCountdownProgress(0);
     setAutoPlaySecondsLeft(5);
+    trailerCountdownAnim.stopAnimation();
+    trailerCountdownAnim.setValue(0);
     if (!movie || !movie.imdb_id) return;
     let cancelled = false;
     const autoplayMs = 5000;
     scrapeIMDbTrailer({ imdb_id: movie.imdb_id })
+      .then(async (result) => {
+        // Fallback to ClipCafe if IMDB fails
+        if (!result) {
+          const year = movie.release_date ? movie.release_date.substring(0, 4) : undefined;
+          const clip = await searchClipCafe(movie.title || '', year);
+          if (clip?.url) {
+            return { url: clip.url, type: 'mp4' as const };
+          }
+        }
+        return result;
+      })
       .then((result) => {
         if (!cancelled && result) {
           setIMDbTrailer(result);
-          const startedAt = Date.now();
           countdownInterval.current && clearInterval(countdownInterval.current);
+          const startedAt = Date.now();
           countdownInterval.current = setInterval(() => {
             const elapsed = Date.now() - startedAt;
-            const progress = Math.min(1, elapsed / autoplayMs);
-            setCountdownProgress(progress);
             const remaining = Math.max(0, autoplayMs - elapsed);
             setAutoPlaySecondsLeft(Math.max(0, Math.ceil(remaining / 1000)));
-            if (progress >= 1) {
-              clearInterval(countdownInterval.current as any);
-              setAutoPlayed(true);
-              setShowTrailer(true);
-              setTrailerLoading(false);
-            }
-          }, 200);
+          }, 1000);
+
+          Animated.timing(trailerCountdownAnim, {
+            toValue: 1,
+            duration: autoplayMs,
+            useNativeDriver: false,
+          }).start(({ finished }) => {
+            if (!finished || cancelled) return;
+            try {
+              countdownInterval.current && clearInterval(countdownInterval.current);
+            } catch { }
+            setAutoPlayed(true);
+            setShowTrailer(true);
+            setTrailerLoading(false);
+          });
         }
       })
-      .catch(() => {});
+      .catch(() => { });
     return () => {
       cancelled = true;
       countdownInterval.current && clearInterval(countdownInterval.current);
+      trailerCountdownAnim.stopAnimation();
     };
-  }, [movie?.imdb_id]);
+  }, [movie?.imdb_id, trailerCountdownAnim]);
   const [episodeDownloads, setEpisodeDownloads] = React.useState<Record<string, { state: 'idle' | 'preparing' | 'downloading' | 'completed' | 'error'; progress: number; error?: string }>>({});
 
   const [qualityPickerVisible, setQualityPickerVisible] = React.useState(false);
@@ -218,19 +866,19 @@ const MovieDetailsView: React.FC<Props> = ({
     if (mediaType !== 'tv' || !Array.isArray(seasons) || seasons.length === 0) {
       return undefined;
     }
-const upcoming: Array<{
-  id?: number;
-  title?: string;
-  seasonName?: string;
-  seasonNumber?: number;
-  seasonTmdbId?: number;
-  episodeNumber?: number;
-  episodeTmdbId?: number;
-  overview?: string;
-  runtime?: number;
-  stillPath?: string | null;
-  seasonEpisodeCount?: number;
-}> = [];
+    const upcoming: Array<{
+      id?: number;
+      title?: string;
+      seasonName?: string;
+      seasonNumber?: number;
+      seasonTmdbId?: number;
+      episodeNumber?: number;
+      episodeTmdbId?: number;
+      overview?: string;
+      runtime?: number;
+      stillPath?: string | null;
+      seasonEpisodeCount?: number;
+    }> = [];
 
 
     seasons.forEach((season, idx) => {
@@ -366,12 +1014,8 @@ const upcoming: Array<{
     setIsLaunchingPlayer(true);
 
     try {
-      // ensure any in-header trailer is paused so audio focus can be acquired by the player
-      try {
-        headerRef.current?.pauseTrailer?.();
-        // Reset trailer state to prevent color interference in video player
-        setAutoPlayed(false);
-      } catch {}
+      // Ensure any trailer is paused/stopped so audio focus can be acquired by the player.
+      stopAnyTrailerPlayback();
       if (normalizedMediaType === 'tv') {
         const initialEpisode = findInitialEpisode();
         if (!initialEpisode) {
@@ -396,6 +1040,11 @@ const upcoming: Array<{
         params.contentHint = contentHint;
       }
 
+      // Add resume position if available
+      if (watchProgress && watchProgress.positionMs > 0) {
+        (params as any).resumeMillis = String(watchProgress.positionMs);
+      }
+
       const baseTarget = { pathname: '/video-player', params: { ...params } };
       const prefetchKey = createPrefetchKey(baseTarget);
       (baseTarget.params as any).__prefetchKey = prefetchKey;
@@ -415,31 +1064,31 @@ const upcoming: Array<{
             const mediaPayload =
               normalizedMediaType === 'tv'
                 ? {
-                    type: 'show' as const,
-                    title,
-                    tmdbId,
-                    imdbId,
-                    releaseYear,
-                    season: {
-                      number: Number((baseTarget.params as any).seasonNumber) || 1,
-                      tmdbId: String((baseTarget.params as any).seasonTmdbId || ''),
-                      title: String((baseTarget.params as any).seasonTitle || `Season ${Number((baseTarget.params as any).seasonNumber) || 1}`),
-                      ...(baseTarget.params.seasonEpisodeCount
-                        ? { episodeCount: Number((baseTarget.params as any).seasonEpisodeCount) }
-                        : {}),
-                    },
-                    episode: {
-                      number: Number((baseTarget.params as any).episodeNumber) || 1,
-                      tmdbId: String((baseTarget.params as any).episodeTmdbId || ''),
-                    },
-                  }
+                  type: 'show' as const,
+                  title,
+                  tmdbId,
+                  imdbId,
+                  releaseYear,
+                  season: {
+                    number: Number((baseTarget.params as any).seasonNumber) || 1,
+                    tmdbId: String((baseTarget.params as any).seasonTmdbId || ''),
+                    title: String((baseTarget.params as any).seasonTitle || `Season ${Number((baseTarget.params as any).seasonNumber) || 1}`),
+                    ...(baseTarget.params.seasonEpisodeCount
+                      ? { episodeCount: Number((baseTarget.params as any).seasonEpisodeCount) }
+                      : {}),
+                  },
+                  episode: {
+                    number: Number((baseTarget.params as any).episodeNumber) || 1,
+                    tmdbId: String((baseTarget.params as any).episodeTmdbId || ''),
+                  },
+                }
                 : {
-                    type: 'movie' as const,
-                    title,
-                    tmdbId,
-                    imdbId,
-                    releaseYear,
-                  };
+                  type: 'movie' as const,
+                  title,
+                  tmdbId,
+                  imdbId,
+                  releaseYear,
+                };
 
             const playback = await scrapePStream(mediaPayload as any, { sourceOrder, debugTag });
             storePrefetchedPlayback(prefetchKey, {
@@ -471,12 +1120,8 @@ const upcoming: Array<{
   const handlePlayEpisode = (episode: any, season: any) => {
     if (!movie || !season) return;
 
-    // Pause any playing trailer before navigating
-    try {
-      headerRef.current?.pauseTrailer?.();
-      // Reset trailer state to prevent color interference in video player
-      setAutoPlayed(false);
-    } catch {}
+    // Pause/stop any playing trailer before navigating
+    stopAnyTrailerPlayback();
 
     const { params } = buildRouteParams('tv');
     const seasonNumber = season?.season_number ?? episode?.season_number ?? 1;
@@ -740,13 +1385,581 @@ const upcoming: Array<{
     }
   };
 
+  const rows = React.useMemo<DetailsRow[]>(() => {
+    const base: DetailsRow[] = [
+      { type: 'stickyHeader', key: 'stickyHeader' },
+      { type: 'hero', key: 'hero' },
+      { type: 'quickActions', key: 'quickActions' },
+    ];
+
+    const hasEpisodeData =
+      normalizedMediaType === 'tv' &&
+      Array.isArray(seasons) &&
+      seasons.length > 0 &&
+      Boolean(selectedSeason) &&
+      selectedSeasonEpisodes.length > 0;
+
+    if (selectedTab === 'story') {
+      base.push({ type: 'rating', key: 'rating' });
+      base.push({ type: 'stats', key: 'stats' });
+      base.push({ type: 'story', key: 'story' });
+      base.push({ type: 'watchModes', key: 'watchModes' });
+      base.push({ type: 'behindScenes', key: 'behindScenes' });
+      return base;
+    }
+
+    if (selectedTab === 'episodes') {
+      if (hasEpisodeData) {
+        base.push({ type: 'episodesHeader', key: 'episodesHeader', variant: 'episodes' });
+        for (let i = 0; i < selectedSeasonEpisodes.length; i += 1) {
+          const ep = selectedSeasonEpisodes[i];
+          const epKey = String((ep as any)?.id ?? (ep as any)?.episode_number ?? i);
+          const seasonKey = String((selectedSeason as any)?.id ?? (selectedSeason as any)?.season_number ?? 'season');
+          base.push({ type: 'episode', key: `episode-${seasonKey}-${epKey}`, season: selectedSeason, episode: ep });
+        }
+      } else {
+        base.push({ type: 'story', key: 'story' });
+      }
+      return base;
+    }
+
+    if (selectedTab === 'trailers') {
+      base.push({ type: 'trailers', key: 'trailers' });
+      if (hasEpisodeData) {
+        base.push({ type: 'episodesHeader', key: 'sneakPeekHeader', variant: 'sneakPeek' });
+        for (let i = 0; i < selectedSeasonEpisodes.length; i += 1) {
+          const ep = selectedSeasonEpisodes[i];
+          const epKey = String((ep as any)?.id ?? (ep as any)?.episode_number ?? i);
+          const seasonKey = String((selectedSeason as any)?.id ?? (selectedSeason as any)?.season_number ?? 'season');
+          base.push({
+            type: 'episode',
+            key: `sneak-episode-${seasonKey}-${epKey}`,
+            season: selectedSeason,
+            episode: ep,
+          });
+        }
+      }
+      return base;
+    }
+
+    if (selectedTab === 'related') {
+      base.push({ type: 'related', key: 'related' });
+      return base;
+    }
+
+    if (selectedTab === 'cast') {
+      base.push({ type: 'cast', key: 'cast' });
+      return base;
+    }
+
+    return base;
+  }, [normalizedMediaType, seasons, selectedSeason, selectedSeasonEpisodes, selectedTab]);
+
+  const renderRow = React.useCallback(
+    ({ item }: { item: DetailsRow }) => {
+      switch (item.type) {
+        case 'stickyHeader':
+          return (
+            <View style={styles.stickyHeader}>
+              <View style={styles.headerWrap}>
+                <LinearGradient
+                  colors={[
+                    accentColor ? `${accentColor}33` : 'rgba(229,9,20,0.22)',
+                    'rgba(10,12,24,0.4)',
+                  ]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.headerGlow}
+                />
+                <View style={styles.headerBar}>
+                  <View style={styles.titleRow}>
+                    <View style={styles.accentDot} />
+                    <View>
+                      <Text style={styles.headerEyebrow}>Movie Details</Text>
+                      <Text style={styles.headerText}>{movie?.title || movie?.name || 'Details'}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.headerIcons}>
+                    <TouchableOpacity onPress={onOpenChatSheet} style={styles.iconBtn}>
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.iconBg}
+                      >
+                        <Ionicons
+                          name="chatbubble-outline"
+                          size={22}
+                          color="#ffffff"
+                          style={styles.iconMargin}
+                        />
+                      </LinearGradient>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => movie && onAddToMyList(movie)} style={styles.iconBtn}>
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.iconBg}
+                      >
+                        <Ionicons
+                          name="bookmark-outline"
+                          size={22}
+                          color="#ffffff"
+                          style={styles.iconMargin}
+                        />
+                      </LinearGradient>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={onBack} style={styles.iconBtn}>
+                      <LinearGradient
+                        colors={['#e50914', '#b20710']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={styles.iconBg}
+                      >
+                        <Ionicons
+                          name="chevron-back"
+                          size={22}
+                          color="#ffffff"
+                          style={styles.iconMargin}
+                        />
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                <View style={styles.headerMetaRow}>
+                  <View style={styles.metaPill}>
+                    <Ionicons name="star" size={14} color="#fff" />
+                    <Text style={styles.metaText}>
+                      {movie?.vote_average ? movie.vote_average.toFixed(1) : '0.0'}
+                    </Text>
+                  </View>
+                  <View style={[styles.metaPill, styles.metaPillSoft]}>
+                    <Ionicons name="time-outline" size={14} color="#fff" />
+                    <Text style={styles.metaText}>{runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}</Text>
+                  </View>
+                  <View style={[styles.metaPill, styles.metaPillOutline]}>
+                    <Ionicons name="film-outline" size={14} color="#fff" />
+                    <Text style={styles.metaText}>{normalizedMediaType === 'tv' ? 'TV Show' : 'Movie'}</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+          );
+
+        case 'hero':
+          return (
+            <>
+              <View style={styles.heroSection}>
+                {!showTrailer && (
+                  <ExpoImage
+                    source={{
+                      uri: movie?.poster_path
+                        ? `${IMAGE_BASE_URL}${movie.poster_path}`
+                        : 'https://via.placeholder.com/800x450/111/fff?text=No+Poster',
+                    }}
+                    style={styles.heroImage}
+                    contentFit="cover"
+                    transition={220}
+                    cachePolicy="memory-disk"
+                  />
+                )}
+
+                {showTrailer && imdbTrailer?.url && (
+                  <Video
+                    ref={videoRef}
+                    source={{ uri: imdbTrailer.url }}
+                    style={styles.heroVideo}
+                    resizeMode={ResizeMode.COVER}
+                    shouldPlay
+                    isMuted={isMuted}
+                    isLooping
+                    onLoadStart={() => setTrailerLoading(true)}
+                    onLoad={() => setTrailerLoading(false)}
+                    onError={() => {
+                      setTrailerLoading(false);
+                      setShowTrailer(false);
+                    }}
+                  />
+                )}
+
+                {showTrailer && trailerLoading && (
+                  <View style={styles.trailerLoading}>
+                    <Ionicons name="play-circle-outline" size={60} color="rgba(255,255,255,0.8)" />
+                    <Text style={styles.loadingText}>Loading trailer...</Text>
+                  </View>
+                )}
+
+                <LinearGradient
+                  colors={[
+                    'rgba(0,0,0,0.1)',
+                    'rgba(0,0,0,0.3)',
+                    'rgba(10,6,20,0.7)',
+                    'rgba(10,6,20,0.9)',
+                  ]}
+                  locations={[0, 0.3, 0.7, 1]}
+                  start={{ x: 0.5, y: 0 }}
+                  end={{ x: 0.5, y: 1 }}
+                  style={styles.heroOverlay}
+                />
+
+                <Animated.View style={[styles.heroContent, { opacity: heroFadeAnim }]}>
+                  <Text style={styles.heroTitle} numberOfLines={2}>
+                    {movie?.title || movie?.name || 'Untitled'}
+                  </Text>
+                  <Text style={styles.heroYear}>
+                    {movie?.release_date
+                      ? new Date(movie.release_date).getFullYear()
+                      : movie?.first_air_date
+                        ? new Date(movie.first_air_date).getFullYear()
+                        : ''}
+                  </Text>
+
+                  <View style={styles.ratingBadge}>
+                    <Ionicons name="star" size={14} color="#FFD700" />
+                    <Text style={styles.ratingText}>
+                      {movie?.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}
+                    </Text>
+                  </View>
+                </Animated.View>
+
+                {showTrailer && !trailerLoading && (
+                  <TouchableOpacity style={styles.volumeButton} onPress={() => setIsMuted(!isMuted)}>
+                    <Ionicons name={isMuted ? 'volume-mute' : 'volume-high'} size={24} color="#fff" />
+                  </TouchableOpacity>
+                )}
+
+                <View style={styles.genreTags}>
+                  <Text style={styles.genreText}>
+                    {normalizedMediaType === 'tv' ? 'TV Series' : 'Movie'} •{' '}
+                    {runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}
+                  </Text>
+                </View>
+
+                {!showTrailer && imdbTrailer && (
+                  <View style={styles.countdownContainer}>
+                    <Text style={styles.countdownText}>Trailer in {autoPlaySecondsLeft || 1}s</Text>
+                    <View style={styles.countdownBar}>
+                      <Animated.View
+                        style={[
+                          styles.countdownProgress,
+                          {
+                            width: trailerCountdownAnim.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: ['0%', '100%'],
+                            }),
+                          },
+                        ]}
+                      />
+                    </View>
+                    <TouchableOpacity
+                      style={styles.inlinePlayNow}
+                      onPress={() => {
+                        setAutoPlayed(true);
+                        setShowTrailer(true);
+                        countdownInterval.current && clearInterval(countdownInterval.current);
+                        trailerCountdownAnim.stopAnimation();
+                        trailerCountdownAnim.setValue(1);
+                        setAutoPlaySecondsLeft(0);
+                      }}
+                    >
+                      <Ionicons name="play" size={18} color="#fff" />
+                      <Text style={styles.inlinePlayText}>Play teaser now</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+
+              <Animated.View style={[styles.floatingActions, { transform: [{ scale: fabScaleAnim }] }]}>
+                {/* Play button with progress */}
+                <View style={styles.playButtonContainer}>
+                  <TouchableOpacity
+                    style={[
+                      styles.fabPrimary,
+                      isLaunchingPlayer && styles.fabDisabled,
+                      {
+                        backgroundColor: accentColor || '#ff6b9d',
+                        shadowColor: accentColor || '#ff6b9d',
+                      },
+                    ]}
+                    onPress={handlePlayMovie}
+                    disabled={isLaunchingPlayer}
+                  >
+                    <Ionicons name="play" size={24} color="#fff" />
+                    <Text style={styles.fabPrimaryText}>
+                      {isLaunchingPlayer ? 'Loading...' : watchProgress ? 'Resume' : 'Play'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Progress bar overlay */}
+                  {watchProgress && (
+                    <View style={styles.playProgressContainer}>
+                      <View style={styles.playProgressTrack}>
+                        <Animated.View
+                          style={[
+                            styles.playProgressFill,
+                            {
+                              width: progressBarAnim.interpolate({
+                                inputRange: [0, 1],
+                                outputRange: ['0%', '100%'],
+                              }),
+                              backgroundColor: accentColor || '#ff6b9d',
+                            }
+                          ]}
+                        />
+                      </View>
+                      <View style={styles.playProgressInfo}>
+                        <Text style={styles.playProgressPercent}>
+                          {Math.round(watchProgress.progress * 100)}%
+                        </Text>
+                        {watchProgress.durationMs > 0 && (
+                          <Text style={styles.playProgressTime}>
+                            {formatRemainingTime(watchProgress)}
+                          </Text>
+                        )}
+                      </View>
+                    </View>
+                  )}
+                </View>
+
+                <TouchableOpacity style={styles.fabSecondary} onPress={handleDownload}>
+                  <Ionicons name="cloud-download-outline" size={20} color="#fff" />
+                </TouchableOpacity>
+              </Animated.View>
+
+              <Animated.View style={[styles.tabContainer, { opacity: sectionsAnim }]}>
+                <View style={styles.tabButtons}>
+                  {[
+                    { key: 'story', label: 'Story', icon: 'book-outline' },
+                    mediaType === 'tv' && seasons?.length > 0
+                      ? { key: 'episodes', label: 'Episodes', icon: 'albums-outline' }
+                      : null,
+                    { key: 'trailers', label: 'Trailers', icon: 'play-circle-outline' },
+                    { key: 'related', label: 'More Like This', icon: 'heart-outline' },
+                    { key: 'cast', label: 'Cast', icon: 'people-outline' },
+                  ]
+                    .filter(Boolean)
+                    .map((tab) => (
+                      <TouchableOpacity
+                        key={(tab as any).key}
+                        style={[styles.tabButton, selectedTab === (tab as any).key && styles.tabButtonActive]}
+                        onPress={() => setSelectedTab((tab as any).key as any)}
+                      >
+                        <Ionicons
+                          name={(tab as any).icon as any}
+                          size={18}
+                          color={selectedTab === (tab as any).key ? '#fff' : 'rgba(255,255,255,0.6)'}
+                        />
+                        <Text
+                          style={[
+                            styles.tabButtonText,
+                            selectedTab === (tab as any).key && styles.tabButtonTextActive,
+                          ]}
+                        >
+                          {(tab as any).label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                </View>
+              </Animated.View>
+            </>
+          );
+
+        case 'story':
+          return (
+            <StoryCardWithWater
+              movie={movie}
+              releaseDateValue={releaseDateValue}
+              storyCardAnim={storyCardAnim}
+              accentColor={accentColor}
+            />
+          );
+
+        case 'episodesHeader': {
+          const title = item.variant === 'episodes' ? 'Episodes' : 'Season Sneak Peek';
+          const iconName = item.variant === 'episodes' ? 'albums-outline' : 'tv-outline';
+          const helper = item.variant === 'episodes' ? 'Binge or jump to a moment.' : 'Catch up before you stream.';
+          return (
+            <View style={styles.tabContentOuter}>
+              <View style={styles.sectionCard}>
+                <View style={styles.sectionHeader}>
+                  <Ionicons name={iconName as any} size={20} color={accentColor || '#ff6b9d'} />
+                  <Text style={styles.sectionTitle}>{title}</Text>
+                  <Text style={styles.sectionHelper}>{helper}</Text>
+                </View>
+                <View style={styles.seasonPickerWrap}>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.seasonPickerContent}
+                  >
+                    {(Array.isArray(seasons) ? seasons : []).map((season: any, idx: number) => {
+                      const id = season?.id;
+                      const selected = id != null && id === selectedSeasonId;
+                      return (
+                        <TouchableOpacity
+                          key={String(id ?? season?.season_number ?? season?.name ?? idx)}
+                          style={[styles.seasonPill, selected && styles.seasonPillSelected]}
+                          onPress={() => {
+                            if (typeof id === 'number') setSelectedSeasonId(id);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={[styles.seasonPillText, selected && styles.seasonPillTextSelected]}>
+                            {String(season?.name ?? 'Season')}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+              </View>
+            </View>
+          );
+        }
+
+        case 'episode':
+          return (
+            <View style={styles.tabContentOuter}>
+              <EpisodeCard
+                episode={item.episode}
+                season={item.season}
+                disabled={isLoading || isLaunchingPlayer}
+                downloads={episodeDownloads}
+                onPlay={handlePlayEpisode as any}
+                onDownload={handleDownloadEpisode as any}
+                accentColor={accentColor}
+              />
+            </View>
+          );
+
+        case 'trailers':
+          return (
+            <View style={styles.tabContentOuter}>
+              <View style={styles.sectionCard}>
+                <TrailerList trailers={trailers} isLoading={isLoading} onWatchTrailer={(key) => onWatchTrailer(key)} />
+              </View>
+            </View>
+          );
+
+        case 'related':
+          return (
+            <View style={styles.tabContentOuter}>
+              <View style={styles.sectionCard}>
+                <RelatedMovies relatedMovies={relatedMovies} isLoading={isLoading} onSelectRelated={onSelectRelated} />
+              </View>
+            </View>
+          );
+
+        case 'cast':
+          return (
+            <View style={styles.tabContentOuter}>
+              <View style={styles.sectionCard}>
+                <CastList cast={cast} />
+              </View>
+            </View>
+          );
+
+        case 'quickActions':
+          return null; // Actions are now in hero section
+
+        case 'rating':
+          return (
+            <InteractiveRating
+              currentRating={movie?.vote_average || 0}
+              voteCount={(movie as any)?.vote_count || 0}
+              accentColor={accentColor || '#e50914'}
+            />
+          );
+
+        case 'stats':
+          return (
+            <ImmersiveStats
+              movie={movie}
+              accentColor={accentColor || '#e50914'}
+            />
+          );
+
+        case 'watchModes':
+          return (
+            <WatchModes
+              onWatchParty={() => {
+                if (movie) {
+                  router.push({
+                    pathname: '/watchparty',
+                    params: { movieId: movie.id?.toString(), title: movie.title || movie.name },
+                  } as any);
+                }
+              }}
+              onDownload={handleDownload}
+              onAddToList={() => movie && onAddToMyList(movie)}
+              onShare={() => {
+                // Share functionality
+              }}
+              accentColor={accentColor || '#e50914'}
+            />
+          );
+
+        case 'behindScenes':
+          return (
+            <BehindTheScenes
+              movie={movie}
+              cast={cast}
+              onCastPress={(member) => {
+                // Navigate to cast details if needed
+              }}
+              accentColor={accentColor || '#e50914'}
+            />
+          );
+
+        default:
+          return null;
+      }
+    },
+    [
+      accentColor,
+      autoPlaySecondsLeft,
+      cast,
+      episodeDownloads,
+      fabScaleAnim,
+      handleDownload,
+      handleDownloadEpisode,
+      handlePlayEpisode,
+      handlePlayMovie,
+      heroFadeAnim,
+      imdbTrailer,
+      isLaunchingPlayer,
+      isLoading,
+      isMuted,
+      mediaType,
+      movie,
+      normalizedMediaType,
+      onAddToMyList,
+      onBack,
+      onOpenChatSheet,
+      onSelectRelated,
+      onWatchTrailer,
+      relatedMovies,
+      releaseDateValue,
+      router,
+      runtimeMinutes,
+      seasons,
+      sectionsAnim,
+      selectedSeasonId,
+      selectedTab,
+      setSelectedTab,
+      showTrailer,
+      storyCardAnim,
+      trailerCountdownAnim,
+      trailerLoading,
+      trailers,
+    ],
+  );
+
   return (
-    <ScrollView
-      ref={scrollViewRef}
-      contentContainerStyle={styles.scrollViewContent}
-      showsVerticalScrollIndicator={false}
-      stickyHeaderIndices={[0]}
-    >
+    <View style={styles.root}>
       <DownloadQualityPicker
         visible={qualityPickerVisible}
         title={qualityPickerTitle}
@@ -754,359 +1967,76 @@ const upcoming: Array<{
         onClose={() => setQualityPickerVisible(false)}
         onSelect={handleQualityPick}
       />
-      {/* Sticky Header */}
-      <View style={styles.stickyHeader}>
-        <View style={styles.headerWrap}>
-          <LinearGradient
-            colors={[
-              accentColor ? `${accentColor}33` : 'rgba(229,9,20,0.22)',
-              'rgba(10,12,24,0.4)'
-            ]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.headerGlow}
-          />
-          <View style={styles.headerBar}>
-            <View style={styles.titleRow}>
-              <View style={styles.accentDot} />
-              <View>
-                <Text style={styles.headerEyebrow}>Movie Details</Text>
-                <Text style={styles.headerText}>
-                  {movie?.title || movie?.name || 'Details'}
-                </Text>
-              </View>
-            </View>
+      <FlashList<DetailsRow>
+        data={rows}
+        renderItem={renderRow}
+        keyExtractor={(item: DetailsRow) => item.key}
+        estimatedItemSize={260}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollViewContent}
+        stickyHeaderIndices={[0]}
+        onScroll={(e: any) => {
+          const y = e.nativeEvent.contentOffset.y;
+          if (y > 400 && !showMiniPlayer) {
+            setShowMiniPlayer(true);
+          } else if (y <= 400 && showMiniPlayer) {
+            setShowMiniPlayer(false);
+          }
+        }}
+      />
 
-            <View style={styles.headerIcons}>
-              <TouchableOpacity onPress={onOpenChatSheet} style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
-                  <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => movie && onAddToMyList(movie)} style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
-                  <Ionicons name="bookmark-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={onBack} style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
-                  <Ionicons name="chevron-back" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <View style={styles.headerMetaRow}>
-            <View style={styles.metaPill}>
-              <Ionicons name="star" size={14} color="#fff" />
-              <Text style={styles.metaText}>
-                {movie?.vote_average ? movie.vote_average.toFixed(1) : '0.0'}
-              </Text>
-            </View>
-            <View style={[styles.metaPill, styles.metaPillSoft]}>
-              <Ionicons name="time-outline" size={14} color="#fff" />
-              <Text style={styles.metaText}>{runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}</Text>
-            </View>
-            <View style={[styles.metaPill, styles.metaPillOutline]}>
-              <Ionicons name="film-outline" size={14} color="#fff" />
-              <Text style={styles.metaText}>{normalizedMediaType === 'tv' ? 'TV Show' : 'Movie'}</Text>
-            </View>
-          </View>
-        </View>
-      </View>
-        {/* Hero Poster Section - Cinematic and Clean */}
-        <View style={styles.heroSection}>
-          {/* Poster Image */}
-          {!showTrailer && (
-            <Image
-              source={{
-                uri: movie?.poster_path ? `${IMAGE_BASE_URL}${movie.poster_path}` : 'https://via.placeholder.com/800x450/111/fff?text=No+Poster'
-              }}
-              style={styles.heroImage}
-              resizeMode="cover"
-            />
-          )}
-
-          {/* Trailer Video */}
-          {showTrailer && imdbTrailer?.url && (
-            <Video
-              ref={videoRef}
-              source={{ uri: imdbTrailer.url }}
-              style={styles.heroVideo}
-              resizeMode={ResizeMode.COVER}
-              shouldPlay={true}
-              isMuted={isMuted}
-              isLooping={true}
-              onLoadStart={() => setTrailerLoading(true)}
-              onLoad={() => setTrailerLoading(false)}
-              onError={() => {
-                setTrailerLoading(false);
-                setShowTrailer(false);
-              }}
-            />
-          )}
-
-          {/* Loading indicator for trailer */}
-          {showTrailer && trailerLoading && (
-            <View style={styles.trailerLoading}>
-              <Ionicons name="play-circle-outline" size={60} color="rgba(255,255,255,0.8)" />
-              <Text style={styles.loadingText}>Loading trailer...</Text>
-            </View>
-          )}
-
-          {/* Multi-layer gradient overlay for depth */}
-          <LinearGradient
-            colors={[
-              "rgba(0,0,0,0.1)",
-              "rgba(0,0,0,0.3)",
-              "rgba(10,6,20,0.7)",
-              "rgba(10,6,20,0.9)"
-            ]}
-            locations={[0, 0.3, 0.7, 1]}
-            start={{ x: 0.5, y: 0 }}
-            end={{ x: 0.5, y: 1 }}
-            style={styles.heroOverlay}
-          />
-
-          {/* Title and Year - Centered and Prominent */}
-          <Animated.View style={[styles.heroContent, { opacity: heroFadeAnim }]}>
-            <Text style={styles.heroTitle} numberOfLines={2}>
-              {movie?.title || movie?.name || 'Untitled'}
-            </Text>
-            <Text style={styles.heroYear}>
-              {movie?.release_date ? new Date(movie.release_date).getFullYear() :
-               movie?.first_air_date ? new Date(movie.first_air_date).getFullYear() : ''}
-            </Text>
-
-            {/* Rating badge */}
-            <View style={styles.ratingBadge}>
-              <Ionicons name="star" size={14} color="#FFD700" />
-              <Text style={styles.ratingText}>
-                {movie?.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}
-              </Text>
-            </View>
-          </Animated.View>
-
-          {/* Volume Control Button */}
-          {showTrailer && !trailerLoading && (
-            <TouchableOpacity
-              style={styles.volumeButton}
-              onPress={() => setIsMuted(!isMuted)}
-            >
-              <Ionicons
-                name={isMuted ? "volume-mute" : "volume-high"}
-                size={24}
-                color="#fff"
-              />
-            </TouchableOpacity>
-          )}
-
-          {/* Genre tags positioned at bottom */}
-          <View style={styles.genreTags}>
-            <Text style={styles.genreText}>
-              {normalizedMediaType === 'tv' ? 'TV Series' : 'Movie'} • {runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}
-            </Text>
-          </View>
-
-          {/* Trailer countdown indicator */}
-          {!showTrailer && imdbTrailer && (
-            <View style={styles.countdownContainer}>
-              <Text style={styles.countdownText}>Trailer in {autoPlaySecondsLeft || 1}s</Text>
-              <View style={styles.countdownBar}>
-                <Animated.View style={[styles.countdownProgress, {
-                  width: `${Math.min(100, Math.max(0, countdownProgress * 100))}%`
-                }]} />
-              </View>
-              <TouchableOpacity
-                style={styles.inlinePlayNow}
-                onPress={() => {
-                  setAutoPlayed(true);
-                  setShowTrailer(true);
-                  countdownInterval.current && clearInterval(countdownInterval.current);
-                  setCountdownProgress(1);
-                }}
-              >
-                <Ionicons name="play" size={18} color="#fff" />
-                <Text style={styles.inlinePlayText}>Play teaser now</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-
-      {/* Floating Action Buttons - Modern UX */}
-      <Animated.View style={[styles.floatingActions, { transform: [{ scale: fabScaleAnim }] }]}>
-        <TouchableOpacity
-          style={[styles.fabPrimary, isLaunchingPlayer && styles.fabDisabled, { backgroundColor: accentColor || '#ff6b9d', shadowColor: accentColor || '#ff6b9d' }]}
-          onPress={handlePlayMovie}
-          disabled={isLaunchingPlayer}
-        >
-          <Ionicons name="play" size={24} color="#fff" />
-          <Text style={styles.fabPrimaryText}>
-            {isLaunchingPlayer ? 'Loading...' : 'Play'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.fabSecondary]}
-          onPress={handleDownload}
-        >
-          <Ionicons
-            name={'cloud-download-outline'}
-            size={20}
-            color="#fff"
-          />
-        </TouchableOpacity>
-      </Animated.View>
-
-      {/* Tab Navigation */}
-      <Animated.View style={[styles.tabContainer, { opacity: sectionsAnim }]}>
-        <View style={styles.tabButtons}>
-          {[
-            { key: 'story', label: 'Story', icon: 'book-outline' },
-            mediaType === 'tv' && seasons?.length > 0 ? { key: 'episodes', label: 'Episodes', icon: 'albums-outline' } : null,
-            { key: 'trailers', label: 'Trailers', icon: 'play-circle-outline' },
-            { key: 'related', label: 'More Like This', icon: 'heart-outline' },
-            { key: 'cast', label: 'Cast', icon: 'people-outline' },
-          ].filter(Boolean).map((tab) => (
-            <TouchableOpacity
-              key={(tab as any).key}
-              style={[styles.tabButton, selectedTab === (tab as any).key && styles.tabButtonActive]}
-              onPress={() => setSelectedTab((tab as any).key as any)}
-            >
-              <Ionicons
-                name={(tab as any).icon as any}
-                size={18}
-                color={selectedTab === (tab as any).key ? '#fff' : 'rgba(255,255,255,0.6)'}
-              />
-              <Text style={[styles.tabButtonText, selectedTab === (tab as any).key && styles.tabButtonTextActive]}>
-                {(tab as any).label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Tab Content */}
-        <View style={styles.tabContent}>
-          {selectedTab === 'story' && (
-            <Animated.View style={[styles.storyCard, { transform: [{ translateY: storyCardAnim.interpolate({ inputRange: [0, 1], outputRange: [50, 0] }) }], opacity: storyCardAnim }]}>
-              <Text style={styles.storyText}>
-                {movie?.overview || 'No description available for this title.'}
-              </Text>
-              <View style={styles.metaGrid}>
-                <View style={styles.metaTile}>
-                  <Text style={styles.metaTileLabel}>Released</Text>
-                  <Text style={styles.metaTileValue}>{releaseDateValue || 'TBA'}</Text>
-                </View>
-                <View style={styles.metaTile}>
-                  <Text style={styles.metaTileLabel}>Language</Text>
-                  <Text style={styles.metaTileValue}>{(movie as any)?.original_language?.toUpperCase?.() || '—'}</Text>
-                </View>
-                <View style={styles.metaTile}>
-                  <Text style={styles.metaTileLabel}>Popularity</Text>
-                  <Text style={styles.metaTileValue}>{Math.round((movie as any)?.popularity ?? 0)}</Text>
-                </View>
-                <View style={styles.metaTile}>
-                  <Text style={styles.metaTileLabel}>Votes</Text>
-                  <Text style={styles.metaTileValue}>{(movie as any)?.vote_count ?? 0}</Text>
-                </View>
-              </View>
-              <View style={styles.immersiveRow}>
-                <View style={styles.immersiveBadge}>
-                  <Ionicons name="color-filter" size={18} color="#fff" />
-                  <Text style={styles.immersiveText}>Dolby Vision</Text>
-                </View>
-                <View style={styles.immersiveBadge}>
-                  <Ionicons name="rocket-outline" size={18} color="#fff" />
-                  <Text style={styles.immersiveText}>Instant Start</Text>
-                </View>
-                <View style={styles.immersiveBadge}>
-                  <Ionicons name="people-outline" size={18} color="#fff" />
-                  <Text style={styles.immersiveText}>Watch parties ready</Text>
-                </View>
-              </View>
-            </Animated.View>
-          )}
-
-          {selectedTab === 'episodes' && mediaType === 'tv' && seasons?.length > 0 && (
-            <View style={styles.sectionCard}>
-              <View style={styles.sectionHeader}>
-                <Ionicons name="albums-outline" size={20} color={accentColor || '#ff6b9d'} />
-                <Text style={styles.sectionTitle}>Episodes</Text>
-                <Text style={styles.sectionHelper}>Binge or jump to a moment.</Text>
-              </View>
-              <EpisodeList
-                seasons={seasons}
-                onPlayEpisode={handlePlayEpisode}
-                onDownloadEpisode={handleDownloadEpisode}
-                disabled={isLoading || isLaunchingPlayer}
-                episodeDownloads={episodeDownloads}
-              />
-            </View>
-          )}
-
-          {selectedTab === 'trailers' && (
-            <View style={styles.sectionCard}>
-              <TrailerList trailers={trailers} isLoading={isLoading} onWatchTrailer={onWatchTrailer} />
-            </View>
-          )}
-
-          {selectedTab === 'related' && (
-            <View style={styles.sectionCard}>
-              <RelatedMovies
-                relatedMovies={relatedMovies}
-                isLoading={isLoading}
-                onSelectRelated={onSelectRelated}
-              />
-            </View>
-          )}
-
-          {selectedTab === 'cast' && (
-            <View style={styles.sectionCard}>
-              <CastList cast={cast} />
-            </View>
-          )}
-
-          {mediaType === 'tv' && selectedTab === 'trailers' && (
-            <View style={styles.sectionCard}>
-              <View style={styles.sectionHeader}>
-                <Ionicons name="tv-outline" size={20} color={accentColor || '#ff6b9d'} />
-                <Text style={styles.sectionTitle}>Season Sneak Peek</Text>
-                <Text style={styles.sectionHelper}>Catch up before you stream.</Text>
-              </View>
-              <EpisodeList
-                seasons={seasons}
-                onPlayEpisode={handlePlayEpisode}
-                onDownloadEpisode={handleDownloadEpisode}
-                disabled={isLoading || isLaunchingPlayer}
-                episodeDownloads={episodeDownloads}
-              />
-            </View>
-          )}
-        </View>
-      </Animated.View>
-    </ScrollView>
+      <FloatingMiniPlayer
+        visible={showMiniPlayer}
+        movie={movie}
+        onPlay={handlePlayMovie}
+        onDismiss={() => setShowMiniPlayer(false)}
+        accentColor={accentColor || '#e50914'}
+      />
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   scrollViewContent: {
     paddingBottom: 40,
     paddingTop: 0,
+  },
+  tabContentOuter: {
+    marginHorizontal: 12,
+    marginBottom: 16,
+  },
+  seasonPickerWrap: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  seasonPickerContent: {
+    paddingVertical: 10,
+    gap: 10,
+    paddingRight: 12,
+  },
+  seasonPill: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+  seasonPillSelected: {
+    backgroundColor: '#e50914',
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  seasonPillText: {
+    color: 'rgba(255,255,255,0.82)',
+    fontWeight: '800',
+    fontSize: 12,
+    letterSpacing: 0.2,
+  },
+  seasonPillTextSelected: {
+    color: '#fff',
   },
   // Sticky Header Container
   stickyHeader: {
@@ -1564,6 +2494,41 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
     marginLeft: 'auto',
+  },
+  // Watch progress styles
+  playButtonContainer: {
+    alignItems: 'center',
+  },
+  playProgressContainer: {
+    marginTop: 8,
+    alignItems: 'center',
+    width: '100%',
+  },
+  playProgressTrack: {
+    width: 120,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  playProgressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  playProgressInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 8,
+  },
+  playProgressPercent: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  playProgressTime: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
   },
 });
 

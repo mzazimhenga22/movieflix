@@ -1,240 +1,310 @@
 // app/components/BottomNav.tsx
-import React from 'react';
+import { useNavigationGuard } from '@/hooks/use-navigation-guard';
+import { Ionicons } from '@expo/vector-icons';
+import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
+import React, { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
+  Animated,
+  Easing,
   PixelRatio,
   Platform,
+  Pressable,
   StyleSheet,
+  Text,
   useWindowDimensions,
   View,
-  Text,
-  TouchableOpacity,
-  InteractionManager,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
-import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { LinearGradient } from 'expo-linear-gradient';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
+import Svg, { Defs, Path, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
 import { useAccent } from './AccentContext';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 type Props = BottomTabBarProps & {
   insetsBottom: number;
   isDark: boolean;
 };
 
-export default function BottomNav({ insetsBottom, isDark, state, navigation }: Props): React.ReactElement {
+const ICON_MAP: Record<string, { active: string; inactive: string }> = {
+  movies: { active: 'home', inactive: 'home-outline' },
+  categories: { active: 'grid', inactive: 'grid-outline' },
+  search: { active: 'search', inactive: 'search-outline' },
+  downloads: { active: 'download', inactive: 'download-outline' },
+  marketplace: { active: 'bag', inactive: 'bag-outline' },
+  music: { active: 'musical-notes', inactive: 'musical-notes-outline' },
+  interactive: { active: 'sparkles', inactive: 'sparkles-outline' },
+};
+
+const LABEL_MAP: Record<string, string> = {
+  movies: 'Home',
+  categories: 'Categories',
+  search: 'Search',
+  downloads: 'Downloads',
+  marketplace: 'Market',
+  music: 'Music',
+  interactive: 'More',
+};
+
+const VISIBLE_TABS = ['movies', 'categories', 'search', 'music', 'downloads', 'marketplace', 'interactive'];
+const VISIBLE_TABS_SET = new Set(VISIBLE_TABS);
+
+// Memoized Water Wave Component - renders once, animates efficiently
+const WaterWaveNav = memo(function WaterWaveNav({ width, color }: { width: number; color: string }) {
+  const waveAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.timing(waveAnim, {
+        toValue: 1,
+        duration: 5000,
+        easing: Easing.inOut(Easing.sin),
+        useNativeDriver: false,
+      })
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [waveAnim]);
+
+  const height = 80;
+
+  const wave1Path = waveAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [
+      `M0,${height * 0.15} Q${width * 0.2},${height * 0.05} ${width * 0.4},${height * 0.15} T${width * 0.8},${height * 0.1} T${width},${height * 0.15} L${width},0 L0,0 Z`,
+      `M0,${height * 0.1} Q${width * 0.2},${height * 0.2} ${width * 0.4},${height * 0.1} T${width * 0.8},${height * 0.15} T${width},${height * 0.1} L${width},0 L0,0 Z`,
+      `M0,${height * 0.15} Q${width * 0.2},${height * 0.05} ${width * 0.4},${height * 0.15} T${width * 0.8},${height * 0.1} T${width},${height * 0.15} L${width},0 L0,0 Z`,
+    ],
+  });
+
+  const wave2Path = waveAnim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [
+      `M0,${height * 0.2} Q${width * 0.3},${height * 0.12} ${width * 0.5},${height * 0.2} T${width},${height * 0.18} L${width},0 L0,0 Z`,
+      `M0,${height * 0.18} Q${width * 0.3},${height * 0.25} ${width * 0.5},${height * 0.18} T${width},${height * 0.22} L${width},0 L0,0 Z`,
+      `M0,${height * 0.2} Q${width * 0.3},${height * 0.12} ${width * 0.5},${height * 0.2} T${width},${height * 0.18} L${width},0 L0,0 Z`,
+    ],
+  });
+
+  return (
+    <View style={styles.waveContainer} pointerEvents="none">
+      <Svg width={width} height={height} style={StyleSheet.absoluteFillObject}>
+        <Defs>
+          <SvgGradient id="navWaveGrad1" x1="0%" y1="100%" x2="0%" y2="0%">
+            <Stop offset="0%" stopColor={color} stopOpacity="0.25" />
+            <Stop offset="100%" stopColor={color} stopOpacity="0.05" />
+          </SvgGradient>
+          <SvgGradient id="navWaveGrad2" x1="0%" y1="100%" x2="0%" y2="0%">
+            <Stop offset="0%" stopColor="#7dd8ff" stopOpacity="0.15" />
+            <Stop offset="100%" stopColor="#7dd8ff" stopOpacity="0.02" />
+          </SvgGradient>
+        </Defs>
+        <AnimatedPath d={wave1Path} fill="url(#navWaveGrad1)" />
+        <AnimatedPath d={wave2Path} fill="url(#navWaveGrad2)" />
+      </Svg>
+    </View>
+  );
+});
+
+// Memoized tab item for performance
+const TabItem = memo(function TabItem({
+  routeKey,
+  routeName,
+  focused,
+  onPress,
+  onLongPress,
+  iconSize,
+  labelFontSize,
+  isCompact,
+  itemInnerPaddingH,
+  itemInnerPaddingV,
+}: {
+  routeKey: string;
+  routeName: string;
+  focused: boolean;
+  onPress: () => void;
+  onLongPress: () => void;
+  iconSize: number;
+  labelFontSize: number;
+  isCompact: boolean;
+  itemInnerPaddingH: number;
+  itemInnerPaddingV: number;
+}) {
+  const icons = ICON_MAP[routeName] || { active: 'ellipse', inactive: 'ellipse-outline' };
+  const iconName = focused ? icons.active : icons.inactive;
+  const label = LABEL_MAP[routeName] || routeName;
+
+  return (
+    <Pressable
+      key={routeKey}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      style={[styles.item, isCompact && styles.itemCompact]}
+      android_ripple={{ color: 'rgba(255,255,255,0.1)', borderless: true }}
+      accessibilityRole="button"
+      accessibilityState={{ selected: focused }}
+    >
+      <View
+        style={[
+          styles.itemInner,
+          { paddingHorizontal: itemInnerPaddingH, paddingVertical: itemInnerPaddingV },
+          focused && styles.itemInnerActive,
+        ]}
+      >
+        {focused && (
+          <LinearGradient
+            colors={['#e50914', '#b20710']}
+            start={{ x: 0.05, y: 0 }}
+            end={{ x: 0.95, y: 1 }}
+            style={styles.activePill}
+          />
+        )}
+        <Ionicons name={iconName as any} size={iconSize} color={focused ? '#ffffff' : '#f5f5f5'} />
+        <Text
+          style={[styles.text, { fontSize: labelFontSize }, focused && styles.activeText]}
+          numberOfLines={1}
+          maxFontSizeMultiplier={1.15}
+        >
+          {label}
+        </Text>
+      </View>
+    </Pressable>
+  );
+});
+
+export default function BottomNav({ insetsBottom, isDark: _isDark, state, navigation }: Props): React.ReactElement {
   const { width: screenWidth } = useWindowDimensions();
   const fontScale = PixelRatio.getFontScale();
   const isCompact = screenWidth < 360 || fontScale > 1.15;
-
   const bottomOffset = Platform.OS === 'ios' ? (insetsBottom || 12) : (insetsBottom ? insetsBottom + 6 : 10);
   const { accentColor } = useAccent();
-  const navInFlightRef = React.useRef(false);
+  const { deferNav } = useNavigationGuard({ cooldownMs: 400 });
+
+  // Shimmer animation
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmerAnim, { toValue: 1, duration: 4000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(shimmerAnim, { toValue: 0, duration: 4000, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [shimmerAnim]);
 
   const iconSize = isCompact ? 20 : 22;
   const labelFontSize = isCompact ? 10 : 11;
-  const labelMaxFontMultiplier = 1.15;
   const navMinHeight = isCompact ? 64 : 72;
   const navPaddingV = isCompact ? 10 : 14;
-  const navPaddingH = isCompact ? 6 : 8;
-  const itemMinWidth = isCompact ? 0 : 56;
-  const itemInnerMinWidth = isCompact ? 0 : 72;
-  const itemInnerPaddingH = isCompact ? 10 : 12;
+  const navPaddingH = isCompact ? 6 : 10;
+  const itemInnerPaddingH = isCompact ? 8 : 10;
   const itemInnerPaddingV = isCompact ? 7 : 8;
 
-  const visibleTabs = new Set(['movies', 'categories', 'search', 'downloads', 'interactive']);
-
-  const iconForRoute = (routeName: string, focused: boolean) => {
-    switch (routeName) {
-      case 'movies':
-        return focused ? 'home' : 'home-outline';
-      case 'categories':
-        return focused ? 'grid' : 'grid-outline';
-      case 'search':
-        return focused ? 'search' : 'search-outline';
-      case 'downloads':
-        return focused ? 'cloud-download' : 'cloud-download-outline';
-      case 'interactive':
-        return focused ? 'sparkles' : 'sparkles-outline';
-      default:
-        return focused ? 'ellipse' : 'ellipse-outline';
-    }
-  };
-
-  const labelForRoute = (routeName: string) => {
-    switch (routeName) {
-      case 'movies':
-        return 'Home';
-      case 'categories':
-        return 'Categories';
-      case 'search':
-        return 'Search';
-      case 'downloads':
-        return 'Downloads';
-      default:
-        return routeName;
-    }
-  };
-
-  const handleSwipe = React.useCallback(
-    (direction: 'left' | 'right') => {
-      const tabRoutes = state.routes.filter((r) => visibleTabs.has(r.name));
-      if (tabRoutes.length <= 1) return;
-
-      const visibleIndex = tabRoutes.findIndex((r) => r.key === state.routes[state.index]?.key);
-      if (visibleIndex < 0) return;
-
-      const nextIndex =
-        direction === 'left'
-          ? Math.min(tabRoutes.length - 1, visibleIndex + 1)
-          : Math.max(0, visibleIndex - 1);
-
-      if (nextIndex === visibleIndex) return;
-
-      const next = tabRoutes[nextIndex];
-      if (!next?.name) return;
-      if (navInFlightRef.current) return;
-      navInFlightRef.current = true;
-
-      requestAnimationFrame(() => {
-        InteractionManager.runAfterInteractions(() => {
-          try {
-            navigation.navigate(next.name as never);
-          } finally {
-            navInFlightRef.current = false;
-          }
-        });
-      });
-    },
-    [navigation, state.index, state.routes],
+  // Memoize filtered routes
+  const visibleRoutes = useMemo(() =>
+    state.routes.filter(r => VISIBLE_TABS.includes(r.name)),
+    [state.routes]
   );
 
-  const onPanStateChange = React.useCallback(
-    (evt: any) => {
-      if (evt?.nativeEvent?.state !== State.END) return;
-      const { translationX = 0, translationY = 0, velocityX = 0 } = evt.nativeEvent ?? {};
+  // Create stable press handlers - navigate immediately, no InteractionManager delay
+  const createPressHandler = useCallback((routeKey: string, routeName: string, focused: boolean) => () => {
+    if (focused) return;
+    const event = navigation.emit({
+      type: 'tabPress',
+      target: routeKey,
+      canPreventDefault: true,
+    } as any);
+    if (!(event as any).defaultPrevented) {
+      deferNav(() => navigation.navigate(routeName as never));
+    }
+  }, [navigation, deferNav]);
 
-      // Only treat strong horizontal swipes as navigation.
-      if (Math.abs(translationY) > 40) return;
-      if (Math.abs(translationX) < 70 && Math.abs(velocityX) < 600) return;
+  const createLongPressHandler = useCallback((routeKey: string) => () => {
+    navigation.emit({
+      type: 'tabLongPress',
+      target: routeKey,
+    } as any);
+  }, [navigation]);
 
-      if (translationX < 0) handleSwipe('left');
-      else handleSwipe('right');
-    },
-    [handleSwipe],
-  );
+  // Swipe handling
+  const handleSwipe = useCallback((direction: 'left' | 'right') => {
+    const tabRoutes = state.routes.filter((r) => VISIBLE_TABS_SET.has(r.name));
+    if (tabRoutes.length <= 1) return;
+    const visibleIndex = tabRoutes.findIndex((r) => r.key === state.routes[state.index]?.key);
+    if (visibleIndex < 0) return;
+    const nextIndex = direction === 'left'
+      ? Math.min(tabRoutes.length - 1, visibleIndex + 1)
+      : Math.max(0, visibleIndex - 1);
+    if (nextIndex === visibleIndex) return;
+    const next = tabRoutes[nextIndex];
+    if (next?.name) {
+      deferNav(() => navigation.navigate(next.name as never));
+    }
+  }, [deferNav, navigation, state.index, state.routes]);
+
+  const onPanStateChange = useCallback((evt: any) => {
+    if (evt?.nativeEvent?.state !== State.END) return;
+    const { translationX = 0, translationY = 0, velocityX = 0 } = evt.nativeEvent ?? {};
+    if (Math.abs(translationY) > 40) return;
+    if (Math.abs(translationX) < 70 && Math.abs(velocityX) < 600) return;
+    handleSwipe(translationX < 0 ? 'left' : 'right');
+  }, [handleSwipe]);
 
   return (
     <View pointerEvents="box-none" style={[styles.outer, { bottom: bottomOffset }]}>
       <PanGestureHandler activeOffsetX={[-18, 18]} failOffsetY={[-18, 18]} onHandlerStateChange={onPanStateChange}>
         <View>
           <BlurView
-            intensity={95}
+            intensity={90}
             tint="dark"
             style={[styles.blurWrap, { borderColor: `${accentColor}55`, minHeight: navMinHeight }]}
           >
-            <View
-              style={[
-                styles.overlay,
-                { backgroundColor: 'rgba(15,15,25,0.55)' },
-              ]}
-            />
+            <View style={[styles.overlay, { backgroundColor: 'rgba(15,15,25,0.55)' }]} />
             <LinearGradient
               colors={[`${accentColor}33`, 'rgba(255,255,255,0.02)']}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={styles.glassSheen}
             />
+
+            {/* Water wave effect */}
+            <WaterWaveNav width={screenWidth * 0.96} color={accentColor} />
+
+            {/* Shimmer light reflection */}
+            <Animated.View
+              style={[
+                styles.shimmerOverlay,
+                {
+                  opacity: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.08] }),
+                  transform: [{ translateX: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-screenWidth, screenWidth] }) }],
+                },
+              ]}
+            />
+
             <View
               style={[
                 styles.inner,
-                {
-                  minHeight: navMinHeight,
-                  paddingVertical: navPaddingV,
-                  paddingHorizontal: navPaddingH,
-                },
+                { minHeight: navMinHeight, paddingVertical: navPaddingV, paddingHorizontal: navPaddingH },
               ]}
             >
-              {state.routes.map((route, idx) => {
-                const focused = state.index === idx;
-                const routeName = route.name;
-
-                if (routeName === 'marketplace' || !visibleTabs.has(routeName)) {
-                  return null;
-                }
-
-                const onPress = () => {
-                  const event = navigation.emit({
-                    type: 'tabPress',
-                    target: route.key,
-                    canPreventDefault: true,
-                  } as any);
-
-                  if (focused || (event as any).defaultPrevented) return;
-                  if (navInFlightRef.current) return;
-                  navInFlightRef.current = true;
-
-                  requestAnimationFrame(() => {
-                    InteractionManager.runAfterInteractions(() => {
-                      try {
-                        navigation.navigate(routeName as never);
-                      } finally {
-                        navInFlightRef.current = false;
-                      }
-                    });
-                  });
-                };
-
-                const onLongPress = () => {
-                  navigation.emit({
-                    type: 'tabLongPress',
-                    target: route.key,
-                  } as any);
-                };
-
-                const iconName = iconForRoute(routeName, focused);
-                const label = labelForRoute(routeName);
-
+              {visibleRoutes.map((route) => {
+                const focused = state.routes[state.index]?.key === route.key;
                 return (
-                  <TouchableOpacity
+                  <TabItem
                     key={route.key}
-                    onPress={onPress}
-                    onLongPress={onLongPress}
-                    style={[styles.item, { minWidth: itemMinWidth }, isCompact && styles.itemCompact]}
-                    activeOpacity={0.85}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: focused }}
-                  >
-                    <View
-                      style={[
-                        styles.itemInner,
-                        {
-                          minWidth: itemInnerMinWidth,
-                          paddingHorizontal: itemInnerPaddingH,
-                          paddingVertical: itemInnerPaddingV,
-                        },
-                        focused && styles.itemInnerActive,
-                      ]}
-                    >
-                      {focused && (
-                        <LinearGradient
-                          colors={['#e50914', '#b20710']}
-                          start={{ x: 0.05, y: 0 }}
-                          end={{ x: 0.95, y: 1 }}
-                          style={styles.activePill}
-                        />
-                      )}
-                      <Ionicons name={iconName as any} size={iconSize} color={focused ? '#ffffff' : '#f5f5f5'} />
-                      <Text
-                        style={[styles.text, { fontSize: labelFontSize }, focused ? styles.activeText : undefined]}
-                        numberOfLines={1}
-                        ellipsizeMode="tail"
-                        maxFontSizeMultiplier={labelMaxFontMultiplier}
-                      >
-                        {label}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
+                    routeKey={route.key}
+                    routeName={route.name}
+                    focused={focused}
+                    onPress={createPressHandler(route.key, route.name, focused)}
+                    onLongPress={createLongPressHandler(route.key)}
+                    iconSize={iconSize}
+                    labelFontSize={labelFontSize}
+                    isCompact={isCompact}
+                    itemInnerPaddingH={itemInnerPaddingH}
+                    itemInnerPaddingV={itemInnerPaddingV}
+                  />
                 );
               })}
             </View>
@@ -254,7 +324,7 @@ const styles = StyleSheet.create({
     zIndex: 9999,
   },
   blurWrap: {
-    width: '92%',
+    width: '96%',
     borderRadius: 22,
     overflow: 'hidden',
     borderWidth: 1,
@@ -274,6 +344,7 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
   inner: {
+    width: '100%',
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -283,7 +354,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 6,
     paddingVertical: 4,
-    minWidth: 56,
+    minWidth: 0,
   },
   itemCompact: {
     paddingHorizontal: 2,
@@ -293,7 +364,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 16,
-    minWidth: 72,
+    minWidth: 0,
+    width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
@@ -320,5 +392,19 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     borderRadius: 16,
     opacity: 0.98,
+  },
+  waveContainer: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 22,
+    overflow: 'hidden',
+  },
+  shimmerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#fff',
+    borderRadius: 22,
   },
 });

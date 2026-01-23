@@ -2,3 +2,16 @@ node_modules/
 **/node_modules/
 .git/
 .expo/
+
+# Local env/secrets
+.env.*
+!.env.local
+local/
+
+# Exclude TV app folder from mobile EAS builds (use preview-tv with APP_VARIANT=tv when needed)
+
+
+# Firebase Admin SDK service account keys
+*adminsdk*.json
+firebase-adminsdk*.json
+movieflixreactnative-firebase-adminsdk-*.json

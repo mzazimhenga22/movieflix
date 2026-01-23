@@ -1,34 +1,71 @@
 
 // app/_layout.tsx
+import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import '@react-native-anywhere/polyfill-base64';
 import * as Linking from 'expo-linking';
 import { Stack, router } from 'expo-router';
+import { onAuthStateChanged } from 'firebase/auth';
 import React, { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { onAuthStateChanged } from 'firebase/auth';
 import 'react-native-get-random-values';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import 'react-native-url-polyfill/auto';
 // URL.parse polyfill for p-stream providers
-import '../polyfills/url';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { authPromise, firestore } from '../constants/firebase';
+import { supabase } from '../constants/supabase';
+import { CustomThemeProvider } from '../hooks/use-theme';
+import { registerDownloadBackgroundTasks } from '../lib/downloadBackgroundTasks';
+import { initializeDownloadManager } from '../lib/downloadManager';
+import { getStoredActiveProfile } from '../lib/profileStorage';
+import { installPushNavigationHandlers, prepareNotificationsAsync, registerForPushNotificationsAsync } from '../lib/pushNotifications';
 import '../polyfills/node-globals';
 import '../polyfills/reanimated-worklet-callback';
-import { supabase } from '../constants/supabase';
-import { authPromise } from '../constants/firebase';
-import { CustomThemeProvider } from '../hooks/use-theme';
-import { installPushNavigationHandlers, prepareNotificationsAsync, registerForPushNotificationsAsync } from '../lib/pushNotifications';
-import { initializeDownloadManager } from '../lib/downloadManager';
+import '../polyfills/url';
 import { SubscriptionProvider } from '../providers/SubscriptionProvider';
 import { AccentProvider } from './components/AccentContext';
+import { FlixySettingsProvider } from './components/FlixySettingsProvider';
+import { FlixyVoiceProvider } from './components/FlixyVoice';
+import GlobalCommsOverlay from './components/GlobalCommsOverlay';
+import GlobalRealtimeNotifications from './components/GlobalRealtimeNotifications';
+import StartupVideoSplash from './components/StartupVideoSplash';
 import UpdateGate from './components/UpdateGate';
 
 export default function RootLayout() {
+  const [showStartupVideo, setShowStartupVideo] = React.useState(true);
+
   useEffect(() => {
-    void prepareNotificationsAsync().catch(() => {});
+    // Ensure notification permissions/channels are ready before download manager emits download notifications.
+    void (async () => {
+      try {
+        await prepareNotificationsAsync();
+      } catch {
+        // ignore
+      }
+      try {
+        await initializeDownloadManager();
+        await registerDownloadBackgroundTasks();
+      } catch {
+        // ignore
+      }
+    })();
   }, []);
 
   useEffect(() => {
-    void initializeDownloadManager().catch(() => {});
+    // Ensure notification permissions/channels are ready before download manager emits download notifications.
+    void (async () => {
+      try {
+        await prepareNotificationsAsync();
+      } catch {
+        // ignore
+      }
+      try {
+        await initializeDownloadManager();
+        await registerDownloadBackgroundTasks();
+      } catch {
+        // ignore
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -43,7 +80,49 @@ export default function RootLayout() {
           });
         });
       })
-      .catch(() => {});
+      .catch(() => { });
+
+    return () => {
+      try {
+        unsubscribe?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    // Ensure the selected household profile identity (name/avatar) is reflected in Firestore users/<uid>
+    // so messaging/chat headers can show the correct profile picture.
+    let unsubscribe: (() => void) | null = null;
+
+    void authPromise
+      .then((auth) => {
+        unsubscribe = onAuthStateChanged(auth, (user) => {
+          if (!user?.uid) return;
+          void (async () => {
+            try {
+              const profile = await getStoredActiveProfile();
+              const displayName = typeof profile?.name === 'string' && profile.name.trim() ? profile.name.trim() : null;
+              const photoURL = typeof profile?.photoURL === 'string' && profile.photoURL.trim() ? profile.photoURL.trim() : null;
+              if (!displayName && !photoURL) return;
+              await setDoc(
+                doc(firestore, 'users', user.uid),
+                {
+                  ...(displayName ? { displayName } : {}),
+                  ...(photoURL ? { photoURL } : {}),
+                  activeProfileId: profile?.id ?? null,
+                  activeProfileUpdatedAt: serverTimestamp(),
+                },
+                { merge: true },
+              );
+            } catch {
+              // ignore
+            }
+          })();
+        });
+      })
+      .catch(() => { });
 
     return () => {
       try {
@@ -58,7 +137,7 @@ export default function RootLayout() {
     return installPushNavigationHandlers((data) => {
       if (!data) return;
       if (data.externalUrl && typeof data.externalUrl === 'string') {
-        void Linking.openURL(data.externalUrl).catch(() => {});
+        void Linking.openURL(data.externalUrl).catch(() => { });
         return;
       }
       if (data.url && typeof data.url === 'string') {
@@ -103,30 +182,45 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#0E0E0E' }}>
-      <SafeAreaProvider>
-        <CustomThemeProvider>
-          <AccentProvider>
-            <SubscriptionProvider>
-              <UpdateGate>
-                <Stack screenOptions={{ headerShown: false }}>
-                  <Stack.Screen name="index" />
-                  <Stack.Screen name="select-profile" />
-                  <Stack.Screen name="(auth)" />
-                  <Stack.Screen name="(tabs)" />
-                  <Stack.Screen name="post-review" />
-                  <Stack.Screen
-                    name="calls/[id]"
-                    options={{
-                      headerShown: false,
-                      presentation: 'fullScreenModal',
-                    }}
-                  />
-                </Stack>
-              </UpdateGate>
-            </SubscriptionProvider>
-          </AccentProvider>
-        </CustomThemeProvider>
-      </SafeAreaProvider>
+      <BottomSheetModalProvider>
+        <SafeAreaProvider>
+          <CustomThemeProvider>
+            <AccentProvider>
+              <SubscriptionProvider>
+                <FlixySettingsProvider>
+                  <UpdateGate>
+                    <GlobalCommsOverlay />
+                    <GlobalRealtimeNotifications />
+                    <Stack screenOptions={{ headerShown: false }}>
+                      <Stack.Screen name="index" />
+                      <Stack.Screen name="select-profile" />
+                      <Stack.Screen name="(auth)" />
+                      <Stack.Screen name="(tabs)" />
+                      <Stack.Screen name="messaging" />
+                      <Stack.Screen name="post-review" />
+                      <Stack.Screen
+                        name="calls/[id]"
+                        options={{
+                          headerShown: false,
+                          presentation: 'fullScreenModal',
+                        }}
+                      />
+                    </Stack>
+                  </UpdateGate>
+                </FlixySettingsProvider>
+              </SubscriptionProvider>
+            </AccentProvider>
+          </CustomThemeProvider>
+        </SafeAreaProvider>
+
+        <StartupVideoSplash visible={showStartupVideo} onDone={() => setShowStartupVideo(false)} />
+      </BottomSheetModalProvider>
+
+      {/* Flixy Voice Provider - Global "Hey Flixy" voice activation */}
+      <FlixyVoiceProvider>
+        {/* Voice provider children render as overlay when needed */}
+        <></>
+      </FlixyVoiceProvider>
     </GestureHandlerRootView>
   );
 }
