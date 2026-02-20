@@ -21,6 +21,12 @@ interface NativeLiquidGlassProps {
     ambientLight?: number;
     scrollOpacity?: number;
     scrollVelocity?: number;
+    // iOS 26 10/10 advanced properties
+    causticIntensity?: number;
+    chromaticAberration?: number;
+    glassThickness?: number;
+    parallaxStrength?: number;
+    quality?: number; // 0=LOW, 1=MEDIUM, 2=HIGH, 3=ULTRA
 }
 
 const NativeLiquidGlass =
@@ -56,20 +62,42 @@ export interface LiquidGlassProps {
     /** Scroll velocity for dynamic effects */
     scrollVelocity?: number;
 
+    // iOS 26 10/10 advanced properties (Android ULTRA quality)
+    /** Caustic light intensity 0-1. Simulates light focusing through glass. Default: 0.6 */
+    causticIntensity?: number;
+    /** Chromatic aberration amount 0-1. RGB channel splitting for optical realism. Default: 0.8 */
+    chromaticAberration?: number;
+    /** Glass thickness in dp. Creates volumetric 3D depth. Default: 12 */
+    glassThickness?: number;
+    /** Parallax response strength 0-0.5. How much glass responds to touch position. Default: 0.15 */
+    parallaxStrength?: number;
+    /** Quality level 0-3. 0=LOW, 1=MEDIUM, 2=HIGH, 3=ULTRA. Default: 2 */
+    quality?: 0 | 1 | 2 | 3;
+
     style?: any;
     children?: React.ReactNode;
 }
 
 /**
- * `<LiquidGlass>` — iOS 26 liquid-glass panel.
+ * `<LiquidGlass>` — iOS 26 Liquid Glass (10/10 Implementation)
  *
  * On Android the glass is rendered by a Kotlin native `Canvas` view with:
- * - Touch-responsive morphing
- * - Content awareness and refraction
- * - Multi-layer composition
- * - Hardware-informed curvature
- * - Scroll edge integration
- * - Accessibility-aware (reduced motion/transparency)
+ * - **Real-time backdrop blur** with RenderScript
+ * - **Volumetric 3D thickness** — side faces with proper shading
+ * - **Caustic light effects** — light focusing through glass material
+ * - **Chromatic aberration** — RGB channel splitting on ULTRA quality
+ * - **Dynamic noise** — temporally varying glass imperfections
+ * - **Parallax touch response** — glass responds to finger position
+ * - **Touch-responsive morphing** with spring physics
+ * - **Content awareness** and color refraction
+ * - **13-layer cinematic composition**
+ * - **Accessibility-aware** (reduced motion/transparency)
+ *
+ * Quality levels:
+ * - `quality=3` (ULTRA): Full caustics + chromatic aberration + dynamic noise
+ * - `quality=2` (HIGH): Caustics + dynamic noise
+ * - `quality=1` (MEDIUM): Simplified effects
+ * - `quality=0` (LOW): Basic glass (accessibility fallback)
  *
  * On iOS/web it falls back to a CSS-approximated frosted panel.
  */
@@ -86,6 +114,12 @@ const LiquidGlass: React.FC<LiquidGlassProps> = ({
     ambientLight = 0.8,
     scrollOpacity = 1.0,
     scrollVelocity = 0,
+    // iOS 26 10/10 advanced properties
+    causticIntensity = 0.6,
+    chromaticAberration = 0.8,
+    glassThickness = 12,
+    parallaxStrength = 0.15,
+    quality = 2,
     style,
     children,
 }) => {
@@ -104,6 +138,11 @@ const LiquidGlass: React.FC<LiquidGlassProps> = ({
                     ambientLight={ambientLight}
                     scrollOpacity={scrollOpacity}
                     scrollVelocity={scrollVelocity}
+                    causticIntensity={causticIntensity}
+                    chromaticAberration={chromaticAberration}
+                    glassThickness={glassThickness}
+                    parallaxStrength={parallaxStrength}
+                    quality={quality}
                 />
                 <View style={styles.content}>{children}</View>
             </View>

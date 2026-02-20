@@ -3,6 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import React, { memo, useEffect, useRef } from 'react';
 import { Animated, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import AnimatedSection from './AnimatedSection';
+import LiquidGlass from '../LiquidGlass';
 
 interface ProfileHeaderProps {
   displayName: string;
@@ -54,34 +55,73 @@ const ProfileHeader = memo(function ProfileHeader({
   });
 
   return (
-    <AnimatedSection delay={100} style={styles.profileHeader}>
-      <LinearGradient
-        colors={[`${accent}25`, 'rgba(255,255,255,0.03)', 'rgba(10,12,24,0.5)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.headerSheen}
-      />
-
-      {/* Avatar with animated glow ring */}
-      <View style={styles.avatarWrap}>
-        <Animated.View
-          style={[
-            styles.avatarGlowRing,
-            {
-              borderColor: accent,
-              shadowColor: accent,
-              opacity: avatarGlowOpacity,
-            },
-          ]}
+    <AnimatedSection delay={100}>
+      <LiquidGlass
+        glowColor={accent}
+        tintColor="#0a0c18"
+        tintOpacity={0.65}
+        cornerRadius={24}
+        glowIntensity={0.6}
+        borderWidth={1.5}
+        style={styles.profileHeader}
+        animated={true}
+      >
+        <LinearGradient
+          colors={[`${accent}15`, 'rgba(255,255,255,0.03)', 'rgba(10,12,24,0.3)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.headerSheen}
         />
-        <View style={[styles.avatarBorder, { borderColor: accent }]}>
-          <Image source={{ uri: avatarUri }} style={styles.avatar} />
+
+        {/* Avatar with liquid glass effect */}
+        <View style={styles.avatarWrap}>
+          <LiquidGlass
+            glowColor={accent}
+            tintColor="#000000"
+            tintOpacity={0.3}
+            cornerRadius={65}
+            glowIntensity={0.8}
+            borderWidth={2}
+            style={styles.avatarGlowRing}
+            animated={true}
+          >
+            <Animated.View
+              style={[
+                styles.avatarGlowRingInner,
+                {
+                  borderColor: accent,
+                  shadowColor: accent,
+                  opacity: avatarGlowOpacity,
+                },
+              ]}
+            />
+          </LiquidGlass>
+          <LiquidGlass
+            glowColor={accent}
+            tintColor="#1a1a2e"
+            tintOpacity={0.4}
+            cornerRadius={59}
+            glowIntensity={0.5}
+            borderWidth={3}
+            style={styles.avatarBorder}
+            animated={false}
+          >
+            <Image source={{ uri: avatarUri }} style={styles.avatar} />
+          </LiquidGlass>
+          <LiquidGlass
+            glowColor="#4ADE80"
+            tintColor="#0a1f15"
+            tintOpacity={0.5}
+            cornerRadius={14}
+            glowIntensity={0.4}
+            borderWidth={1}
+            style={styles.statusPill}
+            animated={false}
+          >
+            <View style={[styles.statusDot, { backgroundColor: '#4ADE80' }]} />
+            <Text style={styles.statusLabel}>Verified fan</Text>
+          </LiquidGlass>
         </View>
-        <View style={[styles.statusPill, { borderColor: `${accent}40` }]}>
-          <View style={[styles.statusDot, { backgroundColor: '#4ADE80' }]} />
-          <Text style={styles.statusLabel}>Verified fan</Text>
-        </View>
-      </View>
       
       <Text style={styles.name} numberOfLines={1} ellipsizeMode="tail">
         {displayName}
@@ -101,53 +141,101 @@ const ProfileHeader = memo(function ProfileHeader({
       {!isOwnProfile && (followsYou || mutualCount > 0) ? (
         <View style={styles.badgeRow}>
           {followsYou ? (
-            <View style={[styles.badgePill, { backgroundColor: 'rgba(74,222,128,0.14)', borderColor: 'rgba(74,222,128,0.3)' }]}>
+            <LiquidGlass
+              glowColor="#4ADE80"
+              tintColor="#0a1f15"
+              tintOpacity={0.4}
+              cornerRadius={14}
+              glowIntensity={0.3}
+              borderWidth={1}
+              style={styles.badgePill}
+              animated={false}
+            >
               <Ionicons name="checkmark-circle" size={12} color="#4ADE80" />
               <Text style={styles.badgeText}>Follows you</Text>
-            </View>
+            </LiquidGlass>
           ) : null}
           {mutualCount > 0 ? (
-            <View style={[styles.badgePill, { borderColor: `${accent}40` }]}>
+            <LiquidGlass
+              glowColor={accent}
+              tintColor="#1a1a2e"
+              tintOpacity={0.4}
+              cornerRadius={14}
+              glowIntensity={0.3}
+              borderWidth={1}
+              style={styles.badgePill}
+              animated={false}
+            >
               <Ionicons name="people" size={12} color={accent} />
               <Text style={styles.badgeText}>{mutualCount} mutual</Text>
-            </View>
+            </LiquidGlass>
           ) : null}
         </View>
       ) : null}
 
       {isOwnProfile ? (
         <View style={styles.selfActionRow}>
-          <TouchableOpacity
-            style={[styles.editProfileButton, { backgroundColor: accent, shadowColor: accent }]}
-            onPress={onEditProfile}
-          >
-            <Ionicons name="create-outline" size={16} color="#fff" />
-            <Text style={styles.editProfileButtonText}>Edit Profile</Text>
+          <TouchableOpacity onPress={onEditProfile} activeOpacity={0.85}>
+            <LiquidGlass
+              glowColor={accent}
+              tintColor={accent}
+              tintOpacity={0.85}
+              cornerRadius={16}
+              glowIntensity={0.7}
+              borderWidth={1.5}
+              style={styles.editProfileButton}
+              animated={true}
+            >
+              <Ionicons name="create-outline" size={16} color="#fff" />
+              <Text style={styles.editProfileButtonText}>Edit Profile</Text>
+            </LiquidGlass>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.switchProfileButton} onPress={onSwitchProfile}>
-            <Ionicons name="swap-horizontal" size={16} color="#fff" />
-            <Text style={styles.switchProfileButtonText}>Switch</Text>
+          <TouchableOpacity onPress={onSwitchProfile} activeOpacity={0.85}>
+            <LiquidGlass
+              glowColor="#ffffff"
+              tintColor="#1a1a2e"
+              tintOpacity={0.5}
+              cornerRadius={16}
+              glowIntensity={0.4}
+              borderWidth={1.5}
+              style={styles.switchProfileButton}
+              animated={false}
+            >
+              <Ionicons name="swap-horizontal" size={16} color="#fff" />
+              <Text style={styles.switchProfileButtonText}>Switch</Text>
+            </LiquidGlass>
           </TouchableOpacity>
         </View>
       ) : (
         <TouchableOpacity
-          style={[
-            isFollowing ? styles.unfollowButton : styles.followButton,
-            followBusy && { opacity: 0.6 },
-            !isFollowing && { backgroundColor: accent, shadowColor: accent },
-          ]}
           onPress={isFollowing ? onUnfollow : onFollow}
           disabled={followBusy}
+          activeOpacity={0.85}
         >
-          <Ionicons
-            name={isFollowing ? 'checkmark' : 'person-add'}
-            size={16}
-            color="#fff"
-            style={{ marginRight: 6 }}
-          />
-          <Text style={styles.followButtonText}>{isFollowing ? 'Following' : 'Follow'}</Text>
+          <LiquidGlass
+            glowColor={isFollowing ? '#ffffff' : accent}
+            tintColor={isFollowing ? '#2a2a3e' : accent}
+            tintOpacity={isFollowing ? 0.4 : 0.85}
+            cornerRadius={22}
+            glowIntensity={isFollowing ? 0.3 : 0.7}
+            borderWidth={1.5}
+            style={[
+              styles.followButton,
+              followBusy && { opacity: 0.6 },
+            ]}
+            animated={!isFollowing}
+          >
+            <Ionicons
+              name={isFollowing ? 'checkmark' : 'person-add'}
+              size={16}
+              color="#fff"
+              style={{ marginRight: 6 }}
+            />
+            <Text style={styles.followButtonText}>{isFollowing ? 'Following' : 'Follow'}</Text>
+          </LiquidGlass>
         </TouchableOpacity>
       )}
+      </LiquidGlass>
     </AnimatedSection>
   );
 });
@@ -158,15 +246,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     padding: 20,
     borderRadius: 24,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: 'rgba(15,18,35,0.7)',
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.25,
-    shadowRadius: 24,
-    elevation: 12,
   },
   headerSheen: { ...StyleSheet.absoluteFillObject, opacity: 0.8, borderRadius: 24 },
   avatar: {
@@ -183,7 +263,12 @@ const styles = StyleSheet.create({
     width: 130,
     height: 130,
     borderRadius: 65,
+    overflow: 'hidden',
+  },
+  avatarGlowRingInner: {
+    ...StyleSheet.absoluteFillObject,
     borderWidth: 3,
+    borderRadius: 65,
     shadowOffset: { width: 0, height: 0 },
     shadowRadius: 20,
   },
@@ -191,10 +276,6 @@ const styles = StyleSheet.create({
     width: 118,
     height: 118,
     borderRadius: 59,
-    borderWidth: 3,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
     overflow: 'hidden',
   },
   statusPill: {
@@ -203,11 +284,8 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 7,
-    backgroundColor: 'rgba(74,222,128,0.1)',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(74,222,128,0.25)',
     marginTop: 12,
+    overflow: 'hidden',
   },
   statusDot: {
     width: 8,
@@ -258,10 +336,7 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 7,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
   },
   badgeText: { color: 'rgba(255,255,255,0.9)', fontWeight: '700', fontSize: 12 },
   selfActionRow: {
@@ -281,10 +356,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     flexGrow: 1,
     minWidth: 140,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    elevation: 6,
+    overflow: 'hidden',
   },
   editProfileButtonText: { color: 'white', fontWeight: '800', fontSize: 14 },
   switchProfileButton: {
@@ -295,28 +367,19 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 20,
     borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.15)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
     flexGrow: 0,
     minWidth: 160,
+    overflow: 'hidden',
   },
   switchProfileButtonText: { color: 'white', fontWeight: 'bold' },
   followButton: {
-    backgroundColor: 'transparent',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     paddingVertical: 10,
     paddingHorizontal: 30,
     borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-  },
-  unfollowButton: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    paddingVertical: 10,
-    paddingHorizontal: 30,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    overflow: 'hidden',
   },
   followButtonText: { color: 'white', fontWeight: '800', fontSize: 14 },
 });

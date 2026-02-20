@@ -5,6 +5,19 @@ const path = require('path');
 /** @type {import('metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
+// Limit workers for large bundle builds to prevent memory thrashing
+config.maxWorkers = 2;
+
+// Optimize transformer for large files
+config.transformer = {
+  ...config.transformer,
+  minifierConfig: {
+    keep_classnames: true,
+    keep_fnames: true,
+    mangle: false,
+  },
+};
+
 // Custom resolver to handle problematic package imports
 const customResolveRequest = (context, moduleName, platform) => {
   // Fix for react-native-webrtc importing "event-target-shim/index"

@@ -47,6 +47,7 @@ import { getLastAuthUid as getLastAuthUidStored, setLastAuthUid as setLastAuthUi
 import ProfileModule from '../modules/ProfileModule'
 import { useSubscription } from '../providers/SubscriptionProvider'
 import { useAccent } from './components/AccentContext'
+import LiquidGlass from './components/LiquidGlass'
 
 type PlanTier = 'free' | 'plus' | 'premium'
 
@@ -144,6 +145,8 @@ const ProfileCard = memo(function ProfileCard({
     outputRange: ['rgba(255,255,255,0.08)', item.avatarColor || accentColor],
   })
 
+  const cardGlowColor = item.avatarColor || accentColor
+
   return (
     <Animated.View
       style={[
@@ -155,65 +158,124 @@ const ProfileCard = memo(function ProfileCard({
       ]}
     >
       <TouchableOpacity
-        style={[styles.profileCard, locked && { opacity: 0.55 }]}
         activeOpacity={0.9}
         onPressIn={() => setFocused(true)}
         onPressOut={() => setFocused(false)}
         onPress={onPress}
       >
-        <Animated.View style={[styles.profileCardGlow, { borderColor: animatedBorderColor }]} />
-        {focused && !locked && (
-          <LinearGradient
-            colors={[`${item.avatarColor || accentColor}30`, 'transparent']}
-            style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
-            start={{ x: 0.5, y: 0 }}
-            end={{ x: 0.5, y: 1 }}
-          />
-        )}
+        <LiquidGlass
+          glowColor={cardGlowColor}
+          tintColor="#0f1220"
+          tintOpacity={locked ? 0.3 : 0.65}
+          cornerRadius={18}
+          glowIntensity={focused ? 0.8 : 0.4}
+          borderWidth={2}
+          style={[styles.profileCard, locked && { opacity: 0.55 }]}
+          animated={true}
+        >
+          <Animated.View style={[styles.profileCardGlow, { borderColor: animatedBorderColor }]} />
+          {focused && !locked && (
+            <LinearGradient
+              colors={[`${item.avatarColor || accentColor}30`, 'transparent']}
+              style={[StyleSheet.absoluteFill, { borderRadius: 16 }]}
+              start={{ x: 0.5, y: 0 }}
+              end={{ x: 0.5, y: 1 }}
+            />
+          )}
 
-        {!locked && (
-          <View style={styles.profileActions} pointerEvents="box-none">
-            <TouchableOpacity style={styles.actionButton} onPress={onEdit}>
-              <Ionicons name="pencil" size={16} color={accentColor} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton} onPress={onDelete}>
-              <Ionicons name="trash" size={16} color={accentColor} />
-            </TouchableOpacity>
-          </View>
-        )}
+          {!locked && (
+            <View style={styles.profileActions} pointerEvents="box-none">
+              <TouchableOpacity onPress={onEdit} activeOpacity={0.85}>
+                <LiquidGlass
+                  glowColor={accentColor}
+                  tintColor="#1a1a2e"
+                  tintOpacity={0.5}
+                  cornerRadius={16}
+                  glowIntensity={0.4}
+                  borderWidth={1}
+                  style={styles.actionButton}
+                  animated={false}
+                >
+                  <Ionicons name="pencil" size={16} color={accentColor} />
+                </LiquidGlass>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onDelete} activeOpacity={0.85}>
+                <LiquidGlass
+                  glowColor="#e50914"
+                  tintColor="#2a0a0a"
+                  tintOpacity={0.5}
+                  cornerRadius={16}
+                  glowIntensity={0.4}
+                  borderWidth={1}
+                  style={styles.actionButton}
+                  animated={false}
+                >
+                  <Ionicons name="trash" size={16} color="#ff6b6b" />
+                </LiquidGlass>
+              </TouchableOpacity>
+            </View>
+          )}
 
-        <View style={[styles.avatar, !item.photoURL && { backgroundColor: `${item.avatarColor || '#222'}55` }]}>
-          {item.photoURL ? (
-            <Image source={{ uri: item.photoURL }} style={styles.avatarImage} />
-          ) : (
-            <>
+          <LiquidGlass
+            glowColor={item.avatarColor || accentColor}
+            tintColor={item.avatarColor || '#e50914'}
+            tintOpacity={0.4}
+            cornerRadius={22}
+            glowIntensity={0.5}
+            borderWidth={2}
+            style={styles.avatar}
+            animated={true}
+          >
+            {item.photoURL ? (
+              <Image source={{ uri: item.photoURL }} style={styles.avatarImage} />
+            ) : (
               <LinearGradient
                 colors={[item.avatarColor || '#e50914', `${item.avatarColor || '#e50914'}88`]}
                 style={[StyleSheet.absoluteFill, { borderRadius: 20 }]}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
               />
+            )}
+            {!item.photoURL && (
               <Text style={styles.avatarInitial}>{item.name.charAt(0).toUpperCase()}</Text>
-            </>
+            )}
+          </LiquidGlass>
+
+          <Text style={styles.profileName} numberOfLines={1}>
+            {item.name}
+          </Text>
+
+          {item.isKids && (
+            <LiquidGlass
+              glowColor="#ffffff"
+              tintColor="#1a1a2e"
+              tintOpacity={0.4}
+              cornerRadius={999}
+              glowIntensity={0.3}
+              borderWidth={1}
+              style={styles.kidsPillWrap}
+              animated={false}
+            >
+              <Text style={styles.kidsPill}>Kids</Text>
+            </LiquidGlass>
           )}
-        </View>
 
-        <Text style={styles.profileName} numberOfLines={1}>
-          {item.name}
-        </Text>
-
-        {item.isKids && (
-          <View style={styles.kidsPillWrap}>
-            <Text style={styles.kidsPill}>Kids</Text>
-          </View>
-        )}
-
-        {locked && (
-          <View style={styles.lockOverlay}>
-            <Ionicons name="lock-closed" size={16} color="#fff" />
-            <Text style={styles.lockText}>Upgrade</Text>
-          </View>
-        )}
+          {locked && (
+            <LiquidGlass
+              glowColor="#e50914"
+              tintColor="#2a0a0a"
+              tintOpacity={0.5}
+              cornerRadius={999}
+              glowIntensity={0.5}
+              borderWidth={1.5}
+              style={styles.lockOverlay}
+              animated={true}
+            >
+              <Ionicons name="lock-closed" size={16} color="#fff" />
+              <Text style={styles.lockText}>Upgrade</Text>
+            </LiquidGlass>
+          )}
+        </LiquidGlass>
       </TouchableOpacity>
     </Animated.View>
   )
@@ -1130,116 +1192,192 @@ const SelectProfileScreen = () => {
                   },
                 ]}
               >
-                <View style={styles.sheetHandle} />
-                <View style={styles.sheetHeader}>
-                  <View style={[styles.sheetAvatar, !selectedProfile.photoURL && { backgroundColor: selectedProfile.avatarColor }]}>
-                    {selectedProfile.photoURL ? (
-                      <Image source={{ uri: selectedProfile.photoURL }} style={styles.sheetAvatarImage} />
-                    ) : (
-                      <Text style={styles.sheetInitial}>{selectedProfile.name.charAt(0).toUpperCase()}</Text>
-                    )}
+                <LiquidGlass
+                  glowColor={accentColor}
+                  tintColor="#0c0e1c"
+                  tintOpacity={0.85}
+                  cornerRadius={22}
+                  glowIntensity={0.6}
+                  borderWidth={1.5}
+                  style={styles.sheetGlass}
+                  animated={true}
+                >
+                  <View style={styles.sheetHandle} />
+                  <View style={styles.sheetHeader}>
+                    <LiquidGlass
+                      glowColor={selectedProfile.avatarColor || accentColor}
+                      tintColor={selectedProfile.avatarColor || accentColor}
+                      tintOpacity={0.5}
+                      cornerRadius={20}
+                      glowIntensity={0.5}
+                      borderWidth={2}
+                      style={styles.sheetAvatar}
+                      animated={true}
+                    >
+                      {selectedProfile.photoURL ? (
+                        <Image source={{ uri: selectedProfile.photoURL }} style={styles.sheetAvatarImage} />
+                      ) : (
+                        <Text style={styles.sheetInitial}>{selectedProfile.name.charAt(0).toUpperCase()}</Text>
+                      )}
+                    </LiquidGlass>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <Text style={styles.sheetName}>{selectedProfile.name}</Text>
+                      {selectedProfile.isKids && (
+                        <LiquidGlass
+                          glowColor="#ffffff"
+                          tintColor="#1a1a2e"
+                          tintOpacity={0.4}
+                          cornerRadius={8}
+                          glowIntensity={0.3}
+                          borderWidth={1}
+                          style={styles.sheetPillWrap}
+                          animated={false}
+                        >
+                          <Text style={styles.sheetPill}>Kids</Text>
+                        </LiquidGlass>
+                      )}
+                    </View>
                   </View>
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text style={styles.sheetName}>{selectedProfile.name}</Text>
-                    {selectedProfile.isKids && <Text style={styles.sheetPill}>Kids</Text>}
-                  </View>
-                </View>
 
-                {selectedProfile.pin ? (
-                  <View style={styles.pinEntryBlock}>
-                    <Text style={styles.pinEntryLabel}>Enter PIN to unlock</Text>
-                    <TextInput
-                      value={pinEntry}
-                      onChangeText={(text: string) => {
-                        setPinEntry(text.replace(/[^0-9]/g, '').slice(0, 4))
-                        setPinError(null)
-                      }}
-                      placeholder="••••"
-                      placeholderTextColor="rgba(255,255,255,0.3)"
-                      keyboardType="number-pad"
-                      secureTextEntry
-                      maxLength={4}
-                      style={[styles.pinEntryInput, pinEntryFocused && keyboardVisible && styles.pinEntryInputKeyboard]}
-                      onFocus={() => setPinEntryFocused(true)}
-                      onBlur={() => setPinEntryFocused(false)}
-                    />
-                    {pinError ? <Text style={styles.pinEntryError}>{pinError}</Text> : null}
-                  </View>
-                ) : null}
+                  {selectedProfile.pin ? (
+                    <View style={styles.pinEntryBlock}>
+                      <Text style={styles.pinEntryLabel}>Enter PIN to unlock</Text>
+                      <LiquidGlass
+                        glowColor={accentColor}
+                        tintColor="#1a1a2e"
+                        tintOpacity={0.5}
+                        cornerRadius={12}
+                        glowIntensity={0.3}
+                        borderWidth={1}
+                        style={styles.pinEntryInputWrap}
+                        animated={false}
+                      >
+                        <TextInput
+                          value={pinEntry}
+                          onChangeText={(text: string) => {
+                            setPinEntry(text.replace(/[^0-9]/g, '').slice(0, 4))
+                            setPinError(null)
+                          }}
+                          placeholder="••••"
+                          placeholderTextColor="rgba(255,255,255,0.3)"
+                          keyboardType="number-pad"
+                          secureTextEntry
+                          maxLength={4}
+                          style={[styles.pinEntryInput, pinEntryFocused && keyboardVisible && styles.pinEntryInputKeyboard]}
+                          onFocus={() => setPinEntryFocused(true)}
+                          onBlur={() => setPinEntryFocused(false)}
+                        />
+                      </LiquidGlass>
+                      {pinError ? <Text style={styles.pinEntryError}>{pinError}</Text> : null}
+                    </View>
+                  ) : null}
 
-                <View style={styles.sheetActions}>
-                  <TouchableOpacity
-                    style={[styles.sheetButton, styles.sheetButtonDanger]}
-                    onPress={() => {
-                      Alert.alert('Delete profile', `Delete ${selectedProfile.name}?`, [
-                        { text: 'Cancel', style: 'cancel' },
-                        {
-                          text: 'Delete', style: 'destructive', onPress: () => {
-                            handleDeleteProfile(selectedProfile)
-                            Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
-                              setSheetVisible(false)
-                              setSelectedProfile(null)
-                              setPinEntry('')
-                              setPinError(null)
-                            })
+                  <View style={styles.sheetActions}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        Alert.alert('Delete profile', `Delete ${selectedProfile.name}?`, [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete', style: 'destructive', onPress: () => {
+                              handleDeleteProfile(selectedProfile)
+                              Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                                setSheetVisible(false)
+                                setSelectedProfile(null)
+                                setPinEntry('')
+                                setPinError(null)
+                              })
+                            }
                           }
-                        }
-                      ])
-                    }}
-                  >
-                    <Text style={[styles.sheetButtonText, { color: '#fff' }]}>Delete</Text>
-                  </TouchableOpacity>
+                        ])
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <LiquidGlass
+                        glowColor="#e53935"
+                        tintColor="#e53935"
+                        tintOpacity={0.8}
+                        cornerRadius={12}
+                        glowIntensity={0.6}
+                        borderWidth={1.5}
+                        style={styles.sheetButton}
+                        animated={true}
+                      >
+                        <Text style={[styles.sheetButtonText, { color: '#fff' }]}>Delete</Text>
+                      </LiquidGlass>
+                    </TouchableOpacity>
 
-                  <TouchableOpacity
-                    style={[styles.sheetButton, styles.sheetButtonOutline]}
-                    onPress={() => {
-                      // Edit: open create/edit form and close sheet
-                      setEditingProfile(selectedProfile)
-                      setNewProfileName(selectedProfile.name)
-                      setSelectedColor(selectedProfile.avatarColor || palette[0])
-                      setIsKidsProfile(selectedProfile.isKids ?? false)
-                      setProfilePin(selectedProfile.pin ?? '')
-                      setShowCreateCard(true)
-                      Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
-                        setSheetVisible(false)
-                        setSelectedProfile(null)
-                        setPinEntry('')
-                        setPinError(null)
-                      })
-                    }}
-                  >
-                    <Text style={[styles.sheetButtonText, { color: accentColor }]}>Edit</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.sheetButton, { backgroundColor: accentColor }]}
-                    onPress={async () => {
-                      if (selectedProfile.pin) {
-                        if (pinEntry.trim().length === 0) {
-                          setPinError('Enter PIN to continue')
-                          return
-                        }
-                        if (pinEntry !== selectedProfile.pin) {
-                          setPinError('Incorrect PIN')
-                          return
-                        }
-                      }
-
-                      try {
-                        await handleSelectProfile(selectedProfile)
-                      } finally {
+                    <TouchableOpacity
+                      onPress={() => {
+                        setEditingProfile(selectedProfile)
+                        setNewProfileName(selectedProfile.name)
+                        setSelectedColor(selectedProfile.avatarColor || palette[0])
+                        setIsKidsProfile(selectedProfile.isKids ?? false)
+                        setProfilePin(selectedProfile.pin ?? '')
+                        setShowCreateCard(true)
                         Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
                           setSheetVisible(false)
                           setSelectedProfile(null)
                           setPinEntry('')
                           setPinError(null)
                         })
-                      }
-                    }}
-                  >
-                    <Text style={styles.sheetButtonText}>Use profile</Text>
-                  </TouchableOpacity>
-                </View>
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <LiquidGlass
+                        glowColor={accentColor}
+                        tintColor="#1a1a2e"
+                        tintOpacity={0.4}
+                        cornerRadius={12}
+                        glowIntensity={0.4}
+                        borderWidth={1}
+                        style={styles.sheetButton}
+                        animated={false}
+                      >
+                        <Text style={[styles.sheetButtonText, { color: accentColor }]}>Edit</Text>
+                      </LiquidGlass>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={async () => {
+                        if (selectedProfile.pin) {
+                          if (pinEntry.trim().length === 0) {
+                            setPinError('Enter PIN to continue')
+                            return
+                          }
+                          if (pinEntry !== selectedProfile.pin) {
+                            setPinError('Incorrect PIN')
+                            return
+                          }
+                        }
+
+                        try {
+                          await handleSelectProfile(selectedProfile)
+                        } finally {
+                          Animated.timing(sheetTranslateY, { toValue: 1, duration: 180, useNativeDriver: true }).start(() => {
+                            setSheetVisible(false)
+                            setSelectedProfile(null)
+                            setPinEntry('')
+                            setPinError(null)
+                          })
+                        }
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <LiquidGlass
+                        glowColor={accentColor}
+                        tintColor={accentColor}
+                        tintOpacity={0.8}
+                        cornerRadius={12}
+                        glowIntensity={0.7}
+                        borderWidth={1.5}
+                        style={styles.sheetButton}
+                        animated={true}
+                      >
+                        <Text style={styles.sheetButtonText}>Use profile</Text>
+                      </LiquidGlass>
+                    </TouchableOpacity>
+                  </View>
+                </LiquidGlass>
               </Animated.View>
             </>
           )}
@@ -1348,16 +1486,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 20,
     paddingHorizontal: 12,
-    backgroundColor: 'rgba(15,18,30,0.65)',
-    borderRadius: 18,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.08)',
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 16,
-    elevation: 6,
   },
 
   profileCardGlow: {
@@ -1377,13 +1506,10 @@ const styles = StyleSheet.create({
   actionButton: {
     width: 32,
     height: 32,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
   },
 
   avatar: {
@@ -1414,18 +1540,16 @@ const styles = StyleSheet.create({
 
   kidsPillWrap: {
     marginTop: 8,
+    overflow: 'hidden',
   },
 
   kidsPill: {
     paddingHorizontal: 12,
     paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
     color: '#fff',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.8,
-    overflow: 'hidden',
   },
 
   lockOverlay: {
@@ -1435,10 +1559,7 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 7,
-    borderRadius: 999,
-    backgroundColor: 'rgba(229,9,20,0.3)',
-    borderWidth: 1,
-    borderColor: 'rgba(229,9,20,0.6)',
+    overflow: 'hidden',
   },
   lockText: { color: '#fff', fontSize: 12, fontWeight: '800' },
 
@@ -1604,15 +1725,10 @@ const styles = StyleSheet.create({
     right: 12,
     bottom: 24,
     borderRadius: 22,
+    overflow: 'hidden',
+  },
+  sheetGlass: {
     padding: 18,
-    backgroundColor: 'rgba(12,14,28,0.97)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.1)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -10 },
-    shadowOpacity: 0.4,
-    shadowRadius: 24,
-    elevation: 24,
   },
   sheetHandle: {
     width: 52,
@@ -1641,12 +1757,18 @@ const styles = StyleSheet.create({
     textShadowRadius: 4,
   },
   sheetName: { color: '#fff', fontSize: 19, fontWeight: '800' },
-  sheetPill: { marginTop: 6, color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: '600' },
+  sheetPillWrap: {
+    marginTop: 6,
+    alignSelf: 'flex-start',
+    overflow: 'hidden',
+  },
+  sheetPill: { color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: '600' },
   pinEntryBlock: { marginBottom: 12 },
   pinEntryLabel: { color: 'rgba(255,255,255,0.8)', fontWeight: '600', marginBottom: 6 },
+  pinEntryInputWrap: {
+    overflow: 'hidden',
+  },
   pinEntryInput: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 10,
     color: '#fff',
@@ -1671,11 +1793,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)'
+    overflow: 'hidden',
   },
   sheetButtonText: { color: '#fff', fontWeight: '700' },
-  sheetButtonOutline: { backgroundColor: 'transparent', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
-  sheetButtonDanger: { backgroundColor: '#e53935' },
 })
 
 export default SelectProfileScreen

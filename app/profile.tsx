@@ -39,6 +39,7 @@ import ParticleSystem from './components/effects/ParticleSystem';
 
 import ProfileHeader from './components/profile/ProfileHeader';
 import StatsSection from './components/profile/StatsSection';
+import LiquidGlass from './components/LiquidGlass';
 import SubscriptionCard from './components/profile/SubscriptionCard';
 import GlassTiles from './components/profile/GlassTiles';
 import ReferralSection from './components/profile/ReferralSection';
@@ -747,20 +748,42 @@ const ProfileScreen = () => {
                 style={styles.headerGlow}
               />
               <View style={styles.headerBar}>
-                <TouchableOpacity onPress={handleBack} style={styles.iconBtn}>
-                  <Ionicons name="chevron-back" size={22} color="#fff" />
+                <TouchableOpacity onPress={handleBack} activeOpacity={0.85}>
+                  <LiquidGlass
+                    glowColor="#ffffff"
+                    tintColor="#1a1a2e"
+                    tintOpacity={0.4}
+                    cornerRadius={12}
+                    glowIntensity={0.3}
+                    borderWidth={1}
+                    style={styles.iconBtn}
+                    animated={false}
+                  >
+                    <Ionicons name="chevron-back" size={22} color="#fff" />
+                  </LiquidGlass>
                 </TouchableOpacity>
                 <View style={styles.titleRow}>
-                  <Animated.View
-                    style={[
-                      styles.accentDot,
-                      {
-                        backgroundColor: accent,
-                        shadowColor: accent,
-                        shadowOpacity: avatarGlowOpacity,
-                      },
-                    ]}
-                  />
+                  <LiquidGlass
+                    glowColor={accent}
+                    tintColor={accent}
+                    tintOpacity={0.5}
+                    cornerRadius={6}
+                    glowIntensity={0.6}
+                    borderWidth={0}
+                    style={styles.accentDot}
+                    animated={true}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.accentDotInner,
+                        {
+                          backgroundColor: accent,
+                          shadowColor: accent,
+                          shadowOpacity: avatarGlowOpacity,
+                        },
+                      ]}
+                    />
+                  </LiquidGlass>
                   <View>
                     <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
                       Your Space
@@ -772,12 +795,34 @@ const ProfileScreen = () => {
                 </View>
                 <View style={styles.headerIcons}>
                   {isOwnProfile && (
-                    <TouchableOpacity style={styles.iconBtn} onPress={handleSearch}>
-                      <Ionicons name="search" size={20} color="#ffffff" />
+                    <TouchableOpacity onPress={handleSearch} activeOpacity={0.85}>
+                      <LiquidGlass
+                        glowColor="#ffffff"
+                        tintColor="#1a1a2e"
+                        tintOpacity={0.4}
+                        cornerRadius={12}
+                        glowIntensity={0.3}
+                        borderWidth={1}
+                        style={styles.iconBtn}
+                        animated={false}
+                      >
+                        <Ionicons name="search" size={20} color="#ffffff" />
+                      </LiquidGlass>
                     </TouchableOpacity>
                   )}
-                  <TouchableOpacity style={styles.iconBtn} onPress={() => deferNav(() => router.push('/marketplace'))}>
-                    <Ionicons name="storefront" size={20} color="#ffffff" />
+                  <TouchableOpacity onPress={() => deferNav(() => router.push('/marketplace'))} activeOpacity={0.85}>
+                    <LiquidGlass
+                      glowColor="#ffffff"
+                      tintColor="#1a1a2e"
+                      tintOpacity={0.4}
+                      cornerRadius={12}
+                      glowIntensity={0.3}
+                      borderWidth={1}
+                      style={styles.iconBtn}
+                      animated={false}
+                    >
+                      <Ionicons name="storefront" size={20} color="#ffffff" />
+                    </LiquidGlass>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -878,40 +923,113 @@ const ProfileScreen = () => {
             },
           ]}
         >
-          <View style={styles.sheetHandle} />
-          <View style={styles.sheetHeaderRow}>
-            <Image source={{ uri: avatarUri }} style={styles.sheetAvatar} />
-            <View style={{ marginLeft: 12, flex: 1 }}>
-              <Text style={styles.sheetTitle}>{displayedProfileName}</Text>
-              <Text style={styles.sheetSubtitle}>Customize your MovieFlix vibe</Text>
+          <LiquidGlass
+            glowColor={accent}
+            tintColor="#0a0c18"
+            tintOpacity={0.9}
+            cornerRadius={20}
+            glowIntensity={0.6}
+            borderWidth={1.5}
+            style={styles.actionSheetGlass}
+            animated={true}
+          >
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHeaderRow}>
+              <LiquidGlass
+                glowColor={accent}
+                tintColor="#1a1a2e"
+                tintOpacity={0.5}
+                cornerRadius={16}
+                glowIntensity={0.5}
+                borderWidth={2}
+                style={styles.sheetAvatar}
+                animated={true}
+              >
+                <Image source={{ uri: avatarUri }} style={styles.sheetAvatarImage} />
+              </LiquidGlass>
+              <View style={{ marginLeft: 12, flex: 1 }}>
+                <Text style={styles.sheetTitle}>{displayedProfileName}</Text>
+                <Text style={styles.sheetSubtitle}>Customize your MovieFlix vibe</Text>
+              </View>
             </View>
-          </View>
 
-          <TouchableOpacity style={styles.sheetAction} onPress={handleGoToProfileEdit}>
-            <View style={styles.sheetIconCircle}>
-              <Ionicons name="create-outline" size={18} color="#fff" />
-            </View>
-            <View style={styles.sheetActionCopy}>
-              <Text style={styles.sheetActionTitle}>Edit profile details</Text>
-              <Text style={styles.sheetActionSubtitle}>Photo, bio & personalization</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.5)" />
-          </TouchableOpacity>
+            <TouchableOpacity onPress={handleGoToProfileEdit} activeOpacity={0.85}>
+              <LiquidGlass
+                glowColor={accent}
+                tintColor="#1a1a2e"
+                tintOpacity={0.4}
+                cornerRadius={14}
+                glowIntensity={0.3}
+                borderWidth={1}
+                style={styles.sheetAction}
+                animated={false}
+              >
+                <LiquidGlass
+                  glowColor={accent}
+                  tintColor={accent}
+                  tintOpacity={0.25}
+                  cornerRadius={19}
+                  glowIntensity={0.5}
+                  borderWidth={1}
+                  style={styles.sheetIconCircle}
+                  animated={false}
+                >
+                  <Ionicons name="create-outline" size={18} color="#fff" />
+                </LiquidGlass>
+                <View style={styles.sheetActionCopy}>
+                  <Text style={styles.sheetActionTitle}>Edit profile details</Text>
+                  <Text style={styles.sheetActionSubtitle}>Photo, bio & personalization</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.5)" />
+              </LiquidGlass>
+            </TouchableOpacity>
 
-          <TouchableOpacity style={styles.sheetAction} onPress={handleManageProfiles}>
-            <View style={[styles.sheetIconCircle, { backgroundColor: 'rgba(255,255,255,0.08)' }] }>
-              <Ionicons name="people-outline" size={18} color="#fff" />
-            </View>
-            <View style={styles.sheetActionCopy}>
-              <Text style={styles.sheetActionTitle}>Manage profiles</Text>
-              <Text style={styles.sheetActionSubtitle}>Switch, create or lock profiles</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.5)" />
-          </TouchableOpacity>
+            <TouchableOpacity onPress={handleManageProfiles} activeOpacity={0.85}>
+              <LiquidGlass
+                glowColor="#ffffff"
+                tintColor="#1a1a2e"
+                tintOpacity={0.4}
+                cornerRadius={14}
+                glowIntensity={0.3}
+                borderWidth={1}
+                style={styles.sheetAction}
+                animated={false}
+              >
+                <LiquidGlass
+                  glowColor="#ffffff"
+                  tintColor="rgba(255,255,255,0.1)"
+                  tintOpacity={0.5}
+                  cornerRadius={19}
+                  glowIntensity={0.3}
+                  borderWidth={1}
+                  style={styles.sheetIconCircle}
+                  animated={false}
+                >
+                  <Ionicons name="people-outline" size={18} color="#fff" />
+                </LiquidGlass>
+                <View style={styles.sheetActionCopy}>
+                  <Text style={styles.sheetActionTitle}>Manage profiles</Text>
+                  <Text style={styles.sheetActionSubtitle}>Switch, create or lock profiles</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.5)" />
+              </LiquidGlass>
+            </TouchableOpacity>
 
-          <TouchableOpacity style={styles.sheetCancelBtn} onPress={closeActionSheet}>
-            <Text style={styles.sheetCancelText}>Close</Text>
-          </TouchableOpacity>
+            <TouchableOpacity onPress={closeActionSheet} activeOpacity={0.85}>
+              <LiquidGlass
+                glowColor="#ffffff"
+                tintColor="#1a1a2e"
+                tintOpacity={0.3}
+                cornerRadius={14}
+                glowIntensity={0.2}
+                borderWidth={1}
+                style={styles.sheetCancelBtn}
+                animated={false}
+              >
+                <Text style={styles.sheetCancelText}>Close</Text>
+              </LiquidGlass>
+            </TouchableOpacity>
+          </LiquidGlass>
         </Animated.View>
 
         {reviewsSheetVisible && (
@@ -938,16 +1056,37 @@ const ProfileScreen = () => {
             },
           ]}
         >
-          <View style={styles.sheetHandle} />
-          <View style={styles.reviewsSheetHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.sheetTitle}>Your reviews</Text>
-              <Text style={styles.sheetSubtitle}>Scroll through your feed cards with creator-style view counts.</Text>
+          <LiquidGlass
+            glowColor={accent}
+            tintColor="#05060f"
+            tintOpacity={0.95}
+            cornerRadius={28}
+            glowIntensity={0.6}
+            borderWidth={1.5}
+            style={styles.reviewsSheetGlass}
+            animated={true}
+          >
+            <View style={styles.sheetHandle} />
+            <View style={styles.reviewsSheetHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetTitle}>Your reviews</Text>
+                <Text style={styles.sheetSubtitle}>Scroll through your feed cards with creator-style view counts.</Text>
+              </View>
+              <TouchableOpacity onPress={fetchReviewFeed} disabled={reviewFeedLoading} activeOpacity={0.85}>
+                <LiquidGlass
+                  glowColor="#ffffff"
+                  tintColor="#1a1a2e"
+                  tintOpacity={0.4}
+                  cornerRadius={21}
+                  glowIntensity={0.3}
+                  borderWidth={1}
+                  style={styles.refreshBtn}
+                  animated={false}
+                >
+                  <Ionicons name="refresh" size={18} color="#fff" />
+                </LiquidGlass>
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity onPress={fetchReviewFeed} style={styles.refreshBtn} disabled={reviewFeedLoading}>
-              <Ionicons name="refresh" size={18} color="#fff" />
-            </TouchableOpacity>
-          </View>
 
           {reviewFeedLoading ? (
             <View style={styles.reviewsEmptyState}>
@@ -981,6 +1120,7 @@ const ProfileScreen = () => {
               ))}
             </ScrollView>
           )}
+          </LiquidGlass>
         </Animated.View>
       </ScreenWrapper>
     </View>
@@ -1034,6 +1174,10 @@ const styles = StyleSheet.create({
     width: 12,
     height: 12,
     borderRadius: 6,
+    overflow: 'hidden',
+  },
+  accentDotInner: {
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'transparent',
     shadowColor: 'transparent',
     shadowOpacity: 0.6,
@@ -1058,11 +1202,7 @@ const styles = StyleSheet.create({
   },
   iconBtn: {
     marginLeft: 8,
-    borderRadius: 12,
-    padding: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    overflow: 'hidden',
   },
   inner: { flex: 1 },
   sheetBackdrop: {
@@ -1079,14 +1219,10 @@ const styles = StyleSheet.create({
     right: 16,
     bottom: 24,
     borderRadius: 20,
+    overflow: 'hidden',
+  },
+  actionSheetGlass: {
     padding: 18,
-    backgroundColor: 'rgba(5,6,15,0.95)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    shadowColor: '#000',
-    shadowOpacity: 0.35,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
   },
   sheetHandle: {
     width: 48,
@@ -1105,6 +1241,12 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 16,
+    overflow: 'hidden',
+  },
+  sheetAvatarImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 16,
   },
   sheetTitle: {
     color: '#fff',
@@ -1119,21 +1261,18 @@ const styles = StyleSheet.create({
   sheetAction: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
     marginBottom: 10,
     paddingHorizontal: 12,
+    paddingVertical: 12,
+    overflow: 'hidden',
   },
   sheetIconCircle: {
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: 'rgba(229,9,20,0.25)',
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
   sheetActionCopy: {
     flex: 1,
@@ -1153,6 +1292,8 @@ const styles = StyleSheet.create({
     marginTop: 6,
     alignItems: 'center',
     paddingVertical: 12,
+    borderRadius: 14,
+    overflow: 'hidden',
   },
   sheetCancelText: {
     color: 'rgba(255,255,255,0.75)',
@@ -1166,13 +1307,13 @@ const styles = StyleSheet.create({
     bottom: 0,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
+    overflow: 'hidden',
+    maxHeight: '90%',
+  },
+  reviewsSheetGlass: {
     paddingHorizontal: 18,
     paddingBottom: 32,
     paddingTop: 10,
-    backgroundColor: 'rgba(5,6,15,0.98)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    maxHeight: '90%',
   },
   reviewsSheetHeader: {
     flexDirection: 'row',
@@ -1186,9 +1327,7 @@ const styles = StyleSheet.create({
     borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    overflow: 'hidden',
   },
   reviewsEmptyState: {
     alignItems: 'center',
@@ -1262,5 +1401,3 @@ const styles = StyleSheet.create({
     borderRadius: 100,
   },
 });
-
-export default ProfileScreen;

@@ -859,6 +859,8 @@ const FloatingEmoji = memo(({ emoji, x }: { emoji: string; x: number }) => {
   );
 });
 
+FloatingEmoji.displayName = 'FloatingEmoji';
+
 const FaceCam = memo(({ stream, label, isLocal }: { stream: any; label: string; isLocal?: boolean }) => {
   if (!stream) return null;
   return (
@@ -875,6 +877,8 @@ const FaceCam = memo(({ stream, label, isLocal }: { stream: any; label: string; 
     </View>
   );
 });
+
+FaceCam.displayName = 'FaceCam';
 
 const WatchPartyPlayerScreen = () => {
   const router = useRouter();

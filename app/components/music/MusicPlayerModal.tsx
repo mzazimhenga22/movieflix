@@ -179,6 +179,8 @@ const WaveBar = memo(({ anim, color }: { anim: WaveAnim; color: string }) => {
   );
 });
 
+WaveBar.displayName = 'WaveBar';
+
 type PlayerMode = 'video' | 'audio';
 
 interface PlayerState {
@@ -1714,6 +1716,8 @@ const MusicPlayerModal = memo(function MusicPlayerModal({
     </>
   );
 });
+
+MusicPlayerModal.displayName = 'MusicPlayerModal';
 
 export default MusicPlayerModal;
 
