@@ -12,6 +12,11 @@ local/
 *adminsdk*.json
 firebase-adminsdk*.json
 movieflixreactnative-firebase-adminsdk-*.json
+
+# Codemagic CI/CD (not needed for EAS builds)
+codemagic.yaml
+CODEMAGIC_SECRETS.md
+
 # Android build artifacts
 android/.gradle
 android/app/build
