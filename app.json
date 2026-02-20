@@ -103,7 +103,8 @@
           }
         }
       ],
-      "expo-video"
+      "expo-video",
+      "./plugins/patch-kotlin-version.js"
     ],
     "experiments": {
       "typedRoutes": true,
