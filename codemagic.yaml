@@ -7,8 +7,10 @@ workflows:
       node: 20
       groups:
         - expo_credentials
+        - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
+        # All EXPO_PUBLIC_* vars loaded from app_secrets group
     scripts:
       - name: Install dependencies
         script: npm install
@@ -18,6 +20,25 @@ workflows:
         script: |
           git config --global user.email "build@codemagic.io"
           git config --global user.name "Codemagic Build"
+      - name: Decode google-services.json
+        script: echo $GOOGLE_SERVICES_JSON | base64 -d > android/app/google-services.json
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build Android Preview
         script: eas build --platform android --profile preview --non-interactive --no-wait
     artifacts:
@@ -33,6 +54,7 @@ workflows:
       groups:
         - expo_credentials
         - play_store_credentials
+        - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
     scripts:
@@ -44,6 +66,25 @@ workflows:
         script: |
           git config --global user.email "build@codemagic.io"
           git config --global user.name "Codemagic Build"
+      - name: Decode google-services.json
+        script: echo $GOOGLE_SERVICES_JSON | base64 -d > android/app/google-services.json
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build Android Production
         script: eas build --platform android --profile production --non-interactive --no-wait
     artifacts:
@@ -59,6 +100,7 @@ workflows:
       groups:
         - expo_credentials
         - apple_credentials
+        - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
     scripts:
@@ -70,6 +112,23 @@ workflows:
         script: |
           git config --global user.email "build@codemagic.io"
           git config --global user.name "Codemagic Build"
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build iOS Preview
         script: eas build --platform ios --profile preview --non-interactive --no-wait
     artifacts:
@@ -85,6 +144,7 @@ workflows:
       groups:
         - expo_credentials
         - apple_credentials
+        - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
     scripts:
@@ -96,6 +156,23 @@ workflows:
         script: |
           git config --global user.email "build@codemagic.io"
           git config --global user.name "Codemagic Build"
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build iOS Production
         script: eas build --platform ios --profile production --non-interactive --no-wait
     artifacts:
@@ -111,6 +188,7 @@ workflows:
       groups:
         - expo_credentials
         - apple_credentials
+        - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
     scripts:
@@ -122,6 +200,23 @@ workflows:
         script: |
           git config --global user.email "build@codemagic.io"
           git config --global user.name "Codemagic Build"
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build iOS Development
         script: eas build --platform ios --profile development --non-interactive --no-wait
 
@@ -131,11 +226,30 @@ workflows:
     max_build_duration: 30
     environment:
       node: 20
+      groups:
+        - app_secrets
     scripts:
       - name: Install dependencies
         script: npm install
       - name: Install Expo CLI
         script: npm install -g expo-cli
+      - name: Create .env file
+        script: |
+          cat > .env.local << EOF
+          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
+          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
+          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
+          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
+          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
+          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
+          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
+          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
+          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
+          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
+          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
+          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
+          EOF
       - name: Build Web
         script: expo export --platform web
     artifacts:
