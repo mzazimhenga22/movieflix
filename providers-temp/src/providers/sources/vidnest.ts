@@ -1,0 +1,40 @@
+import { makeSourcerer } from '@/providers/base';
+import { MovieScrapeContext, ShowScrapeContext } from '@/utils/context';
+
+const backendUrl = 'https://second.vidnest.fun';
+
+const servers = ['hollymoviehd', 'allmovies'];
+
+async function scrape(ctx: MovieScrapeContext | ShowScrapeContext, type: 'movie' | 'tv') {
+  const embeds = [];
+
+  for (const server of servers) {
+    let url = '';
+    if (type === 'movie') {
+      url = `${backendUrl}/${server}/movie/${ctx.media.tmdbId}`;
+    } else if (ctx.media.type === 'show') {
+      url = `${backendUrl}/${server}/tv/${ctx.media.tmdbId}/${ctx.media.season.number}/${ctx.media.episode.number}`;
+    }
+
+    embeds.push({
+      embedId: `vidnest-${server}`,
+      url,
+    });
+  }
+
+  return {
+    embeds,
+  };
+}
+
+const vidnestScraper = makeSourcerer({
+  id: 'vidnest',
+  name: 'Vidnest',
+  rank: 115,
+  disabled: true, // Backend second.vidnest.fun is down (502)
+  flags: [],
+  scrapeMovie: (ctx: MovieScrapeContext) => scrape(ctx, 'movie'),
+  scrapeShow: (ctx: ShowScrapeContext) => scrape(ctx, 'tv'),
+});
+
+export default vidnestScraper;

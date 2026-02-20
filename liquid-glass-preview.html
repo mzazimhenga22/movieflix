@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MovieFlix Liquid Glass Preview</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #05060f 0%, #0a0f1f 50%, #06060b 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+        }
+
+        .screen-title {
+            font-size: 24px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            text-align: center;
+            color: #fff;
+        }
+
+        .phone-frame {
+            max-width: 375px;
+            margin: 0 auto;
+            background: linear-gradient(180deg, #0a0a1a 0%, #05060f 100%);
+            border-radius: 40px;
+            padding: 20px;
+            border: 8px solid #1a1a2e;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+            min-height: 700px;
+        }
+
+        /* Liquid Glass CSS Approximation */
+        .liquid-glass {
+            position: relative;
+            border-radius: 24px;
+            overflow: hidden;
+            background: rgba(13, 13, 18, 0.65);
+            border: 1.5px solid rgba(229, 9, 20, 0.4);
+            box-shadow:
+                0 8px 32px rgba(0,0,0,0.3),
+                inset 0 1px 0 rgba(255,255,255,0.1),
+                0 0 20px rgba(229, 9, 20, 0.15);
+            animation: glassBreathe 6s ease-in-out infinite;
+        }
+
+        .liquid-glass::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(
+                135deg,
+                rgba(255,255,255,0.1) 0%,
+                rgba(255,255,255,0.05) 40%,
+                rgba(255,255,255,0.02) 60%,
+                rgba(255,255,255,0) 100%
+            );
+            pointer-events: none;
+        }
+
+        .liquid-glass::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 40%;
+            background: linear-gradient(
+                180deg,
+                rgba(255,255,255,0.08) 0%,
+                rgba(255,255,255,0.02) 50%,
+                transparent 100%
+            );
+            pointer-events: none;
+            border-radius: 24px 24px 0 0;
+        }
+
+        /* Shine effect */
+        .liquid-glass-shine {
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                45deg,
+                transparent 40%,
+                rgba(255,255,255,0.03) 45%,
+                rgba(255,255,255,0.08) 50%,
+                rgba(255,255,255,0.03) 55%,
+                transparent 60%
+            );
+            animation: glassShine 8s ease-in-out infinite;
+            pointer-events: none;
+        }
+
+        @keyframes glassBreathe {
+            0%, 100% {
+                box-shadow:
+                    0 8px 32px rgba(0,0,0,0.3),
+                    inset 0 1px 0 rgba(255,255,255,0.1),
+                    0 0 20px rgba(229, 9, 20, 0.15);
+            }
+            50% {
+                box-shadow:
+                    0 12px 40px rgba(0,0,0,0.35),
+                    inset 0 1px 0 rgba(255,255,255,0.12),
+                    0 0 30px rgba(229, 9, 20, 0.25);
+            }
+        }
+
+        @keyframes glassShine {
+            0% { transform: translateX(-100%) translateY(-100%) rotate(45deg); }
+            100% { transform: translateX(100%) translateY(100%) rotate(45deg); }
+        }
+
+        /* Inner content padding */
+        .liquid-glass-content {
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Section-specific styles */
+        .hero-card {
+            margin-bottom: 20px;
+        }
+
+        .hero-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 20px;
+        }
+
+        .hero-title {
+            font-size: 28px;
+            font-weight: 900;
+            margin-bottom: 4px;
+        }
+
+        .hero-subtitle {
+            font-size: 14px;
+            opacity: 0.7;
+        }
+
+        .shuffle-btn {
+            background: linear-gradient(135deg, #e50914, #7C3AED);
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .stats-row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 16px;
+        }
+
+        .stat-item {
+            flex: 1;
+            text-align: center;
+        }
+
+        .stat-icon {
+            width: 24px;
+            height: 24px;
+            background: rgba(229, 9, 20, 0.2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 4px;
+            font-size: 12px;
+        }
+
+        .stat-value {
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            opacity: 0.5;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .primary-btn {
+            flex: 1;
+            background: linear-gradient(135deg, #fff, #f0f0f0);
+            color: #000;
+            padding: 12px;
+            border-radius: 12px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .ghost-btn {
+            width: 44px;
+            height: 44px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Section Cards */
+        .section-card {
+            margin-bottom: 16px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+
+        /* Search Bar */
+        .search-bar {
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+
+        .search-inner {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #fff;
+            font-size: 16px;
+            outline: none;
+        }
+
+        .search-input::placeholder {
+            color: rgba(255,255,255,0.4);
+        }
+
+        /* Tabs */
+        .tabs-container {
+            display: flex;
+            position: relative;
+            padding: 4px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            flex: 1;
+            text-align: center;
+            padding: 10px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            opacity: 0.5;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            opacity: 1;
+            background: rgba(229, 9, 20, 0.2);
+        }
+
+        /* Filter Chips */
+        .filters-scroll {
+            display: flex;
+            gap: 10px;
+            padding: 16px 0;
+            overflow-x: auto;
+        }
+
+        .filter-chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 700;
+            color: rgba(255,255,255,0.7);
+            white-space: nowrap;
+        }
+
+        .filter-chip.active {
+            background: linear-gradient(135deg, #e50914, #ff4d4d);
+            border-color: transparent;
+            color: #fff;
+        }
+
+        /* Music Player Mini */
+        .mini-player {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 355px;
+            padding: 12px;
+        }
+
+        .mini-content {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .album-art {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, #1a1a2e, #0a0a0a);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .track-info {
+            flex: 1;
+        }
+
+        .track-title {
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+
+        .track-artist {
+            font-size: 11px;
+            opacity: 0.6;
+        }
+
+        .control-btn {
+            width: 32px;
+            height: 32px;
+            background: rgba(229, 9, 20, 0.2);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        /* Rail */
+        .rail-scroll {
+            display: flex;
+            gap: 12px;
+            overflow-x: auto;
+            padding-bottom: 10px;
+            margin-top: 14px;
+        }
+
+        .song-card {
+            width: 120px;
+            flex-shrink: 0;
+        }
+
+        .song-thumb {
+            width: 120px;
+            height: 180px;
+            background: linear-gradient(135deg, #1a1a2e, #0a0a0a);
+            border-radius: 12px;
+            margin-bottom: 8px;
+        }
+
+        .song-title {
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Genre Orbs */
+        .genre-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 10px;
+        }
+
+        .genre-orb {
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(229,9,20,0.3), rgba(124,58,237,0.3));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            text-align: center;
+            border: 1px solid rgba(229,9,20,0.3);
+        }
+
+        /* Tab Switcher */
+        .tab-switcher {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab-btn {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.5);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .tab-btn.active {
+            background: rgba(229,9,20,0.2);
+            border-color: rgba(229,9,20,0.4);
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <h1 class="screen-title">Liquid Glass Preview - Categories Screen</h1>
+    
+    <div class="phone-frame">
+        <!-- Hero Card with Liquid Glass -->
+        <div class="liquid-glass hero-card">
+            <div class="liquid-glass-shine"></div>
+            <div class="liquid-glass-content">
+                <div class="hero-header">
+                    <div>
+                        <div style="font-size: 12px; opacity: 0.8; margin-bottom: 4px;">🌌 Your cinema atlas</div>
+                        <div class="hero-title">Categories</div>
+                        <div class="hero-subtitle">Dive into curated realms & vibes</div>
+                    </div>
+                    <div class="shuffle-btn">🔀 Shuffle</div>
+                </div>
+
+                <div class="stats-row">
+                    <div class="stat-item">
+                        <div class="stat-icon">⊞</div>
+                        <div class="stat-value">20+</div>
+                        <div class="stat-label">Genres</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-icon">★</div>
+                        <div class="stat-value">3</div>
+                        <div class="stat-label">Spotlights</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-icon">🎬</div>
+                        <div class="stat-value">—</div>
+                        <div class="stat-label">Picks</div>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <div class="primary-btn">View spotlight →</div>
+                    <div class="ghost-btn">↻</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mood Filters with Liquid Glass -->
+        <div class="liquid-glass section-card">
+            <div class="liquid-glass-shine"></div>
+            <div class="liquid-glass-content" style="padding: 16px 20px;">
+                <div class="section-header">
+                    <span>🎨</span>
+                    <span class="section-title">Mood Filters</span>
+                </div>
+                <div class="filters-scroll">
+                    <div class="filter-chip active">🌙 Comfort</div>
+                    <div class="filter-chip">⚡ Adrenaline</div>
+                    <div class="filter-chip">🔮 Mystic</div>
+                    <div class="filter-chip">💕 Romance</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Spotlight with Liquid Glass -->
+        <div class="liquid-glass section-card">
+            <div class="liquid-glass-shine"></div>
+            <div class="liquid-glass-content" style="padding: 16px 20px;">
+                <div class="section-header" style="justify-content: space-between;">
+                    <div style="display: flex; gap: 8px;">
+                        <span>✨</span>
+                        <span class="section-title">Spotlight Collections</span>
+                    </div>
+                    <span style="color: #e50914; font-size: 13px; font-weight: 600;">See all</span>
+                </div>
+                <div class="rail-scroll">
+                    <div class="song-card">
+                        <div class="song-thumb"></div>
+                        <div class="song-title">Featured</div>
+                    </div>
+                    <div class="song-card">
+                        <div class="song-thumb"></div>
+                        <div class="song-title">New Releases</div>
+                    </div>
+                    <div class="song-card">
+                        <div class="song-thumb"></div>
+                        <div class="song-title">Trending</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Genre Universe with Liquid Glass -->
+        <div class="liquid-glass section-card">
+            <div class="liquid-glass-shine"></div>
+            <div class="liquid-glass-content" style="padding: 16px 20px;">
+                <div class="section-header">
+                    <span>🪐</span>
+                    <span class="section-title">Genre Universe</span>
+                </div>
+                <div class="genre-grid">
+                    <div class="genre-orb">Action</div>
+                    <div class="genre-orb">Comedy</div>
+                    <div class="genre-orb">Drama</div>
+                    <div class="genre-orb">Horror</div>
+                    <div class="genre-orb">Sci-Fi</div>
+                    <div class="genre-orb">Romance</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mini Player -->
+        <div class="liquid-glass mini-player">
+            <div class="liquid-glass-shine"></div>
+            <div class="mini-content">
+                <div class="album-art">🎵</div>
+                <div class="track-info">
+                    <div class="track-title">Dune: Part Two</div>
+                    <div class="track-artist">Soundtrack</div>
+                </div>
+                <div class="control-btn">⏸</div>
+                <div class="control-btn" style="background: rgba(255,255,255,0.1);">✕</div>
+            </div>
+        </div>
+    </div>
+
+    <br><br>
+    <h1 class="screen-title">Search Screen</h1>
+    
+    <div class="phone-frame">
+        <!-- Search Bar with Liquid Glass -->
+        <div class="liquid-glass search-bar" style="margin-top: 40px;">
+            <div class="liquid-glass-shine"></div>
+            <div class="search-inner">
+                <span>🔍</span>
+                <input type="text" class="search-input" placeholder="Search movies, TV shows, actors...">
+                <span style="background: rgba(255,255,255,0.2); width: 20px; height: 20px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 12px;">✕</span>
+            </div>
+        </div>
+
+        <!-- Tabs with Liquid Glass -->
+        <div class="liquid-glass tabs-container">
+            <div class="liquid-glass-shine"></div>
+            <div style="display: flex; width: 100%; position: relative; z-index: 1;">
+                <div class="tab active">🎬 Movies</div>
+                <div class="tab">🎵 Music</div>
+                <div class="tab">👥 Social</div>
+                <div class="tab">💬 Messages</div>
+            </div>
+        </div>
+
+        <!-- Social Card with Liquid Glass -->
+        <div class="liquid-glass" style="margin-bottom: 12px;">
+            <div class="liquid-glass-shine"></div>
+            <div class="mini-content">
+                <div class="album-art" style="background: #e50914;">📷</div>
+                <div class="track-info">
+                    <div class="track-title">New Story</div>
+                    <div class="track-artist">story</div>
+                </div>
+                <span>›</span>
+            </div>
+        </div>
+    </div>
+
+    <br><br>
+    <h1 class="screen-title">Music Screen</h1>
+    
+    <div class="phone-frame">
+        <div style="padding-top: 40px;">
+            <!-- Filter Chips -->
+            <div class="filters-scroll">
+                <div class="filter-chip active">🎵 All</div>
+                <div class="filter-chip">📈 Trending</div>
+                <div class="filter-chip">⚡ Action</div>
+                <div class="filter-chip">💕 Romance</div>
+                <div class="filter-chip">🎨 Animation</div>
+            </div>
+
+            <!-- Trending Rail with Liquid Glass -->
+            <div class="liquid-glass" style="margin-bottom: 20px;">
+                <div class="liquid-glass-shine"></div>
+                <div style="padding: 16px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 14px;">
+                        <span class="section-title">Trending Now</span>
+                        <span style="color: #e50914; font-size: 13px; font-weight: 600;">See All</span>
+                    </div>
+                    <div class="rail-scroll">
+                        <div class="song-card">
+                            <div class="song-thumb"></div>
+                            <div class="song-title">Movie 1</div>
+                        </div>
+                        <div class="song-card">
+                            <div class="song-thumb"></div>
+                            <div class="song-title">Movie 2</div>
+                        </div>
+                        <div class="song-card">
+                            <div class="song-thumb"></div>
+                            <div class="song-title">Movie 3</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top Tracks with Liquid Glass -->
+            <div class="liquid-glass">
+                <div class="liquid-glass-shine"></div>
+                <div style="padding: 16px;">
+                    <div class="section-title" style="margin-bottom: 14px;">Top Tracks</div>
+                    <div style="display: flex; flex-direction: column; gap: 12px;">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 50px; height: 50px; background: linear-gradient(135deg, #1a1a2e, #0a0a0a); border-radius: 8px;"></div>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600; font-size: 14px;">Track Title</div>
+                                <div style="font-size: 12px; opacity: 0.6;">Artist Name</div>
+                            </div>
+                            <span>▶</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 50px; height: 50px; background: linear-gradient(135deg, #1a1a2e, #0a0a0a); border-radius: 8px;"></div>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600; font-size: 14px;">Another Track</div>
+                                <div style="font-size: 12px; opacity: 0.6;">Another Artist</div>
+                            </div>
+                            <span>▶</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div style="text-align: center; margin-top: 40px; padding: 20px; color: rgba(255,255,255,0.5); font-size: 14px;">
+        <p><strong>Note:</strong> This is a CSS approximation. The native Android LiquidGlass uses:</p>
+        <ul style="list-style: none; margin-top: 10px; line-height: 1.8;">
+            <li>✨ Animated glow with spring physics</li>
+            <li>🎨 Touch-responsive morphing</li>
+            <li>🔮 Chromatic refraction effects</li>
+            <li>💫 Multi-layer shadow composition</li>
+            <li>♿ Accessibility-aware (reduced motion)</li>
+        </ul>
+        <p style="margin-top: 20px;">Build the app to see the full native effect!</p>
+    </div>
+</body>
+</html>

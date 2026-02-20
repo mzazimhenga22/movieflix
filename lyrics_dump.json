@@ -1,0 +1,99 @@
+{
+  "responseContext": {
+    "visitorData": "CgtPQXkwQ1hYU1p0YyjK3LjLBjIKCgJLRRIEGgAgMw%3D%3D",
+    "serviceTrackingParams": [
+      {
+        "service": "GFEEDBACK",
+        "params": [
+          {
+            "key": "has_unlimited_entitlement",
+            "value": "False"
+          },
+          {
+            "key": "browse_id",
+            "value": "MPLYt_p4xqaimeUsk-1"
+          },
+          {
+            "key": "browse_id_prefix",
+            "value": ""
+          },
+          {
+            "key": "logged_in",
+            "value": "0"
+          }
+        ]
+      },
+      {
+        "service": "CSI",
+        "params": [
+          {
+            "key": "c",
+            "value": "WEB_REMIX"
+          },
+          {
+            "key": "cver",
+            "value": "1.20240101.01.00"
+          },
+          {
+            "key": "yt_li",
+            "value": "0"
+          },
+          {
+            "key": "GetBrowseTrackLyricsPage_rid",
+            "value": "0x2d299b6ae3fc5af2"
+          }
+        ]
+      },
+      {
+        "service": "ECATCHER",
+        "params": [
+          {
+            "key": "client.version",
+            "value": "1.20000101"
+          },
+          {
+            "key": "client.name",
+            "value": "WEB_REMIX"
+          }
+        ]
+      }
+    ]
+  },
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicDescriptionShelfRenderer": {
+            "description": {
+              "runs": [
+                {
+                  "text": "I was a ghost, I was alone\r\n어두워진 앞길 속에 (ha-ah-ah)\r\nGiven the throne, I didn't know how to believe\r\nI was the queen that I'm meant to be\r\nI lived two lives, tried to play both sides\r\nBut I couldn't find my own place\r\nCalled a problem child 'cause I got too wild\r\nBut now that's how I'm getting paid 끝없이 on stage\r\n\r\nI'm done hidin', now I'm shinin' like I'm born to be\r\nWe dreamin' hard, we came so far, now I believe\r\n\r\nWe're goin' up, up, up, it's our moment\r\nYou know together we're glowin'\r\nGonna be, gonna be golden\r\nOh-oh-oh, up, up, up with our voices\r\n영원히 깨질 수 없는\r\nGonna be, gonna be golden\r\n\r\nOh-oh-oh, I'm done hidin', now I'm shinin' like I'm born to be\r\nOh, our time, no fears, no lies\r\nThat's who we're born to be\r\n\r\nWaited so long to break these walls down\r\nTo wake up and feel like me\r\nPut these patterns all in the past now\r\nAnd finally live like the girl they all see\r\n\r\nNo more hiding, I'll be shinin' like I'm born to be\r\n'Cause we are hunters, voices strong, and I know I believe\r\n\r\nWe're goin' up, up, up, it's our moment\r\nYou know together we're glowin'\r\nGonna be, gonna be golden\r\nOh-oh-oh, up, up, up with our voices\r\n영원히 깨질 수 없는\r\nGonna be, gonna be golden\r\n\r\nOh-oh-oh, I'm done hidin', now I'm shinin' like I'm born to be\r\nOh, our time, no fears, no lies\r\nThat's who we're born to be\r\n\r\nYou know we're gonna be, gonna be golden\r\nWe're gonna be, gonna be\r\nBorn to be, born to be glowin'\r\n밝게 빛나는 우린\r\nYou know that it's our time, no fears, no lies\r\nThat's who we're born to be"
+                }
+              ]
+            },
+            "trackingParams": "CAIQ2fQEGAAiEwjos-jO15eSAxWRUUECHeUNIW0=",
+            "maxCollapsedLines": 0,
+            "maxExpandedLines": 0,
+            "onShowCommands": [
+              {
+                "clickTrackingParams": "CAIQ2fQEGAAiEwjos-jO15eSAxWRUUECHeUNIW3KAQRzBwhr",
+                "logLyricEventCommand": {
+                  "serializedLyricInfo": "CgwwMDItMTc3NjExMDgSD3RfcDR4cWFpbWVVc2stMRgBIgwwMDItMTc3NjExMDg="
+                }
+              }
+            ],
+            "footer": {
+              "runs": [
+                {
+                  "text": "Source: LyricFind"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "trackingParams": "CAEQui8iEwjos-jO15eSAxWRUUECHeUNIW0="
+    }
+  },
+  "trackingParams": "CAAQhGciEwjos-jO15eSAxWRUUECHeUNIW0="
+}

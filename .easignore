@@ -1,0 +1,17 @@
+node_modules/
+**/node_modules/
+.git/
+.expo/
+
+# Local env/secrets
+.env.*
+!.env.local
+local/
+
+# Firebase Admin SDK service account keys
+*adminsdk*.json
+firebase-adminsdk*.json
+movieflixreactnative-firebase-adminsdk-*.json
+# Android build artifacts
+android/.gradle
+android/app/build

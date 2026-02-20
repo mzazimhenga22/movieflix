@@ -1,0 +1,849 @@
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { useCallback, useState } from 'react';
+import { firestore } from '../../constants/firebase';
+import type {
+  ProviderControls,
+  Qualities,
+  RunOutput,
+  ScrapeMedia,
+  Stream,
+} from '../../providers-temp/lib/index.js';
+import {
+  makeProviders,
+  makeStandardFetcher,
+  setM3U8ProxyUrl,
+  targets,
+  ytMusic
+} from '../../providers-temp/lib/index.js';
+import { DirectYtResolver } from './DirectYtResolver';
+
+/* ───────── TYPES ───────── */
+
+export type PStreamPlayback = {
+  uri: string;
+  headers?: Record<string, string>;
+  stream: Stream;
+  sourceId: string;
+  embedId?: string;
+};
+
+export type PStreamScrapeOptions = {
+  sourceOrder?: string[];
+  debugTag?: string;
+};
+
+type Embed = {
+  id: string;
+  embedScraperId: string;
+};
+
+type RunOutputWithEmbeds = RunOutput & { embeds?: Embed[] };
+
+type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
+/* ───────── FETCHER ───────── */
+
+const fetchLike: FetchLike = async (url, init) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://www.google.com/',
+        ...(init?.headers as Record<string, string>),
+      },
+    });
+    clearTimeout(timeout);
+    return res;
+  } catch (e) {
+    clearTimeout(timeout);
+    throw e;
+  }
+};
+
+const sharedFetcher = makeStandardFetcher(fetchLike as any);
+
+/* ───────── PROVIDERS ───────── */
+
+let cachedProviders: ProviderControls | null = null;
+let proxyConfigured = false;
+
+function ensureProxyConfigured() {
+  if (proxyConfigured || typeof setM3U8ProxyUrl !== 'function') return;
+
+  const envProxy = (
+    (typeof process !== 'undefined' && (process.env as any)?.EXPO_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
+    (typeof process !== 'undefined' && (process.env as any)?.NEXT_PUBLIC_PSTREAM_M3U8_PROXY_URL) ||
+    (typeof process !== 'undefined' && (process.env as any)?.PSTREAM_M3U8_PROXY_URL)
+  ) as string | undefined;
+
+  const normalizedProxy = envProxy?.trim();
+  if (normalizedProxy) {
+    setM3U8ProxyUrl(normalizedProxy);
+    proxyConfigured = true;
+    return;
+  }
+
+  const maybeWindow = typeof globalThis !== 'undefined' ? (globalThis as any).window : undefined;
+  const origin = maybeWindow?.location?.origin;
+  if (origin) {
+    try {
+      setM3U8ProxyUrl(`${origin}/api/proxy`);
+      proxyConfigured = true;
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function getProviders(): ProviderControls {
+  if (!cachedProviders) {
+    ensureProxyConfigured();
+    cachedProviders = makeProviders({
+      fetcher: sharedFetcher,
+      proxiedFetcher: sharedFetcher,
+      target: targets.NATIVE,
+      consistentIpForRequests: true,
+      proxyStreams: false,
+      externalSources: 'all',
+    });
+  }
+  return cachedProviders;
+}
+
+/* ───────── LAST-KNOWN PROVIDERS ───────── */
+
+type LastKnownProvider = {
+  sourceId?: string;
+  embedId?: string | null;
+  updatedAt?: number;
+  type?: string;
+};
+
+const LAST_KNOWN_COLLECTION = 'pstreamLastKnown';
+
+const MEMORY_CACHE_TTL_MS = 2 * 60 * 1000;
+const playbackMemoryCache = new Map<string, { playback: PStreamPlayback; storedAt: number }>();
+const inflightScrapes = new Map<string, Promise<PStreamPlayback>>();
+const lastKnownMemoryCache = new Map<string, { value: LastKnownProvider; storedAt: number }>();
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('timeout')), ms);
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+  });
+}
+
+function normalizeKeySegment(value: string | number | undefined | null) {
+  if (value === undefined || value === null) return 'na';
+  return String(value).replace(/[^a-zA-Z0-9-_:.]/g, '_');
+}
+
+function buildMediaKey(media: ScrapeMedia): string {
+  if (!media) return 'unknown';
+  if ((media as any).type === 'show') {
+    const base = [
+      'show',
+      normalizeKeySegment((media as any)?.tmdbId ?? (media as any)?.imdbId ?? media.title ?? 'untitled'),
+      `s${normalizeKeySegment((media as any)?.season?.number ?? '0')}`,
+      `e${normalizeKeySegment((media as any)?.episode?.number ?? '0')}`,
+    ];
+    return base.join('-');
+  }
+  const base = [
+    (media as any)?.type ?? 'movie',
+    normalizeKeySegment((media as any)?.tmdbId ?? (media as any)?.imdbId ?? media.title ?? 'untitled'),
+  ];
+  return base.join('-');
+}
+
+async function fetchLastKnownProvider(media: ScrapeMedia): Promise<LastKnownProvider | null> {
+  const key = buildMediaKey(media);
+  const cached = lastKnownMemoryCache.get(key);
+  if (cached && Date.now() - cached.storedAt < MEMORY_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  try {
+    const ref = doc(firestore, LAST_KNOWN_COLLECTION, key);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const data = snap.data() as LastKnownProvider;
+    lastKnownMemoryCache.set(key, { value: data, storedAt: Date.now() });
+    return data;
+  } catch (err) {
+    console.warn('[PStream] Last-known lookup failed', err);
+    return null;
+  }
+}
+
+function persistLastKnownProvider(media: ScrapeMedia, playback: PStreamPlayback) {
+  try {
+    const key = buildMediaKey(media);
+    lastKnownMemoryCache.set(
+      key,
+      {
+        value: {
+          sourceId: playback.sourceId,
+          embedId: playback.embedId ?? null,
+          updatedAt: Date.now(),
+          type: (media as any)?.type ?? 'unknown',
+        },
+        storedAt: Date.now(),
+      },
+    );
+
+    const ref = doc(firestore, LAST_KNOWN_COLLECTION, key);
+    void setDoc(
+      ref,
+      {
+        sourceId: playback.sourceId,
+        embedId: playback.embedId ?? null,
+        updatedAt: Date.now(),
+        type: (media as any)?.type ?? 'unknown',
+      },
+      { merge: true },
+    );
+  } catch (err) {
+    console.warn('[PStream] Failed to persist last-known provider', err);
+  }
+}
+
+function reorderWithPreference(order: string[], preferred?: string | null): string[] {
+  if (!preferred) return order;
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  const normalizedPreferred = preferred.trim();
+
+  const push = (id: string) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    deduped.push(id);
+  };
+
+  push(normalizedPreferred);
+  order.forEach((id) => {
+    if (id === normalizedPreferred) return;
+    push(id);
+  });
+  return deduped;
+}
+
+function prioritizeEmbeds(embeds: Embed[], preferred?: string | null): Embed[] {
+  if (!preferred) return embeds;
+  const normalized = preferred.trim().toLowerCase();
+  const prioritized: Embed[] = [];
+  const others: Embed[] = [];
+  embeds.forEach((embed) => {
+    if (embed.embedScraperId?.toLowerCase() === normalized) prioritized.push(embed);
+    else others.push(embed);
+  });
+  return [...prioritized, ...others];
+}
+
+/* ───────── STREAM HELPERS ───────── */
+
+const QUALITY_ORDER: Qualities[] = ['4k', '1080', '720', '480', '360', 'unknown'];
+
+function sanitizeStreamHeaders(incoming?: Record<string, string>) {
+  if (!incoming) return undefined;
+  const out: Record<string, string> = {};
+
+  for (const [rawKey, rawValue] of Object.entries(incoming)) {
+    if (!rawKey) continue;
+    if (rawValue === undefined || rawValue === null) continue;
+    const value = String(rawValue);
+    if (!value) continue;
+    const lower = rawKey.trim().toLowerCase();
+    if (!lower) continue;
+
+    // Avoid pinning Host; native players/CDN redirects may require Host to change.
+    if (lower === 'host' || lower === 'content-length') continue;
+
+    switch (lower) {
+      case 'user-agent':
+        out['User-Agent'] = value;
+        break;
+      case 'referer':
+        out.Referer = value;
+        break;
+      case 'origin':
+        out.Origin = value;
+        break;
+      default:
+        out[rawKey] = value;
+        break;
+    }
+  }
+
+  return Object.keys(out).length ? out : undefined;
+}
+
+function mergeHeaders(stream: Stream) {
+  const merged = { ...(stream.headers ?? {}), ...(stream.preferredHeaders ?? {}) };
+  return sanitizeStreamHeaders(merged);
+}
+
+function pickFileQuality(stream: Stream): string | null {
+  if (stream.type !== 'file') return null;
+  for (const q of QUALITY_ORDER) {
+    const f = stream.qualities?.[q];
+    if (f?.url) return f.url;
+  }
+  return Object.values(stream.qualities ?? {}).find(v => v?.url)?.url ?? null;
+}
+
+function normalizeBase64(input: string): string {
+  const raw = String(input || '').trim();
+  if (!raw) return raw;
+  let normalized = raw.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = normalized.length % 4;
+  if (pad) normalized += '='.repeat(4 - pad);
+  return normalized;
+}
+
+function tryDecodeBase64ToUtf8(input: string): string | null {
+  try {
+    return Buffer.from(normalizeBase64(input), 'base64').toString('utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function tryUnproxyM3U8ProxyUrl(
+  uri: string,
+  headers: Record<string, string> | undefined,
+): { uri: string; headers: Record<string, string> | undefined } {
+  try {
+    const urlObj = new URL(uri);
+    if (!urlObj.pathname.includes('m3u8-proxy')) return { uri, headers };
+
+    const encodedUrl = urlObj.searchParams.get('url');
+    if (!encodedUrl) return { uri, headers };
+
+    const decodedUrl = tryDecodeBase64ToUtf8(decodeURIComponent(encodedUrl));
+    if (!decodedUrl || !/^https?:/i.test(decodedUrl)) return { uri, headers };
+
+    let mergedHeaders = headers;
+    const encodedHeaders = urlObj.searchParams.get('h');
+    if (encodedHeaders) {
+      const decodedHeadersRaw = tryDecodeBase64ToUtf8(decodeURIComponent(encodedHeaders));
+      if (decodedHeadersRaw) {
+        try {
+          const parsed = JSON.parse(decodedHeadersRaw);
+          if (parsed && typeof parsed === 'object') {
+            mergedHeaders = { ...(parsed as Record<string, string>), ...(headers ?? {}) };
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    return { uri: decodedUrl, headers: mergedHeaders };
+  } catch {
+    return { uri, headers };
+  }
+}
+
+async function validatePlayback(playback: PStreamPlayback): Promise<boolean> {
+  const uri = playback?.uri;
+  if (!uri) return false;
+  const headers = (playback.headers ?? {}) as Record<string, string>;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5500);
+  try {
+    const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
+    if (isHls) {
+      // Try a small ranged fetch first (faster on some CDNs), fall back to full manifest.
+      try {
+        const res = await fetch(uri, {
+          headers: { ...headers, Range: 'bytes=0-2047' },
+          signal: controller.signal,
+        });
+        if (!res.ok) return false;
+        const text = await res.text();
+        return text.includes('#EXTM3U');
+      } catch {
+        const res = await fetch(uri, { headers, signal: controller.signal });
+        if (!res.ok) return false;
+        const text = await res.text();
+        return text.includes('#EXTM3U');
+      }
+    }
+
+    // Prefer HEAD, fall back to a small ranged GET.
+    try {
+      const head = await fetch(uri, { method: 'HEAD', headers, signal: controller.signal });
+      if (head.ok) return true;
+    } catch {
+      // ignore
+    }
+    const ranged = await fetch(uri, {
+      headers: { ...headers, Range: 'bytes=0-1023' },
+      signal: controller.signal,
+    });
+    return ranged.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildPlayback(stream: Stream, sourceId: string, embedId?: string): PStreamPlayback {
+  let uri: string | null = null;
+  let headers = mergeHeaders(stream);
+
+  if (stream.type === 'hls') {
+    uri = stream.playlist;
+  } else if (stream.type === 'file') {
+    uri = pickFileQuality(stream);
+
+    // Native playback should prefer direct URLs (some hosts block datacenter IPs used by proxies).
+    if (uri) {
+      ({ uri, headers } = tryUnproxyM3U8ProxyUrl(uri, headers));
+    }
+  }
+
+  if (!uri) throw new Error('No playable stream');
+
+  return { uri, headers, stream, sourceId, embedId };
+}
+
+/* ───────── LANGUAGE PRIORITY ───────── */
+
+function isEnglish(embedId?: string) {
+  const id = embedId?.toLowerCase() ?? '';
+  return id.includes('english') || id.includes('eng') || id.includes('en');
+}
+
+function orderEmbedsEnglishFirst(embeds: Embed[]): Embed[] {
+  const english: Embed[] = [];
+  const rest: Embed[] = [];
+  for (const e of embeds) (isEnglish(e.embedScraperId) ? english : rest).push(e);
+  return [...english, ...rest];
+}
+
+/* ───────── FALLBACK SOURCES ───────── */
+
+const FALLBACK_SOURCES = ['cuevana3', 'ridomovies', 'hdrezka', 'warezcdn'];
+const SOURCE_CONCURRENCY = 3;
+const EMBED_CONCURRENCY = 3;
+
+async function runWithSlidingWindow<T>(
+  items: T[],
+  limit: number,
+  runner: (item: T) => Promise<PStreamPlayback | null>,
+  onResolved?: () => void,
+): Promise<PStreamPlayback | null> {
+  if (!items.length) return null;
+
+  return new Promise((resolve) => {
+    let nextIndex = 0;
+    let active = 0;
+    let resolved = false;
+
+    const maybeLaunchNext = () => {
+      if (resolved) return;
+      if (nextIndex >= items.length) {
+        if (active === 0) resolve(null);
+        return;
+      }
+      const current = items[nextIndex];
+      nextIndex += 1;
+      active += 1;
+      runner(current)
+        .then((result) => {
+          active -= 1;
+          if (resolved) return;
+          if (result) {
+            resolved = true;
+            onResolved?.();
+            resolve(result);
+            return;
+          }
+          maybeLaunchNext();
+          if (nextIndex >= items.length && active === 0) resolve(null);
+        })
+        .catch(() => {
+          active -= 1;
+          if (resolved) return;
+          maybeLaunchNext();
+          if (nextIndex >= items.length && active === 0) resolve(null);
+        });
+    };
+
+    const initial = Math.min(limit, items.length);
+    for (let i = 0; i < initial; i += 1) {
+      maybeLaunchNext();
+    }
+  });
+}
+
+/* ───────── HOOK ───────── */
+
+export type MusicSearchSeed = {
+  artist?: string;
+  genre?: string;
+};
+
+type MusicSeedFilter = MusicSearchSeed | undefined;
+
+function filterRelatedBySeed(related: any[], seed?: MusicSeedFilter) {
+  if (!seed?.artist && !seed?.genre) return related;
+  const artistLower = seed?.artist?.toLowerCase() ?? '';
+  const genreLower = seed?.genre?.toLowerCase() ?? '';
+  const filtered = related.filter((item) => {
+    const itemArtist = (item?.artist || item?.uploaderName || '').toLowerCase();
+    const title = (item?.title || '').toLowerCase();
+    const artistMatch = artistLower ? itemArtist.includes(artistLower) : false;
+    const genreMatch = genreLower ? title.includes(genreLower) : false;
+    return artistMatch || genreMatch;
+  });
+  return filtered.length ? filtered : related;
+}
+
+export function usePStream() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<PStreamPlayback | null>(null);
+
+  const scrape = useCallback(async (media: ScrapeMedia, options?: PStreamScrapeOptions) => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const playback = await scrapePStream(media, options);
+      setResult(playback);
+      return playback;
+    } catch (e: any) {
+      setError(e?.message ?? 'Stream error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const searchMusic = useCallback(async (query: string, seed?: MusicSearchSeed) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const seedParts = [seed?.artist, seed?.genre].filter(Boolean).join(' ');
+      const refinedQuery = seedParts ? `${query} ${seedParts}` : query;
+      console.log('[PStream] Searching music:', refinedQuery);
+      const songs = await scrapeMusic(refinedQuery);
+      console.log(`[PStream] Found ${songs.length} songs`);
+      return songs;
+    } catch (e: any) {
+      console.error('[PStream] Music search error:', e);
+      setError(e?.message ?? 'Music error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getMusicStream = useCallback(async (
+    videoId: string,
+    type: 'audio' | 'video' = 'video',
+    download: boolean = false,
+    seed?: MusicSearchSeed,
+  ) => {
+    setLoading(true);
+    setError(null);
+
+    // Fetch dynamic instances from official Piped API
+    const fetchDynamicInstances = async (): Promise<string[]> => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch('https://piped-instances.kavin.rocks/', {
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json' },
+        });
+        clearTimeout(timeout);
+        if (!res.ok) return [];
+        const instances = await res.json();
+        return instances
+          .filter((i: any) => i.api_url && (i.uptime_24h === undefined || i.uptime_24h >= 80))
+          .sort((a: any, b: any) => (b.uptime_24h || 100) - (a.uptime_24h || 100))
+          .map((i: any) => i.api_url)
+          .slice(0, 8);
+      } catch {
+        return [];
+      }
+    };
+
+    // Static fallback instances
+    const STATIC_INSTANCES = [
+      'https://api.piped.private.coffee',
+      'https://pipedapi.kavin.rocks',
+      'https://pipedapi-libre.kavin.rocks',
+      'https://pipedapi.leptons.xyz',
+      'https://pipedapi.nosebs.ru',
+    ];
+
+    try {
+      console.log(`[PStream] Resolving direct ${type} stream for:`, videoId);
+
+      // Get dynamic instances and combine with static (deduped)
+      // DISABLED: Piped instances are causing too many errors/timeouts.
+      // const dynamicInstances = await fetchDynamicInstances();
+      // const allInstances = [...new Set([...dynamicInstances, ...STATIC_INSTANCES])];
+      const allInstances: string[] = [];
+      console.log(`[PStream] Piped instances DISABLED - Going direct to DirectYtResolver`);
+
+      // Try each Piped instance
+      for (const instance of allInstances) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+
+          const res = await fetch(`${instance}/streams/${videoId}`, {
+            signal: controller.signal,
+            headers: { 'Accept': 'application/json' },
+          });
+          clearTimeout(timeout);
+
+          if (!res.ok) {
+            console.warn(`[PStream] ${instance} returned ${res.status}`);
+            continue;
+          }
+
+          // Validate JSON response
+          const contentType = res.headers.get('content-type');
+          if (!contentType?.includes('application/json')) {
+            console.warn(`[PStream] ${instance} returned non-JSON`);
+            continue;
+          }
+
+          const data = await res.json();
+          if (data.error) {
+            console.warn(`[PStream] ${instance} error: ${data.error}`);
+            continue;
+          }
+
+          // Extract related streams for recommendation algorithm
+          const related = data.relatedStreams?.filter((s: any) => s.type === 'stream').map((s: any) => ({
+            videoId: s.url?.replace('/watch?v=', ''),
+            title: s.title,
+            artist: s.uploaderName,
+            thumbnail: s.thumbnail,
+          })) || [];
+          const curatedRelated = filterRelatedBySeed(related, seed);
+
+          // Priority 1: Try HLS stream (best for mobile playback)
+          // Skip HLS if downloading, as we need a single file (mp4/m4a)
+          if (data.hls && !download) {
+            console.log(`[PStream] Resolved HLS from ${instance}`);
+            return { uri: data.hls, related: curatedRelated };
+          }
+
+          if (type === 'audio') {
+            // Prefer M4A for audio, then any audio stream
+            const audioStream =
+              data.audioStreams?.find((s: any) => s.format === 'M4A' || s.mimeType?.includes('audio/mp4')) ||
+              data.audioStreams?.find((s: any) => s.mimeType?.includes('audio/')) ||
+              data.audioStreams?.[0];
+            if (audioStream?.url) {
+              console.log(`[PStream] Resolved audio from ${instance}`);
+              return { uri: audioStream.url, related: curatedRelated };
+            }
+          } else {
+            // For video, prefer streams with audio
+            const videoStream =
+              data.videoStreams?.find((s: any) => s.format === 'MP4' && !s.videoOnly) ||
+              data.videoStreams?.find((s: any) => !s.videoOnly) ||
+              data.videoStreams?.[0];
+            if (videoStream?.url) {
+              console.log(`[PStream] Resolved video from ${instance}: ${videoStream.quality || 'unknown'}`);
+              return { uri: videoStream.url, related: curatedRelated };
+            }
+          }
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            console.warn(`[PStream] Timeout from ${instance}`);
+          } else if (instance === 'https://api.piped.private.coffee' || instance === 'https://pipedapi.kavin.rocks') {
+            console.warn(`[PStream] ${instance} returned ${err.message || 500}`);
+          } else {
+            console.warn(`[PStream] Failed from ${instance}:`, err.message || err);
+          }
+        }
+      }
+
+      console.warn('[PStream] All Piped instances failed, trying Direct YouTube Resolver...');
+
+      // Fallback to Direct YouTube Resolver (internal API)
+      const directResult = await DirectYtResolver.getStream(videoId, type);
+      if (directResult) {
+        console.log(`[PStream] Resolved ${type} from DirectYT`);
+
+        // [NEW] Fetch related for algo
+        let related: any[] = [];
+        try {
+          related = await DirectYtResolver.getNext(videoId);
+        } catch (e) {
+          console.warn('[PStream] Failed to fetch related from DirectYT', e);
+        }
+        const curatedRelated = filterRelatedBySeed(related, seed);
+
+        return { uri: directResult.url, headers: directResult.headers, related: curatedRelated };
+      }
+
+      // All instances failed - return null (caller should handle gracefully)
+      console.warn('[PStream] All instances failed, no valid stream found');
+      return null;
+    } catch (e: any) {
+      console.error('[PStream] Music stream resolution error:', e);
+      setError(e?.message ?? 'Stream error');
+      throw e;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { loading, error, result, scrape, searchMusic, getMusicStream };
+}
+
+export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeOptions) {
+  const mediaKey = buildMediaKey(media);
+  const cached = playbackMemoryCache.get(mediaKey);
+  if (cached && Date.now() - cached.storedAt < MEMORY_CACHE_TTL_MS) {
+    return cached.playback;
+  }
+
+  const inflight = inflightScrapes.get(mediaKey);
+  if (inflight) return inflight;
+
+  const task = (async () => {
+    const providers = getProviders();
+    const lastKnownPromise = fetchLastKnownProvider(media);
+    const baseOrder = options?.sourceOrder?.length ? [...options.sourceOrder] : [...FALLBACK_SOURCES];
+
+    let lastKnown: LastKnownProvider | null = null;
+    try {
+      lastKnown = await withTimeout(lastKnownPromise, 650);
+    } catch {
+      lastKnown = null;
+    }
+
+    const sourceOrder = reorderWithPreference(baseOrder, lastKnown?.sourceId);
+    let abortSources = false;
+
+    if (options?.debugTag) console.log('[PStream]', options.debugTag, media);
+
+    const tryEmbed = async (sourceId: string, embedId: string): Promise<PStreamPlayback | null> => {
+      if (abortSources) return null;
+      try {
+        const embedRun = await providers.runAll({
+          media,
+          sourceOrder: [sourceId],
+          embedOrder: [embedId],
+        });
+        if (embedRun?.stream) {
+          const playback = buildPlayback(embedRun.stream, sourceId, embedId);
+          const ok = await validatePlayback(playback);
+          if (!ok) {
+            console.warn('[PStream] Invalid stream (embed)', {
+              sourceId,
+              embedId,
+              type: playback.stream?.type,
+              uri: playback.uri.slice(0, 96),
+            });
+            return null;
+          }
+          return playback;
+        }
+      } catch (err: any) {
+        console.warn('[PStream] Embed failed:', embedId, err?.message ?? err);
+      }
+      return null;
+    };
+
+    const trySource = async (sourceId: string): Promise<PStreamPlayback | null> => {
+      if (abortSources) return null;
+      try {
+        const discovery: RunOutputWithEmbeds | null = await providers.runAll({
+          media,
+          sourceOrder: [sourceId],
+        });
+
+        if (!discovery) return null;
+
+        if (discovery.stream) {
+          try {
+            const playback = buildPlayback(discovery.stream, sourceId);
+            const ok = await validatePlayback(playback);
+            if (ok) return playback;
+            console.warn('[PStream] Invalid stream (source)', {
+              sourceId,
+              type: playback.stream?.type,
+              uri: playback.uri.slice(0, 96),
+            });
+          } catch (err: any) {
+            console.warn('[PStream] Stream build failed:', sourceId, err?.message ?? err);
+          }
+        }
+
+        let embeds = orderEmbedsEnglishFirst(discovery.embeds ?? []);
+        if (lastKnown?.sourceId === sourceId && lastKnown.embedId) {
+          embeds = prioritizeEmbeds(embeds, lastKnown.embedId);
+        }
+        if (!embeds.length) return null;
+
+        return runWithSlidingWindow(embeds, EMBED_CONCURRENCY, (embed) =>
+          tryEmbed(sourceId, embed.embedScraperId),
+        );
+      } catch (err: any) {
+        console.warn('[PStream] Source failed:', sourceId, err?.message ?? err);
+        return null;
+      }
+    };
+
+    const playback = await runWithSlidingWindow(sourceOrder, SOURCE_CONCURRENCY, trySource, () => {
+      abortSources = true;
+    });
+
+    if (!playback) {
+      throw new Error('No playable stream found');
+    }
+
+    playbackMemoryCache.set(mediaKey, { playback, storedAt: Date.now() });
+    persistLastKnownProvider(media, playback);
+    return playback;
+  })();
+
+  inflightScrapes.set(mediaKey, task);
+  try {
+    return await task;
+  } finally {
+    inflightScrapes.delete(mediaKey);
+  }
+}
+
+export async function scrapeMusic(query: string) {
+  try {
+    const songs = await ytMusic.search(query);
+    return songs;
+  } catch (err: any) {
+    console.warn('[PStream] Music search failed', err);
+    throw err;
+  }
+}
+
+export default usePStream;

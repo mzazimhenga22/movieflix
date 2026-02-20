@@ -1,0 +1,53 @@
+declare module 'expo-linking';
+declare module 'expo-file-system';
+declare module 'expo-file-system/legacy';
+declare module 'react-native-reanimated';
+declare module 'expo-clipboard';
+declare module 'expo-image-manipulator';
+declare module 'expo-camera';
+declare module 'expo-blur';
+declare module 'expo-constants';
+declare module 'expo-linear-gradient';
+declare module 'expo-av';
+declare module '@react-native-community/slider';
+declare module 'expo-image';
+declare module 'expo-image-picker';
+declare module 'expo-splash-screen';
+declare module 'firebase/database' {
+  export type DatabaseReference = any;
+  export const getDatabase: any;
+  export const ref: any;
+  export const set: any;
+  export const onValue: any;
+  export const off: any;
+  export const onDisconnect: any;
+  export const serverTimestamp: any;
+}
+declare module 'firebase/firestore' {
+  export type QueryDocumentSnapshot<T = any> = any;
+  export type DocumentData = any;
+  export type Query<T = any> = any;
+  export type QuerySnapshot<T = any> = any;
+  export type Unsubscribe = () => void;
+  export const collection: any;
+  export const deleteDoc: any;
+  export const doc: any;
+  export const getDoc: any;
+  export const getDocs: any;
+  export const query: any;
+  export const updateDoc: any;
+  export const where: any;
+  export const orderBy: any;
+  export const limit: any;
+  export const addDoc: any;
+  export const setDoc: any;
+  export const onSnapshot: any;
+  export const serverTimestamp: any;
+  export const arrayUnion: any;
+  export const arrayRemove: any;
+  export const startAfter: any;
+  export const writeBatch: any;
+  export const QueryDocumentSnapshot: any;
+  export const DocumentData: any;
+}
+declare module 'react-native';

@@ -1,0 +1,22 @@
+## Netlify configuration for proxy-only deployment
+[build]
+  command = "echo \"No site build – deploying Netlify Functions only\""
+  publish = "netlify/public"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["firebase-admin"]
+
+[[redirects]]
+  from = "/download-apk"
+  to = "https://thorgxctdyxgqjpnmcwa.supabase.co/functions/v1/download-apk"
+  status = 302
+
+[[redirects]]
+  from = "/"
+  to = "/index.html"
+  status = 200

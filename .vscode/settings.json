@@ -1,0 +1,12 @@
+{
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit",
+    "source.organizeImports": "explicit",
+    "source.sortMembers": "explicit"
+  },
+  "deno.enable": true,
+  "deno.unstable": true,
+  "deno.lint": true,
+  "deno.diagnostics": true,
+  "typescript.tsc.autoDetect": "off"
+}
