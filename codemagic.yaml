@@ -24,21 +24,19 @@ workflows:
         script: echo $GOOGLE_SERVICES_JSON | base64 -d > android/app/google-services.json
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build Android Preview
         script: eas build --platform android --profile preview --non-interactive --no-wait
     artifacts:
@@ -70,21 +68,19 @@ workflows:
         script: echo $GOOGLE_SERVICES_JSON | base64 -d > android/app/google-services.json
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build Android Production
         script: eas build --platform android --profile production --non-interactive --no-wait
     artifacts:
@@ -114,21 +110,19 @@ workflows:
           git config --global user.name "Codemagic Build"
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build iOS Preview
         script: eas build --platform ios --profile preview --non-interactive --no-wait
     artifacts:
@@ -158,21 +152,19 @@ workflows:
           git config --global user.name "Codemagic Build"
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build iOS Production
         script: eas build --platform ios --profile production --non-interactive --no-wait
     artifacts:
@@ -202,21 +194,19 @@ workflows:
           git config --global user.name "Codemagic Build"
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build iOS Development
         script: eas build --platform ios --profile development --non-interactive --no-wait
 
@@ -235,21 +225,19 @@ workflows:
         script: npm install -g expo-cli
       - name: Create .env file
         script: |
-          cat > .env.local << EOF
-          EXPO_PUBLIC_TMDB_API_KEY="$EXPO_PUBLIC_TMDB_API_KEY"
-          EXPO_PUBLIC_FIREBASE_API_KEY="$EXPO_PUBLIC_FIREBASE_API_KEY"
-          EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN="$EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN"
-          EXPO_PUBLIC_FIREBASE_PROJECT_ID="$EXPO_PUBLIC_FIREBASE_PROJECT_ID"
-          EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET="$EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET"
-          EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="$EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID"
-          EXPO_PUBLIC_FIREBASE_APP_ID="$EXPO_PUBLIC_FIREBASE_APP_ID"
-          EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID="$EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID"
-          EXPO_PUBLIC_SUPABASE_URL="$EXPO_PUBLIC_SUPABASE_URL"
-          EXPO_PUBLIC_APP_UPDATE_FEED_URL="$EXPO_PUBLIC_APP_UPDATE_FEED_URL"
-          EXPO_PUBLIC_SUPABASE_ANON_KEY="$EXPO_PUBLIC_SUPABASE_ANON_KEY"
-          EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL="$EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL"
-          EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY="$EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY"
-          EOF
+          echo "EXPO_PUBLIC_TMDB_API_KEY=\"$(echo $EXPO_PUBLIC_TMDB_API_KEY | base64 -d)\"" > .env.local
+          echo "EXPO_PUBLIC_FIREBASE_API_KEY=\"$(echo $EXPO_PUBLIC_FIREBASE_API_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=\"$(echo $EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_PROJECT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_PROJECT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=\"$(echo $EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_APP_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_APP_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=\"$(echo $EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_URL=\"$(echo $EXPO_PUBLIC_SUPABASE_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_APP_UPDATE_FEED_URL=\"$(echo $EXPO_PUBLIC_APP_UPDATE_FEED_URL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=\"$(echo $EXPO_PUBLIC_SUPABASE_ANON_KEY | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL=\"$(echo $EXPO_PUBLIC_PAYBILL_ADMIN_EMAIL | base64 -d)\"" >> .env.local
+          echo "EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY=\"$(echo $EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY | base64 -d)\"" >> .env.local
       - name: Build Web
         script: expo export --platform web
     artifacts:
