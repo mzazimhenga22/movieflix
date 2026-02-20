@@ -88,7 +88,7 @@ workflows:
 
   ios-preview:
     name: iOS Preview Build
-    instance_type: mac
+    instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
       node: 20
@@ -130,7 +130,7 @@ workflows:
 
   ios-production:
     name: iOS Production Build
-    instance_type: mac
+    instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
       node: 20
@@ -172,7 +172,7 @@ workflows:
 
   development-build:
     name: Development Client Build
-    instance_type: mac
+    instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
       node: 20
