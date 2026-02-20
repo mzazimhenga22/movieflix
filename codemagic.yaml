@@ -6,11 +6,9 @@ workflows:
     environment:
       node: 20
       groups:
-        - expo_credentials
         - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
-        # All EXPO_PUBLIC_* vars loaded from app_secrets group
     scripts:
       - name: Install dependencies
         script: npm install
@@ -50,8 +48,6 @@ workflows:
     environment:
       node: 20
       groups:
-        - expo_credentials
-        - play_store_credentials
         - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
@@ -94,8 +90,6 @@ workflows:
       node: 20
       xcode: latest
       groups:
-        - expo_credentials
-        - apple_credentials
         - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
@@ -136,8 +130,6 @@ workflows:
       node: 20
       xcode: latest
       groups:
-        - expo_credentials
-        - apple_credentials
         - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
@@ -178,8 +170,6 @@ workflows:
       node: 20
       xcode: latest
       groups:
-        - expo_credentials
-        - apple_credentials
         - app_secrets
       vars:
         EXPO_TOKEN: $EXPO_TOKEN
