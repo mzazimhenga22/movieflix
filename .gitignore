@@ -49,9 +49,9 @@ yarn-error.*
 
 app-example
 
-# generated native folders
+# generated native folders - committing android for Codemagic builds
 /ios
-/android
+# /android - DO NOT IGNORE: contains custom Kotlin code
 hello
 
 # local TV app

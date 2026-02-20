@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- iOS 26 Liquid Glass Card Background -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Base tint fill -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#1A0A14"/>
+            <corners android:radius="18dp"/>
+        </shape>
+    </item>
+    
+    <!-- Gradient overlay for depth (iOS 26) -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="#0A0512"
+                android:endColor="#1A0A1E"
+                android:angle="270"/>
+            <corners android:radius="18dp"/>
+        </shape>
+    </item>
+    
+    <!-- Border glow -->
+    <item>
+        <shape android:shape="rectangle">
+            <stroke
+                android:width="1.5dp"
+                android:color="#FF9500"/>
+            <corners android:radius="17dp"/>
+        </shape>
+    </item>
+    
+    <!-- Inner glow highlight (iOS 26) -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="#FF950040"
+                android:endColor="#00000000"
+                android:angle="135"/>
+            <corners android:radius="17dp"/>
+        </shape>
+    </item>
+</layer-list>

@@ -1,7 +1,7 @@
 workflows:
   android-preview:
     name: Android Preview Build
-    instance_type: linux_x2
+    instance_type: linux
     max_build_duration: 60
     environment:
       node: 20
@@ -45,7 +45,7 @@ workflows:
 
   android-production:
     name: Android Production Build
-    instance_type: linux_x2
+    instance_type: linux
     max_build_duration: 60
     environment:
       node: 20
@@ -88,7 +88,7 @@ workflows:
 
   ios-preview:
     name: iOS Preview Build
-    instance_type: mac_mini_m1
+    instance_type: mac
     max_build_duration: 60
     environment:
       node: 20
@@ -130,7 +130,7 @@ workflows:
 
   ios-production:
     name: iOS Production Build
-    instance_type: mac_mini_m1
+    instance_type: mac
     max_build_duration: 60
     environment:
       node: 20
@@ -172,7 +172,7 @@ workflows:
 
   development-build:
     name: Development Client Build
-    instance_type: mac_mini_m1
+    instance_type: mac
     max_build_duration: 60
     environment:
       node: 20
@@ -212,7 +212,7 @@ workflows:
 
   web-build:
     name: Web Build
-    instance_type: linux_x2
+    instance_type: linux
     max_build_duration: 30
     environment:
       node: 20
