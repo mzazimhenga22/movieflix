@@ -1,0 +1,142 @@
+workflows:
+  android-preview:
+    name: Android Preview Build
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      node: 20
+      groups:
+        - expo_credentials
+      vars:
+        EXPO_TOKEN: $EXPO_TOKEN
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install EAS CLI
+        script: npm install -g eas-cli
+      - name: Configure Git
+        script: |
+          git config --global user.email "build@codemagic.io"
+          git config --global user.name "Codemagic Build"
+      - name: Build Android Preview
+        script: eas build --platform android --profile preview --non-interactive --no-wait
+    artifacts:
+      - build-*.apk
+      - build-*.aab
+
+  android-production:
+    name: Android Production Build
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      node: 20
+      groups:
+        - expo_credentials
+        - play_store_credentials
+      vars:
+        EXPO_TOKEN: $EXPO_TOKEN
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install EAS CLI
+        script: npm install -g eas-cli
+      - name: Configure Git
+        script: |
+          git config --global user.email "build@codemagic.io"
+          git config --global user.name "Codemagic Build"
+      - name: Build Android Production
+        script: eas build --platform android --profile production --non-interactive --no-wait
+    artifacts:
+      - build-*.aab
+
+  ios-preview:
+    name: iOS Preview Build
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      node: 20
+      xcode: latest
+      groups:
+        - expo_credentials
+        - apple_credentials
+      vars:
+        EXPO_TOKEN: $EXPO_TOKEN
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install EAS CLI
+        script: npm install -g eas-cli
+      - name: Configure Git
+        script: |
+          git config --global user.email "build@codemagic.io"
+          git config --global user.name "Codemagic Build"
+      - name: Build iOS Preview
+        script: eas build --platform ios --profile preview --non-interactive --no-wait
+    artifacts:
+      - build-*.ipa
+
+  ios-production:
+    name: iOS Production Build
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      node: 20
+      xcode: latest
+      groups:
+        - expo_credentials
+        - apple_credentials
+      vars:
+        EXPO_TOKEN: $EXPO_TOKEN
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install EAS CLI
+        script: npm install -g eas-cli
+      - name: Configure Git
+        script: |
+          git config --global user.email "build@codemagic.io"
+          git config --global user.name "Codemagic Build"
+      - name: Build iOS Production
+        script: eas build --platform ios --profile production --non-interactive --no-wait
+    artifacts:
+      - build-*.ipa
+
+  development-build:
+    name: Development Client Build
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      node: 20
+      xcode: latest
+      groups:
+        - expo_credentials
+        - apple_credentials
+      vars:
+        EXPO_TOKEN: $EXPO_TOKEN
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install EAS CLI
+        script: npm install -g eas-cli
+      - name: Configure Git
+        script: |
+          git config --global user.email "build@codemagic.io"
+          git config --global user.name "Codemagic Build"
+      - name: Build iOS Development
+        script: eas build --platform ios --profile development --non-interactive --no-wait
+
+  web-build:
+    name: Web Build
+    instance_type: linux_x2
+    max_build_duration: 30
+    environment:
+      node: 20
+    scripts:
+      - name: Install dependencies
+        script: npm install
+      - name: Install Expo CLI
+        script: npm install -g expo-cli
+      - name: Build Web
+        script: expo export --platform web
+    artifacts:
+      - dist/**
