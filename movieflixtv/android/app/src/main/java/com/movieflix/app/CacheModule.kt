@@ -1,4 +1,4 @@
-package com.movieflix.app.app
+package com.movieflix.app
 
 import android.content.ContentValues
 import android.content.Context

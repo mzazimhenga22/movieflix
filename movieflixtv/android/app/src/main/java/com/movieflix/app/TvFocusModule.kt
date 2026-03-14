@@ -1,4 +1,4 @@
-package com.movieflix.app.app
+package com.movieflix.app
 
 import android.media.AudioManager
 import android.media.ToneGenerator

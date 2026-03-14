@@ -1,4 +1,4 @@
-package com.movieflix.app.app
+package com.movieflix.app
 
 import android.graphics.Color
 import com.facebook.react.uimanager.SimpleViewManager

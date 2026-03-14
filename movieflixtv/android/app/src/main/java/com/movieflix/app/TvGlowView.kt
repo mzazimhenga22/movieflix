@@ -1,4 +1,4 @@
-package com.movieflix.app.app
+package com.movieflix.app
 
 import android.animation.ValueAnimator
 import android.content.Context

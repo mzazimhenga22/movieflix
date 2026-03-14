@@ -1,4 +1,4 @@
-package com.movieflix.app.app
+package com.movieflix.app
 
 import android.content.Context
 import android.graphics.Canvas
