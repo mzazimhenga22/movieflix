@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="150dp"
+    android:layout_height="225dp"
+    android:padding="4dp"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <!-- Liquid Glass Container replacing CardView -->
+    <FrameLayout
+        android:id="@+id/card_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/liquid_glass_card_background"
+        android:clipToOutline="true"
+        android:clipChildren="true"
+        android:elevation="6dp"
+        android:foreground="?android:attr/selectableItemBackground">
+
+        <!-- Poster Image -->
+        <ImageView
+            android:id="@+id/movie_poster"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop"
+            android:background="#222222"
+            android:contentDescription="@null" />
+
+        <!-- Gradient Overlay -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/gradient_bottom_overlay" />
+
+        <!-- Top Metadata Container -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="6dp"
+            android:gravity="center_vertical">
+            
+            <!-- % Match Badge with Liquid Glass -->
+            <TextView
+                android:id="@+id/match_score"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="98% Match"
+                android:textColor="#ffffff"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.03"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="5dp"
+                android:background="@drawable/liquid_glass_rating_badge_background" />
+
+            <!-- Spacer -->
+            <View
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_weight="1" />
+
+            <!-- Plus Icon with circular background -->
+            <FrameLayout
+                android:id="@+id/plus_icon_container"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/liquid_glass_plus_icon_background">
+                <ImageView
+                    android:id="@+id/plus_icon"
+                    android:layout_width="17dp"
+                    android:layout_height="17dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_add_white"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Add to list" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <!-- Bottom Content -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:padding="8dp">
+
+            <!-- Badges Row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <!-- HD Badge with Liquid Glass -->
+                <TextView
+                    android:id="@+id/badge_hd"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="HD"
+                    android:textColor="#ffffff"
+                    android:textSize="8sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/liquid_glass_badge_background"
+                    android:paddingHorizontal="4dp"
+                    android:paddingVertical="1dp"
+                    android:layout_marginEnd="6dp" />
+
+                <!-- Type (Series/Movie) -->
+                <TextView
+                    android:id="@+id/media_type_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Series"
+                    android:textColor="#cccccc"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <!-- Title -->
+            <TextView
+                android:id="@+id/movie_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#ffffff"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.02"
+                android:maxLines="2"
+                android:ellipsize="end"
+                android:shadowColor="#000000"
+                android:shadowDx="0"
+                android:shadowDy="2"
+                android:shadowRadius="6" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+</FrameLayout>

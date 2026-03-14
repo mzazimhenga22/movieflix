@@ -1,16 +1,16 @@
 import { usePStream } from '@/src/pstream/usePStream';
 import { Ionicons } from '@expo/vector-icons';
+import NetInfo from '@react-native-community/netinfo';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, Dimensions, GestureResponderEvent, Image, Linking, Platform, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import NetInfo from '@react-native-community/netinfo';
 
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { darkenColor, lightenColor, withAlpha } from '@/lib/colorUtils';
-import { useAccent } from '../../../components/AccentContext';
-import LiquidGlass from '@/app/components/LiquidGlass';
 
 export interface MessageItem {
   id?: string;
@@ -489,14 +489,10 @@ const MessageBubble = ({
       {isCallMessage ? (
         <View style={styles.callRow}>
           <LiquidGlass
-            glowColor={accent}
-            tintColor="#1A1A2E"
             tintOpacity={0.4}
             cornerRadius={18}
-            glowIntensity={0.6}
-            borderWidth={1}
+            borderOpacity={0.3}
             style={styles.callIconGlass}
-            animated={false}
           >
             <Ionicons name={item.callType === 'video' ? 'videocam' : 'call'} size={18} color="#fff" />
           </LiquidGlass>
@@ -529,14 +525,10 @@ const MessageBubble = ({
                 style={StyleSheet.absoluteFill}
               />
               <LiquidGlass
-                glowColor="#ffffff"
-                tintColor="#1A1A2E"
                 tintOpacity={0.4}
                 cornerRadius={25}
-                glowIntensity={0.7}
-                borderWidth={1.5}
+                borderOpacity={0.4}
                 style={styles.playButtonGlass}
-                animated={false}
               >
                 <Ionicons name="play" size={24} color="#fff" />
               </LiquidGlass>
@@ -547,14 +539,10 @@ const MessageBubble = ({
             <View style={styles.audioContainer}>
               <TouchableOpacity style={styles.audioPlayBtn} onPress={toggleAudio} activeOpacity={0.7}>
                 <LiquidGlass
-                  glowColor={accent}
-                  tintColor="#1A1A2E"
                   tintOpacity={0.5}
                   cornerRadius={17}
-                  glowIntensity={0.6}
-                  borderWidth={1}
+                  borderOpacity={0.35}
                   style={styles.audioPlayGlass}
-                  animated={false}
                 >
                   <Ionicons name={isPlayingAudio ? 'pause' : 'play'} size={16} color="#fff" />
                 </LiquidGlass>
@@ -591,14 +579,10 @@ const MessageBubble = ({
               </View>
               <TouchableOpacity onPress={toggleMusic}>
                 <LiquidGlass
-                  glowColor={accent}
-                  tintColor="#1A1A2E"
                   tintOpacity={0.5}
                   cornerRadius={16}
-                  glowIntensity={0.6}
-                  borderWidth={1}
+                  borderOpacity={0.35}
                   style={styles.musicPlayGlass}
-                  animated={false}
                 >
                   {musicLoading ? (
                     <ActivityIndicator size="small" color="#fff" />
@@ -643,14 +627,10 @@ const MessageBubble = ({
                   </View>
                 </View>
                 <LiquidGlass
-                  glowColor="#ffffff"
-                  tintColor="#1A1A2E"
                   tintOpacity={0.35}
                   cornerRadius={24}
-                  glowIntensity={0.6}
-                  borderWidth={1.5}
+                  borderOpacity={0.4}
                   style={styles.moviePlayGlass}
-                  animated={false}
                 >
                   <Ionicons name="play" size={24} color="#fff" />
                 </LiquidGlass>
@@ -700,13 +680,9 @@ const MessageBubble = ({
       <View style={[styles.bubbleOuter, bubbleRadius, isMe ? styles.meShadow : styles.otherShadow]}>
         {/* Premium Liquid Glass Background */}
         <LiquidGlass
-          glowColor={isMe ? accent : '#ffffff'}
-          tintColor={isMe ? darkenColor(accent, 0.25) : '#1f222e'}
           tintOpacity={isMe ? 0.75 : 0.65}
           cornerRadius={bubbleRadius.borderTopLeftRadius}
-          glowIntensity={isMe ? 0.6 : 0.4}
-          borderWidth={isMe ? 1.2 : 1}
-          animated={true}
+          borderOpacity={isMe ? 0.45 : 0.35}
           style={StyleSheet.absoluteFill}
         />
 
@@ -751,9 +727,9 @@ const MessageBubble = ({
         }]} />
 
         {/* Premium border gradient overlay */}
-        <View style={[styles.borderOverlay, bubbleRadius, { 
-          borderColor: isMe 
-            ? withAlpha('#fff', 0.18) 
+        <View style={[styles.borderOverlay, bubbleRadius, {
+          borderColor: isMe
+            ? withAlpha('#fff', 0.18)
             : withAlpha('#fff', 0.10)
         }]} />
 

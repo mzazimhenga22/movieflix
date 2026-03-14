@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Image, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import AdBanner from '../components/ads/AdBanner';
+import LiquidGlass from '../components/app-components/LiquidGlass';
 import { usePromotedProducts } from '../hooks/use-promoted-products';
 import { useSubscription } from '../providers/SubscriptionProvider';
 import { buildSourceOrder, buildVideoScrapeContext, buildScrapeDebugTag } from '../lib/videoPlaybackShared';
@@ -218,22 +219,29 @@ export default function AdInterstitialScreen() {
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={() => router.push((`/marketplace/${product.id}`) as any)}
-            style={styles.card}
+            style={{ width: '100%', marginTop: 16 }}
           >
-            {product.imageUrl ? (
-              <Image source={{ uri: product.imageUrl }} style={styles.image} />
-            ) : (
-              <View style={styles.imageFallback} />
-            )}
-            <View style={styles.cardCopy}>
-              <Text style={styles.cardTitle} numberOfLines={1}>
-                {product.name}
-              </Text>
-              <Text style={styles.cardDesc} numberOfLines={2}>
-                {product.description}
-              </Text>
-              <Text style={styles.cardPrice}>${Number(product.price ?? 0).toFixed(2)}</Text>
-            </View>
+            <LiquidGlass
+              cornerRadius={18}
+              tintOpacity={0.06}
+              borderOpacity={0.10}
+              style={styles.card}
+            >
+              {product.imageUrl ? (
+                <Image source={{ uri: product.imageUrl }} style={styles.image} />
+              ) : (
+                <View style={styles.imageFallback} />
+              )}
+              <View style={styles.cardCopy}>
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  {product.name}
+                </Text>
+                <Text style={styles.cardDesc} numberOfLines={2}>
+                  {product.description}
+                </Text>
+                <Text style={styles.cardPrice}>${Number(product.price ?? 0).toFixed(2)}</Text>
+              </View>
+            </LiquidGlass>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -280,13 +288,8 @@ const styles = StyleSheet.create({
     paddingBottom: 18,
   },
   card: {
-    marginTop: 16,
     width: '100%',
-    borderRadius: 18,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   image: {
     width: '100%',

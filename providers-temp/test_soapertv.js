@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import fetch from 'node-fetch';
 import { URLSearchParams } from 'url';
 
-const baseUrl = 'https://soaper.cc';
+const baseUrl = 'https://soaper.tv';
 const movieTitle = 'Deadpool & Wolverine';
 
 async function testSoaper() {

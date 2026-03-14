@@ -37,8 +37,10 @@ import { useActiveProfile } from '../../hooks/use-active-profile'
 import { accentGradient, darkenColor, withAlpha } from '../../lib/colorUtils'
 import MessagingModule from '../../modules/MessagingModule'
 import { Media } from '../../types/index'
-import { useAccent } from '../components/AccentContext'
-import { onStoriesUpdateForViewer } from '../components/social-feed/storiesController'
+import { useAccent } from '../../components/app-components/AccentContext'
+import { onStoriesUpdateForViewer } from '../../components/app-components/social-feed/storiesController'
+import LiquidGlass from '../../components/app-components/LiquidGlass'
+import { FlashList } from '@shopify/flash-list'
 
 import AmbientBackground from './components/AmbientBackground'
 import MessagingErrorBoundary from './components/ErrorBoundary'
@@ -98,6 +100,8 @@ type StoryRailEntry = Story & {
   displayAvatar?: string | null
 }
 
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList as any);
+
 const formatStoryTime = (timestamp?: number | null) => {
   if (!timestamp) return null
   const diff = Date.now() - timestamp
@@ -115,6 +119,100 @@ const MessagingScreen = () => {
 
   const headerOpacity = useRef(new Animated.Value(1)).current
   const promoTranslateX = useRef(new Animated.Value(40)).current
+  const scrollY = useRef(new Animated.Value(0)).current;
+
+  // Header animations - Liquid glass effect
+  const headerFadeAnim = useRef(new Animated.Value(0)).current;
+  const headerSlideAnim = useRef(new Animated.Value(-30)).current;
+
+  // Dynamic Island Animations
+  const islandWidth = scrollY.interpolate({
+    inputRange: [0, 80],
+    outputRange: ['100%', '60%'],
+    extrapolate: 'clamp',
+  });
+
+  const islandTranslateY = scrollY.interpolate({
+    inputRange: [0, 100],
+    outputRange: [0, -5],
+    extrapolate: 'clamp',
+  });
+
+  const textOpacity = scrollY.interpolate({
+    inputRange: [0, 40],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+
+  useEffect(() => {
+    // Entrance animation
+    Animated.parallel([
+      Animated.timing(headerFadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+      Animated.spring(headerSlideAnim, { toValue: 0, tension: 60, friction: 12, useNativeDriver: true }),
+    ]).start();
+  }, []);
+
+  const HeaderComponent = () => (
+    <Animated.View
+      style={[
+        styles.headerContainerIsland,
+        {
+          paddingTop: Math.max(insets.top, 12),
+          opacity: headerFadeAnim,
+          transform: [{ translateY: headerSlideAnim }],
+          alignItems: 'center',
+          width: '100%',
+          zIndex: 10,
+        }
+      ]}
+    >
+      <Animated.View style={[
+        styles.islandWrap,
+        {
+          width: islandWidth,
+          transform: [{ translateY: islandTranslateY }]
+        }
+      ]}>
+        <LiquidGlass
+          tintOpacity={0.18}
+          tintColor="#000000"
+          cornerRadius={32}
+          borderOpacity={0.25}
+          glowIntensity={0.2}
+          glowColor={accentColor || '#e50914'}
+          chromaticAberration={true}
+          style={StyleSheet.absoluteFill}
+        />
+        
+        <View style={styles.islandContent}>
+          {/* Left: Profile & Welcome */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => router.push('/profile')}
+            style={styles.profileSectionIsland}
+          >
+            <View style={[styles.avatarDot, { backgroundColor: accentColor || '#e50914', shadowColor: accentColor || '#e50914' }]} />
+            <Animated.View style={{ opacity: textOpacity, marginLeft: 8, overflow: 'hidden' }}>
+              <Text style={styles.eyebrowIsland}>MOVIEFLIX</Text>
+              <Text style={styles.headerTextIsland} numberOfLines={1}>
+                Hey, {profileGreetingName}
+              </Text>
+            </Animated.View>
+          </TouchableOpacity>
+
+          {/* Right: Quick Actions */}
+          <View style={styles.actionSectionIsland}>
+             <TouchableOpacity style={styles.iconBtnIsland} onPress={() => setSearchMode(true)}>
+              <Ionicons name="search" size={20} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.iconBtnIsland, styles.lastIconBtnIsland]} onPress={() => router.push('/messaging/settings')}>
+              <Ionicons name="settings-outline" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Animated.View>
+    </Animated.View>
+  );
 
   const [user, setUser] = useState<User | null>(null)
   const [isAuthReady, setAuthReady] = useState(false)
@@ -1260,137 +1358,8 @@ const MessagingScreen = () => {
         <View style={styles.container}>
           <AmbientBackground intensity={0.7} />
           <SnowOverlay enabled={snowing} />
-          {/* Header (glassy hero) */}
-          <View style={styles.headerWrap}>
-            {isSearchMode ? (
-              <BlurView intensity={80} tint="dark" style={styles.searchSheet}>
-                <View style={styles.searchHeaderRow}>
-                  <TouchableOpacity onPress={handleCloseSearch} style={styles.searchBackBtn}>
-                    <Ionicons name="arrow-back" size={22} color="#fff" />
-                  </TouchableOpacity>
-                  <Text style={styles.searchHeading}>Search</Text>
-                </View>
-                <View style={styles.searchInputRow}>
-                  <Ionicons name="search" size={18} color="#fff" />
-                  <TextInput
-                    style={styles.searchInput}
-                    placeholder="Search chats, groups & channels"
-                    placeholderTextColor="rgba(255,255,255,0.6)"
-                    value={searchQuery}
-                    onChangeText={setSearchQuery}
-                    autoFocus
-                  />
-                  {searchQuery.length > 0 && (
-                    <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.searchClearBtn}>
-                      <Ionicons name="close" size={16} color="#fff" />
-                    </TouchableOpacity>
-                  )}
-                </View>
-                <Text style={styles.searchHint}>Filtering {filteredItems.length} chats in real time.</Text>
-              </BlurView>
-            ) : (
-              <>
-                <LinearGradient
-                  colors={[accentGlow, 'rgba(10,12,24,0.4)']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.headerGlow}
-                />
-                <View style={styles.headerBar}>
-                  <TouchableOpacity style={styles.titleRow} activeOpacity={0.85} onPress={handleOpenSearch}>
-                    <View style={[styles.accentDot, accentDotStyle]} />
-                    <View>
-                      <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
-                        Messages & Stories
-                      </Text>
-                      <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
-                        Hey, {profileGreetingName}
-                      </Text>
-                      <Text style={styles.headerSubtitle} numberOfLines={1} ellipsizeMode="tail">
-                        Connect & Share
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
+          <HeaderComponent />
 
-                  <View style={styles.headerIcons}>
-                    <TouchableOpacity
-                      style={[styles.iconBtn, iconShadowStyle]}
-                      onPress={() => setSnowing((prev) => !prev)}
-                    >
-                      <LinearGradient
-                        colors={iconGradientColors}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons
-                          name="snow"
-                          size={22}
-                          color={snowing ? '#ffffff' : 'rgba(255,255,255,0.92)'}
-                          style={styles.iconMargin}
-                        />
-                      </LinearGradient>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity style={[styles.iconBtn, iconShadowStyle]} onPress={handleOpenSearch}>
-                      <LinearGradient
-                        colors={iconGradientColors}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons name="search-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                      </LinearGradient>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[styles.iconBtn, iconShadowStyle]}
-                      onPress={() => navigateTo('/messaging/settings')}
-                    >
-                      <LinearGradient
-                        colors={iconGradientColors}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons name="settings-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                      </LinearGradient>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                <View style={styles.headerMetaRow}>
-                  <View style={styles.metaPill}>
-                    <Ionicons name="chatbubbles" size={14} color="#fff" />
-                    <Text style={styles.metaText}>{filteredItems.length} chats</Text>
-                  </View>
-                  <View style={[styles.metaPill, styles.metaPillSoft]}>
-                    <Ionicons name="people" size={14} color="#fff" />
-                    <Text style={styles.metaText}>{following.length} following</Text>
-                  </View>
-                  <View style={[styles.metaPill, styles.metaPillOutline]}>
-                    <Ionicons name="call" size={14} color="#fff" />
-                    <Text style={styles.metaText}>Voice & Video</Text>
-                  </View>
-                </View>
-
-                <View style={styles.quickRow}>
-                  <TouchableOpacity style={styles.quickTile} onPress={openSheet}>
-                    <Ionicons name="create-outline" size={18} color="#fff" />
-                    <Text style={styles.quickTileText}>New chat</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.quickTile} onPress={() => setActiveKind('Groups')}>
-                    <Ionicons name="people-outline" size={18} color="#fff" />
-                    <Text style={styles.quickTileText}>Groups</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.quickTile} onPress={() => setActiveKind('Calls')}>
-                    <Ionicons name="call-outline" size={18} color="#fff" />
-                    <Text style={styles.quickTileText}>Calls</Text>
-                  </TouchableOpacity>
-                </View>
-              </>
-            )}
-          </View>
           {filteredItems.length === 0 && searchQuery.trim() === '' && activeKind !== 'Calls' ? (
             <NoMessages
               suggestedPeople={following}
@@ -1401,7 +1370,7 @@ const MessagingScreen = () => {
           ) : (
             <View style={styles.listContainer}>
               {activeKind === 'Calls' ? (
-                <FlatList
+                <AnimatedFlashList
                   data={filteredItems as CallSession[]}
                   renderItem={({ item }: { item: any }) => {
                     const call = item as CallSession;
@@ -1436,6 +1405,12 @@ const MessagingScreen = () => {
                     );
                   }}
                   keyExtractor={(item: any) => item.id}
+                  estimatedItemSize={72}
+                  onScroll={Animated.event(
+                    [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+                    { useNativeDriver: false }
+                  )}
+                  scrollEventThrottle={16}
                   ListHeaderComponent={
                     <View style={styles.listHeaderWrap}>
                       {isConversationsLoading && (
@@ -1461,21 +1436,22 @@ const MessagingScreen = () => {
                     </View>
                   }
                   contentContainerStyle={{
-                    paddingTop: headerHeight,
+                    paddingTop: headerHeight + 20,
                     paddingBottom: Platform.OS === 'ios' ? insets.bottom + 120 : insets.bottom + 100,
                   }}
                   showsVerticalScrollIndicator={false}
                 />
               ) : (
-                <Animated.FlatList
+                <AnimatedFlashList
                   data={filteredItems as ConversationListItem[]}
                   renderItem={renderConversationItem}
                   keyExtractor={keyExtractor}
-                  removeClippedSubviews
-                  initialNumToRender={8}
-                  maxToRenderPerBatch={6}
-                  updateCellsBatchingPeriod={40}
-                  windowSize={7}
+                  estimatedItemSize={80}
+                  onScroll={Animated.event(
+                    [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+                    { useNativeDriver: false }
+                  )}
+                  scrollEventThrottle={16}
                   onEndReached={handleLoadMoreConversations}
                   onEndReachedThreshold={0.5}
                   ListHeaderComponent={
@@ -1522,10 +1498,12 @@ const MessagingScreen = () => {
                           onPress={() => handleConversationPress(broadcastConversation)}
                           disabled={!!navigatingToId}
                         >
-                          <LinearGradient
-                            colors={[withAlpha(accent, 0.2), withAlpha(accent, 0.06)]}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
+                          <LiquidGlass
+                            glowColor={accent}
+                            tintOpacity={0.12}
+                            tintColor="#000"
+                            cornerRadius={18}
+                            borderOpacity={0.15}
                             style={styles.broadcastCard}
                           >
                             <View style={styles.broadcastIconWrap}>
@@ -1542,7 +1520,7 @@ const MessagingScreen = () => {
                                   </View>
                                 )}
                                 <View style={styles.broadcastBadge}>
-                                  <Text style={styles.broadcastBadgeText}>Admin only</Text>
+                                  <Text style={broadcastConversation.isGroup ? styles.broadcastBadgeText : styles.broadcastBadgeText}>Admin only</Text>
                                 </View>
                               </View>
                               <Text style={styles.broadcastSubtitle} numberOfLines={1}>
@@ -1550,12 +1528,9 @@ const MessagingScreen = () => {
                                   'Catch the latest announcements from MovieFlix.'}
                               </Text>
                               <Text style={styles.broadcastUpdated}>{broadcastUpdatedLabel}</Text>
-                              <Text style={styles.broadcastFootnote} numberOfLines={2}>
-                                Auto-followed for every profile. Tap to see MovieFlix onboarding tips—no request needed.
-                              </Text>
                             </View>
                             <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.8)" />
-                          </LinearGradient>
+                          </LiquidGlass>
                         </TouchableOpacity>
                       )}
 
@@ -1564,10 +1539,12 @@ const MessagingScreen = () => {
                           activeOpacity={0.9}
                           onPress={() => setRequestSheetVisible(true)}
                         >
-                          <LinearGradient
-                            colors={[withAlpha('#1f1f1f', 0.7), withAlpha('#050505', 0.9)]}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
+                          <LiquidGlass
+                            glowColor="#fff"
+                            tintOpacity={0.1}
+                            tintColor="#000"
+                            cornerRadius={20}
+                            borderOpacity={0.15}
                             style={styles.requestsCard}
                           >
                             <View style={styles.requestsIconWrap}>
@@ -1586,7 +1563,7 @@ const MessagingScreen = () => {
                               <Text style={styles.requestsCtaText}>Review</Text>
                               <Ionicons name="chevron-forward" size={16} color="#fff" />
                             </View>
-                          </LinearGradient>
+                          </LiquidGlass>
                         </TouchableOpacity>
                       )}
 
@@ -1602,18 +1579,6 @@ const MessagingScreen = () => {
                           horizontal
                           showsHorizontalScrollIndicator={false}
                           contentContainerStyle={styles.liveRailListContent}
-                          ListEmptyComponent={
-                            liveLoading ? (
-                              <View style={styles.liveRailEmpty}>
-                                <ActivityIndicator color="#fff" />
-                                <Text style={styles.liveRailEmptyText}>Loading…</Text>
-                              </View>
-                            ) : (
-                              <View style={styles.liveRailEmpty}>
-                                <Text style={styles.liveRailEmptyText}>No lives right now</Text>
-                              </View>
-                            )
-                          }
                           renderItem={({ item }: { item: any }) => (
                             <TouchableOpacity
                               activeOpacity={0.9}
@@ -1624,10 +1589,12 @@ const MessagingScreen = () => {
                                 } as any)
                               }
                             >
-                              <LinearGradient
-                                colors={[withAlpha(accent, 0.22), withAlpha('#000', 0.65)]}
-                                start={{ x: 0, y: 0 }}
-                                end={{ x: 1, y: 1 }}
+                              <LiquidGlass
+                                glowColor={accent}
+                                tintOpacity={0.15}
+                                tintColor="#000"
+                                cornerRadius={18}
+                                borderOpacity={0.15}
                                 style={styles.liveRailCard}
                               >
                                 <View style={styles.liveRailBadge}>
@@ -1641,7 +1608,7 @@ const MessagingScreen = () => {
                                 <Text style={styles.liveRailCardMeta} numberOfLines={1}>
                                   {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
                                 </Text>
-                              </LinearGradient>
+                              </LiquidGlass>
                             </TouchableOpacity>
                           )}
                         />
@@ -1673,7 +1640,7 @@ const MessagingScreen = () => {
                     ) : null
                   }
                   contentContainerStyle={{
-                    paddingTop: headerHeight,
+                    paddingTop: headerHeight + 20,
                     paddingBottom: Platform.OS === 'ios' ? insets.bottom + 120 : insets.bottom + 100,
                   }}
                   showsVerticalScrollIndicator={false}
@@ -1896,6 +1863,74 @@ const styles = StyleSheet.create({
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   listContainer: { flex: 1 },
 
+  headerContainerIsland: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+  },
+  islandWrap: {
+    height: 56,
+    borderRadius: 28,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  islandContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6,
+  },
+  profileSectionIsland: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 8,
+    flexShrink: 1,
+  },
+  avatarDot: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  eyebrowIsland: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
+    marginBottom: 1,
+    letterSpacing: 1.2,
+    fontWeight: '800',
+  },
+  headerTextIsland: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  actionSectionIsland: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 22,
+    paddingHorizontal: 4,
+    height: 44,
+  },
+  iconBtnIsland: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lastIconBtnIsland: {
+    marginRight: 2,
+  },
   // Header glass hero
   headerWrap: {
     marginHorizontal: 12,

@@ -24,7 +24,7 @@ import {
   type SocialProfile,
   unfollowUser,
 } from '../lib/followGraph';
-import { useAccent } from './components/AccentContext';
+import { useAccent } from '../components/app-components/AccentContext';
 
 const FollowersScreen = () => {
   const router = useRouter();

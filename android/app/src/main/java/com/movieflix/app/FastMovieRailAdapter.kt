@@ -1,4 +1,4 @@
-package com.movieflix.app
+package com.movieflix.app.app
 
 import android.view.LayoutInflater
 import android.view.View

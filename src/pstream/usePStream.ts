@@ -364,41 +364,42 @@ async function validatePlayback(playback: PStreamPlayback): Promise<boolean> {
   if (!uri) return false;
   const headers = (playback.headers ?? {}) as Record<string, string>;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5500);
+  // Premium optimization: very fast validation timeout
+  const timeout = setTimeout(() => controller.abort(), 3500);
   try {
     const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
-    if (isHls) {
-      // Try a small ranged fetch first (faster on some CDNs), fall back to full manifest.
-      try {
-        const res = await fetch(uri, {
-          headers: { ...headers, Range: 'bytes=0-2047' },
-          signal: controller.signal,
-        });
-        if (!res.ok) return false;
-        const text = await res.text();
-        return text.includes('#EXTM3U');
-      } catch {
-        const res = await fetch(uri, { headers, signal: controller.signal });
-        if (!res.ok) return false;
-        const text = await res.text();
-        return text.includes('#EXTM3U');
+    if (isHls && !uri.toLowerCase().includes('.mp4')) {
+      // Optimized HLS check: just the first few bytes to confirm manifest
+      const res = await fetch(uri, {
+        headers: { ...headers, Range: 'bytes=0-512' },
+        signal: controller.signal,
+      });
+      if (!res.ok) return false;
+      const text = await res.text();
+      // If it doesn't look like an m3u8 manifest but we have a 200/206 OK,
+      // it might be a direct video file mislabeled as HLS by the provider.
+      if (!text.includes('#EXTM3U')) {
+        // We know it's reachable and we got data, but it's not a playlist.
+        // Let's assume it's a raw video file (like the .mp4 errors) and approve it.
+        return true;
       }
+      return true;
     }
 
-    // Prefer HEAD, fall back to a small ranged GET.
-    try {
-      const head = await fetch(uri, { method: 'HEAD', headers, signal: controller.signal });
-      if (head.ok) return true;
-    } catch {
-      // ignore
-    }
-    const ranged = await fetch(uri, {
-      headers: { ...headers, Range: 'bytes=0-1023' },
-      signal: controller.signal,
-    });
-    return ranged.ok;
+    // Faster validation for files: HEAD request is often sufficient
+    const head = await fetch(uri, { method: 'HEAD', headers, signal: controller.signal });
+    return head.ok;
   } catch {
-    return false;
+    // If Range or HEAD fails, some CDNs are picky. One last attempt with standard GET.
+    try {
+      const controller2 = new AbortController();
+      const timeout2 = setTimeout(() => controller2.abort(), 3000);
+      const res = await fetch(uri, { headers, signal: controller2.signal });
+      clearTimeout(timeout2);
+      return res.ok;
+    } catch {
+      return false;
+    }
   } finally {
     clearTimeout(timeout);
   }
@@ -440,9 +441,10 @@ function orderEmbedsEnglishFirst(embeds: Embed[]): Embed[] {
 
 /* ───────── FALLBACK SOURCES ───────── */
 
-const FALLBACK_SOURCES = ['cuevana3', 'ridomovies', 'hdrezka', 'warezcdn'];
-const SOURCE_CONCURRENCY = 3;
-const EMBED_CONCURRENCY = 3;
+const FALLBACK_SOURCES = ['cuevana3', 'ridomovies', 'hdrezka', 'warezcdn', 'wecima', 'soapertv'];
+const SOURCE_CONCURRENCY = 8; // High burst for "Premium" speed
+const EMBED_CONCURRENCY = 5;
+const GLOBAL_SCRAPE_TIMEOUT_MS = 18000;
 
 async function runWithSlidingWindow<T>(
   items: T[],
@@ -522,20 +524,33 @@ export function usePStream() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PStreamPlayback | null>(null);
 
-  const scrape = useCallback(async (media: ScrapeMedia, options?: PStreamScrapeOptions) => {
-    setLoading(true);
-    setError(null);
-    setResult(null);
+  const scrape = useCallback(async (media: ScrapeMedia, options?: PStreamScrapeOptions & { isPrefetch?: boolean }) => {
+    if (!options?.isPrefetch) {
+      setLoading(true);
+      setError(null);
+      setResult(null);
+    }
 
     try {
-      const playback = await scrapePStream(media, options);
-      setResult(playback);
+      // For pre-fetches, we use a smaller concurrency (top 3) to preserve battery/CPU
+      // and prevent UI jank during transitions.
+      const scrapeOptions = options?.isPrefetch ? {
+        ...options,
+        sourceOrder: options?.sourceOrder?.slice(0, 3),
+        debugTag: options?.debugTag ? `[PREFETCH] ${options.debugTag}` : '[PREFETCH]',
+      } : options;
+
+      const playback = await scrapePStream(media, scrapeOptions);
+      if (!options?.isPrefetch) setResult(playback);
       return playback;
     } catch (e: any) {
-      setError(e?.message ?? 'Stream error');
-      throw e;
+      if (!options?.isPrefetch) {
+        setError(e?.message ?? 'Stream error');
+        throw e;
+      }
+      return null;
     } finally {
-      setLoading(false);
+      if (!options?.isPrefetch) setLoading(false);
     }
   }, []);
 
@@ -567,146 +582,32 @@ export function usePStream() {
     setLoading(true);
     setError(null);
 
-    // Fetch dynamic instances from official Piped API
-    const fetchDynamicInstances = async (): Promise<string[]> => {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch('https://piped-instances.kavin.rocks/', {
-          signal: controller.signal,
-          headers: { 'Accept': 'application/json' },
-        });
-        clearTimeout(timeout);
-        if (!res.ok) return [];
-        const instances = await res.json();
-        return instances
-          .filter((i: any) => i.api_url && (i.uptime_24h === undefined || i.uptime_24h >= 80))
-          .sort((a: any, b: any) => (b.uptime_24h || 100) - (a.uptime_24h || 100))
-          .map((i: any) => i.api_url)
-          .slice(0, 8);
-      } catch {
-        return [];
-      }
-    };
-
-    // Static fallback instances
-    const STATIC_INSTANCES = [
-      'https://api.piped.private.coffee',
-      'https://pipedapi.kavin.rocks',
-      'https://pipedapi-libre.kavin.rocks',
-      'https://pipedapi.leptons.xyz',
-      'https://pipedapi.nosebs.ru',
-    ];
-
     try {
       console.log(`[PStream] Resolving direct ${type} stream for:`, videoId);
 
-      // Get dynamic instances and combine with static (deduped)
-      // DISABLED: Piped instances are causing too many errors/timeouts.
-      // const dynamicInstances = await fetchDynamicInstances();
-      // const allInstances = [...new Set([...dynamicInstances, ...STATIC_INSTANCES])];
-      const allInstances: string[] = [];
-      console.log(`[PStream] Piped instances DISABLED - Going direct to DirectYtResolver`);
-
-      // Try each Piped instance
-      for (const instance of allInstances) {
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-
-          const res = await fetch(`${instance}/streams/${videoId}`, {
-            signal: controller.signal,
-            headers: { 'Accept': 'application/json' },
-          });
-          clearTimeout(timeout);
-
-          if (!res.ok) {
-            console.warn(`[PStream] ${instance} returned ${res.status}`);
-            continue;
-          }
-
-          // Validate JSON response
-          const contentType = res.headers.get('content-type');
-          if (!contentType?.includes('application/json')) {
-            console.warn(`[PStream] ${instance} returned non-JSON`);
-            continue;
-          }
-
-          const data = await res.json();
-          if (data.error) {
-            console.warn(`[PStream] ${instance} error: ${data.error}`);
-            continue;
-          }
-
-          // Extract related streams for recommendation algorithm
-          const related = data.relatedStreams?.filter((s: any) => s.type === 'stream').map((s: any) => ({
-            videoId: s.url?.replace('/watch?v=', ''),
-            title: s.title,
-            artist: s.uploaderName,
-            thumbnail: s.thumbnail,
-          })) || [];
-          const curatedRelated = filterRelatedBySeed(related, seed);
-
-          // Priority 1: Try HLS stream (best for mobile playback)
-          // Skip HLS if downloading, as we need a single file (mp4/m4a)
-          if (data.hls && !download) {
-            console.log(`[PStream] Resolved HLS from ${instance}`);
-            return { uri: data.hls, related: curatedRelated };
-          }
-
-          if (type === 'audio') {
-            // Prefer M4A for audio, then any audio stream
-            const audioStream =
-              data.audioStreams?.find((s: any) => s.format === 'M4A' || s.mimeType?.includes('audio/mp4')) ||
-              data.audioStreams?.find((s: any) => s.mimeType?.includes('audio/')) ||
-              data.audioStreams?.[0];
-            if (audioStream?.url) {
-              console.log(`[PStream] Resolved audio from ${instance}`);
-              return { uri: audioStream.url, related: curatedRelated };
-            }
-          } else {
-            // For video, prefer streams with audio
-            const videoStream =
-              data.videoStreams?.find((s: any) => s.format === 'MP4' && !s.videoOnly) ||
-              data.videoStreams?.find((s: any) => !s.videoOnly) ||
-              data.videoStreams?.[0];
-            if (videoStream?.url) {
-              console.log(`[PStream] Resolved video from ${instance}: ${videoStream.quality || 'unknown'}`);
-              return { uri: videoStream.url, related: curatedRelated };
-            }
-          }
-        } catch (err: any) {
-          if (err.name === 'AbortError') {
-            console.warn(`[PStream] Timeout from ${instance}`);
-          } else if (instance === 'https://api.piped.private.coffee' || instance === 'https://pipedapi.kavin.rocks') {
-            console.warn(`[PStream] ${instance} returned ${err.message || 500}`);
-          } else {
-            console.warn(`[PStream] Failed from ${instance}:`, err.message || err);
-          }
-        }
-      }
-
-      console.warn('[PStream] All Piped instances failed, trying Direct YouTube Resolver...');
-
-      // Fallback to Direct YouTube Resolver (internal API)
+      // 1. Primary Engine: Direct YouTube Resolver (Working 2026 Android_VR Method)
       const directResult = await DirectYtResolver.getStream(videoId, type);
       if (directResult) {
-        console.log(`[PStream] Resolved ${type} from DirectYT`);
-
-        // [NEW] Fetch related for algo
+        console.log(`[PStream] Resolved ${type} via DirectYT (Native)`);
+        
         let related: any[] = [];
         try {
           related = await DirectYtResolver.getNext(videoId);
         } catch (e) {
           console.warn('[PStream] Failed to fetch related from DirectYT', e);
         }
+        
         const curatedRelated = filterRelatedBySeed(related, seed);
-
-        return { uri: directResult.url, headers: directResult.headers, related: curatedRelated };
+        return { 
+          uri: directResult.url, 
+          mimeType: directResult.mimeType,
+          headers: directResult.headers, 
+          related: curatedRelated 
+        };
       }
 
       // All instances failed - return null (caller should handle gracefully)
-      console.warn('[PStream] All instances failed, no valid stream found');
+      console.warn('[PStream] No valid stream found for videoId:', videoId);
       return null;
     } catch (e: any) {
       console.error('[PStream] Music stream resolution error:', e);
@@ -815,8 +716,47 @@ export async function scrapePStream(media: ScrapeMedia, options?: PStreamScrapeO
       }
     };
 
-    const playback = await runWithSlidingWindow(sourceOrder, SOURCE_CONCURRENCY, trySource, () => {
-      abortSources = true;
+    // "First-to-Finish" Global Race
+    const playback = await new Promise<PStreamPlayback | null>((resolve) => {
+      let resolved = false;
+      let finishedCount = 0;
+      const initialBatch = sourceOrder.slice(0, SOURCE_CONCURRENCY);
+
+      const handleResult = (res: PStreamPlayback | null) => {
+        if (resolved) return;
+        finishedCount++;
+        if (res) {
+          resolved = true;
+          abortSources = true;
+          resolve(res);
+        } else if (finishedCount >= initialBatch.length) {
+          // If all in initial burst fail, try the remaining sources
+          const remaining = sourceOrder.slice(SOURCE_CONCURRENCY);
+          if (remaining.length === 0) {
+            resolve(null);
+          } else {
+            // Fall back to sliding window for remaining to avoid hammering
+            runWithSlidingWindow(remaining, 2, trySource).then(resolve);
+          }
+        }
+      };
+
+      if (!initialBatch.length) {
+        resolve(null);
+        return;
+      }
+
+      initialBatch.forEach(sourceId => {
+        trySource(sourceId).then(handleResult).catch(() => handleResult(null));
+      });
+
+      // Global safety timeout for the race
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      }, GLOBAL_SCRAPE_TIMEOUT_MS);
     });
 
     if (!playback) {

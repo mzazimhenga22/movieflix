@@ -1,7 +1,7 @@
-import path from 'path';
-import { defineConfig } from 'vitest/config';
 import eslintPlugin from '@nabla/vite-plugin-eslint';
+import path from 'path';
 import dts from 'vite-plugin-dts';
+import { defineConfig } from 'vitest/config';
 import pkg from './package.json';
 
 const shouldTestProviders = process.env.MW_TEST_PROVIDERS === 'true';
@@ -23,6 +23,7 @@ export default defineConfig((env) => ({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      'cheerio': path.resolve(__dirname, './src/cheerio-shim.ts'),
     },
   },
   build: {

@@ -1,27 +1,29 @@
+import { useAccent } from '@/components/app-components/AccentContext';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    Animated,
-    Dimensions,
-    Image,
-    Pressable,
-    SafeAreaView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Animated,
+  Dimensions,
+  Image,
+  Pressable,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { Video } from 'expo-av';
 import { firestore } from '../../constants/firebase';
 import { getAccentFromPosterPath } from '../../constants/theme';
 import { useUser } from '../../hooks/use-user';
-import { useAccent } from '../components/AccentContext';
-import { findOrCreateConversation, sendMessage, type Profile } from '../messaging/controller';
 import { followUser } from '../../lib/followGraph';
+import { findOrCreateConversation, sendMessage, type Profile } from '../messaging/controller';
+
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 
 interface StoryDoc {
   photoURL: string | null;
@@ -49,10 +51,70 @@ const StoryScreen = () => {
   const durationMs = 30000; // 30 seconds per story
   const { width } = Dimensions.get('window');
   const progressValueRef = useRef(0);
-  const animationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const animationRef = useRef<any | null>(null);
   const viewerId = (user as any)?.uid ?? null;
   const STORY_WINDOW_MS = 24 * 60 * 60 * 1000;
   const { setAccentColor } = useAccent();
+
+  const currentStory = stories[currentIndex];
+  const mediaUri =
+    (currentStory as any)?.mediaUrl || currentStory?.photoURL || (fallbackPhoto as string | undefined);
+
+  const mediaType: 'image' | 'video' = (() => {
+    const explicit = (currentStory as any)?.mediaType;
+    if (explicit === 'video') return 'video';
+    if (explicit === 'image') return 'image';
+    const uri = String(mediaUri || '').toLowerCase();
+    if (uri.includes('.mp4') || uri.includes('.m3u8')) return 'video';
+    return 'image';
+  })();
+
+  const player = useVideoPlayer(mediaType === 'video' ? String(mediaUri) : null, (p) => {
+    p.loop = false;
+  });
+
+  const handleNext = useCallback(() => {
+    if (currentIndex < stories.length - 1) {
+      setCurrentIndex((idx) => idx + 1);
+    } else {
+      router.back();
+    }
+  }, [currentIndex, router, stories.length]);
+
+  useEffect(() => {
+    if (mediaType === 'video') {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [mediaType, player]);
+
+  useEffect(() => {
+    if (mediaType !== 'video') return;
+
+    const subStatus = player.addListener('statusChange', (status: any) => {
+      if (status === 'error') handleNext();
+    });
+
+    const subTime = player.addListener('timeUpdate', (data: any) => {
+      const durationMillis = (data.duration ?? 0) * 1000;
+      const positionMillis = (data.currentTime ?? 0) * 1000;
+      if (durationMillis > 0) {
+        const ratio = Math.max(0, Math.min(1, positionMillis / durationMillis));
+        progress.setValue(ratio);
+      }
+    });
+
+    const subEnd = player.addListener('playToEnd', () => {
+      handleNext();
+    });
+
+    return () => {
+      subStatus.remove();
+      subTime.remove();
+      subEnd.remove();
+    };
+  }, [mediaType, player, progress, handleNext]);
 
   useEffect(() => {
     const fetchStories = async () => {
@@ -96,7 +158,7 @@ const StoryScreen = () => {
             // Fetch all stories for this user, then sort client-side by createdAt
             const q = query(storiesRef, where('userId', '==', userId));
             const listSnap = await getDocs(q);
-            const unsorted: (StoryDoc & { id: string })[] = listSnap.docs.map((d) => ({
+            const unsorted: (StoryDoc & { id: string })[] = listSnap.docs.map((d: any) => ({
               id: d.id,
               ...(d.data() as StoryDoc),
             }));
@@ -125,26 +187,13 @@ const StoryScreen = () => {
       }
     };
     fetchStories();
-  }, [id, fallbackPhoto]);
+  }, [id, fallbackPhoto, user]);
 
   useEffect(() => {
     if (!gateChecked && (user as any)?.uid) {
       setGateChecked(true);
     }
   }, [gateChecked, user]);
-
-  const currentStory = stories[currentIndex];
-  const mediaUri =
-    (currentStory as any)?.mediaUrl || currentStory?.photoURL || (fallbackPhoto as string | undefined);
-
-  const mediaType: 'image' | 'video' = (() => {
-    const explicit = (currentStory as any)?.mediaType;
-    if (explicit === 'video') return 'video';
-    if (explicit === 'image') return 'image';
-    const uri = String(mediaUri || '').toLowerCase();
-    if (uri.includes('.mp4') || uri.includes('.m3u8')) return 'video';
-    return 'image';
-  })();
 
   const startProgress = useCallback(
     (fromValue = 0) => {
@@ -157,13 +206,13 @@ const StoryScreen = () => {
         duration: remaining,
         useNativeDriver: false,
       });
-      animationRef.current.start(({ finished }) => {
+      animationRef.current.start(({ finished }: { finished: boolean }) => {
         if (finished) {
           handleNext();
         }
       });
     },
-    [durationMs]
+    [durationMs, handleNext, progress]
   );
 
   useEffect(() => {
@@ -187,21 +236,13 @@ const StoryScreen = () => {
     }
   }, [currentStory?.photoURL, setAccentColor]);
 
-  const handleNext = () => {
-    if (currentIndex < stories.length - 1) {
-      setCurrentIndex((idx) => idx + 1);
-    } else {
-      router.back();
-    }
-  };
-
-  const handlePrev = () => {
+  const handlePrev = useCallback(() => {
     if (currentIndex > 0) {
       setCurrentIndex((idx) => idx - 1);
     } else {
       router.back();
     }
-  };
+  }, [currentIndex, router]);
 
   const handleTap = (evt: any) => {
     const x = evt.nativeEvent.locationX;
@@ -213,9 +254,9 @@ const StoryScreen = () => {
   };
 
   const handlePressIn = () => {
-      progress.stopAnimation((value) => {
-        progressValueRef.current = value ?? 0;
-      });
+    progress.stopAnimation((value: number) => {
+      progressValueRef.current = value ?? 0;
+    });
   };
 
   const handlePressOut = () => {
@@ -349,11 +390,11 @@ const StoryScreen = () => {
             index < currentIndex
               ? '100%'
               : index === currentIndex
-              ? progress.interpolate({
+                ? progress.interpolate({
                   inputRange: [0, 1],
                   outputRange: ['0%', '100%'],
                 })
-              : '0%';
+                : '0%';
           return (
             <View key={s.id} style={styles.progressTrack}>
               <Animated.View style={[styles.progressFill, { width: barWidth }]} />
@@ -404,12 +445,12 @@ const StoryScreen = () => {
       >
         <View style={styles.storyMedia}>
           {mediaType === 'video' ? (
-            <Video
-              source={{ uri: String(mediaUri) }}
+            // @ts-ignore - expo-video typings for VideoView are conflicting with React Native ViewProps style
+            <VideoView
+              player={player}
               style={styles.storyImage}
-              resizeMode="cover"
-              shouldPlay
-              isLooping={false}
+              contentFit="cover"
+              showsPlaybackControls={false}
             />
           ) : (
             <Image source={{ uri: String(mediaUri) }} style={styles.storyImage} resizeMode="cover" />
@@ -426,6 +467,18 @@ const StoryScreen = () => {
 
         {currentStory?.overlayText ? (
           <View style={styles.overlayTextChip}>
+            <LiquidGlass
+              glowColor="#fff"
+              tintOpacity={0.4}
+              cornerRadius={18}
+              glowIntensity={0.15}
+              borderOpacity={0.25}
+              chromaticAberration={true}
+              depthEffect={true}
+              refractionAmount={0.3}
+              interactive={true}
+              style={StyleSheet.absoluteFillObject}
+            />
             <Text style={styles.overlayText}>{currentStory.overlayText}</Text>
           </View>
         ) : null}
@@ -442,19 +495,39 @@ const StoryScreen = () => {
         <View style={styles.reactionsRow}>
           {['👍', '😍', '😂', '🔥'].map((emoji) => (
             <TouchableOpacity key={emoji} style={styles.reactionBtn} onPress={() => handleQuickReaction(emoji)}>
+              <LiquidGlass
+                glowColor="#fff"
+                tintOpacity={0.4}
+                cornerRadius={18}
+                glowIntensity={0.1}
+                borderOpacity={0.2}
+                chromaticAberration={true}
+                interactive={true}
+                style={StyleSheet.absoluteFillObject}
+              />
               <Text style={styles.reactionText}>{emoji}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
         <View style={styles.replyBar}>
+          <LiquidGlass
+            glowColor="#fff"
+            tintOpacity={0.5}
+            cornerRadius={999}
+            glowIntensity={0.15}
+            borderOpacity={0.25}
+            chromaticAberration={true}
+            interactive={true}
+            style={StyleSheet.absoluteFillObject}
+          />
           <Ionicons name="happy-outline" size={20} color="rgba(255,255,255,0.7)" />
           <TextInput
             style={styles.replyInput}
             placeholder="Send a message"
             placeholderTextColor="rgba(255,255,255,0.6)"
             value={replyText}
-            onChangeText={(text) => {
+            onChangeText={(text: string) => {
               setReplyText(text);
             }}
             returnKeyType="send"
@@ -590,8 +663,8 @@ const styles = StyleSheet.create({
     right: 24,
     paddingVertical: 10,
     paddingHorizontal: 18,
-    backgroundColor: 'rgba(0,0,0,0.5)',
     borderRadius: 18,
+    overflow: 'hidden',
   },
   overlayText: {
     color: '#fff',
@@ -626,10 +699,10 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   reactionBtn: {
-    backgroundColor: 'rgba(0,0,0,0.45)',
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 6,
+    overflow: 'hidden',
   },
   reactionText: {
     fontSize: 18,
@@ -642,11 +715,11 @@ const styles = StyleSheet.create({
     bottom: 18,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
     borderRadius: 999,
     paddingHorizontal: 16,
     paddingVertical: 8,
     zIndex: 8,
+    overflow: 'hidden',
   },
   replyInput: {
     flex: 1,

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import LiquidGlass from '../../../../components/app-components/LiquidGlass';
 import { Genre } from '../../../../types/index';
 
 interface FiltersProps {
@@ -30,34 +31,48 @@ const Filters: React.FC<FiltersProps> = ({
             contentContainerStyle={styles.genreRow}
           >
             <TouchableOpacity
-              style={[styles.genreChip, activeGenreId == null && styles.genreChipActive]}
               onPress={() => setActiveGenreId(null)}
+              activeOpacity={0.8}
             >
-              <Text
-                style={[
-                  styles.genreChipText,
-                  activeGenreId == null && styles.genreChipTextActive,
-                ]}
-              >
-                All genres
-              </Text>
-            </TouchableOpacity>
-            {genres.map((g) => (
-              <TouchableOpacity
-                key={g.id}
-                style={[styles.genreChip, activeGenreId === g.id && styles.genreChipActive]}
-                onPress={() =>
-                  setActiveGenreId((current) => (current === g.id ? null : g.id))
-                }
+              <LiquidGlass
+                cornerRadius={999}
+                tintOpacity={activeGenreId == null ? 0.9 : 0.02}
+                borderOpacity={activeGenreId == null ? 0.3 : 0.16}
+                style={[styles.genreChip, activeGenreId == null && styles.genreChipActive]}
               >
                 <Text
                   style={[
                     styles.genreChipText,
-                    activeGenreId === g.id && styles.genreChipTextActive,
+                    activeGenreId == null && styles.genreChipTextActive,
                   ]}
                 >
-                  {g.name}
+                  All genres
                 </Text>
+              </LiquidGlass>
+            </TouchableOpacity>
+            {genres.map((g) => (
+              <TouchableOpacity
+                key={g.id}
+                onPress={() =>
+                  setActiveGenreId((current) => (current === g.id ? null : g.id))
+                }
+                activeOpacity={0.8}
+              >
+                <LiquidGlass
+                  cornerRadius={999}
+                  tintOpacity={activeGenreId === g.id ? 0.9 : 0.02}
+                  borderOpacity={activeGenreId === g.id ? 0.3 : 0.16}
+                  style={[styles.genreChip, activeGenreId === g.id && styles.genreChipActive]}
+                >
+                  <Text
+                    style={[
+                      styles.genreChipText,
+                      activeGenreId === g.id && styles.genreChipTextActive,
+                    ]}
+                  >
+                    {g.name}
+                  </Text>
+                </LiquidGlass>
               </TouchableOpacity>
             ))}
           </ScrollView>
@@ -77,14 +92,21 @@ const Filters: React.FC<FiltersProps> = ({
           return (
             <TouchableOpacity
               key={key}
-              style={[styles.filterChip, isActive && styles.filterChipActive]}
               onPress={() => setActiveFilter(key as any)}
+              activeOpacity={0.8}
             >
-              <Text
-                style={[styles.filterChipText, isActive && styles.filterChipTextActive]}
+              <LiquidGlass
+                cornerRadius={999}
+                tintOpacity={isActive ? 0.9 : 0.04}
+                borderOpacity={isActive ? 0.3 : 0.16}
+                style={[styles.filterChip, isActive && styles.filterChipActive]}
               >
-                {labelMap[key]}
-              </Text>
+                <Text
+                  style={[styles.filterChipText, isActive && styles.filterChipTextActive]}
+                >
+                  {labelMap[key]}
+                </Text>
+              </LiquidGlass>
             </TouchableOpacity>
           );
         })}
@@ -115,15 +137,9 @@ const styles = StyleSheet.create({
   genreChip: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    backgroundColor: 'rgba(255,255,255,0.02)',
     marginRight: 8,
   },
   genreChipActive: {
-    backgroundColor: 'rgba(229,9,20,0.9)',
-    borderColor: '#e50914',
   },
   genreChipText: {
     color: 'rgba(255,255,255,0.8)',
@@ -143,14 +159,8 @@ const styles = StyleSheet.create({
   filterChip: {
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
   },
   filterChipActive: {
-    backgroundColor: '#e50914',
-    borderColor: '#e50914',
   },
   filterChipText: {
     color: 'rgba(255,255,255,0.8)',

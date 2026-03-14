@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { listenToBoostedLiveStreams, listenToLiveStreams } from '@/lib/live/liveService';
 import type { LiveStream } from '@/lib/live/types';
 

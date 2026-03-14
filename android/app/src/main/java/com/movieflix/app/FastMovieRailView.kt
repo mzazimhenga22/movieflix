@@ -1,4 +1,4 @@
-package com.movieflix.app
+package com.movieflix.app.app
 
 import android.content.Context
 import android.graphics.Color

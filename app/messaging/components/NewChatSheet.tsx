@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { getSuggestedPeople, Profile } from '../controller';
 import { Ionicons } from '@expo/vector-icons';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 
 interface NewChatSheetProps {
   isVisible: boolean;

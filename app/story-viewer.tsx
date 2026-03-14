@@ -12,7 +12,7 @@ import {
   serverTimestamp,
 } from '@firebase/firestore';
 import { BottomSheetBackdrop, BottomSheetModal, BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import { ResizeMode, Video } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
@@ -307,11 +307,21 @@ const StoryViewerScreen = () => {
     return require('react-native-pager-view').default;
   }, [isWeb]);
   const pagerRef = useRef<any>(null);
-  const videoRef = useRef<any>(null);
   const handleNextMediaRef = useRef<(() => void) | null>(null);
   const handleNextStoryRef = useRef<(() => void) | null>(null);
   const handlePreviousStoryRef = useRef<(() => void) | null>(null);
   const gestureTranslationRef = useRef({ x: 0, y: 0 });
+
+  const currentStory = stories[currentStoryIndex] ?? stories[0];
+  const currentMedia =
+    currentStory && Array.isArray((currentStory as any).media) && (currentStory as any).media.length > 0
+      ? (currentStory as any).media[currentMediaIndex] ?? (currentStory as any).media[0]
+      : undefined;
+
+  const player = useVideoPlayer(currentMedia?.type === 'video' ? currentMedia.uri : null, (p) => {
+    p.loop = false;
+    p.muted = isMuted;
+  });
 
   const viewersSheetRef = useRef<BottomSheetModal | null>(null);
   const viewersSheetSnapPoints = useMemo(() => ['50%', '80%'], []);
@@ -369,12 +379,6 @@ const StoryViewerScreen = () => {
   });
 
   const overlayOpen = replyOpen || viewersOpen;
-
-  const currentStory = stories[currentStoryIndex] ?? stories[0];
-  const currentMedia =
-    currentStory && Array.isArray((currentStory as any).media) && (currentStory as any).media.length > 0
-      ? (currentStory as any).media[currentMediaIndex] ?? (currentStory as any).media[0]
-      : undefined;
 
   useEffect(() => {
     if (!stories.length) return;
@@ -461,8 +465,8 @@ const StoryViewerScreen = () => {
   const pausePlayback = useCallback(() => {
     if (overlayOpen) return;
     stopProgress();
-    try { videoRef.current?.pauseAsync?.(); } catch { }
-  }, [overlayOpen, stopProgress]);
+    try { player.pause(); } catch { }
+  }, [overlayOpen, stopProgress, player]);
 
   const resumePlayback = useCallback(() => {
     if (overlayOpen) return;
@@ -471,273 +475,141 @@ const StoryViewerScreen = () => {
       startProgress(progressValueRef.current, STORY_IMAGE_DURATION_MS);
     }
 
-    try { if (currentMedia?.type === 'video') videoRef.current?.playAsync?.(); } catch { }
-  }, [currentMedia?.type, overlayOpen, startProgress]);
+    try { if (currentMedia?.type === 'video') player.play(); } catch { }
+  }, [currentMedia?.type, overlayOpen, startProgress, player]);
 
-  const isAdStory = useMemo(() => Boolean((currentStory as any)?.kind === 'ad'), [currentStory]);
-  const storyAdImpressionsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (currentPlan !== 'free') return;
-    const story: any = currentStory;
-    if (!story || story.kind !== 'ad') return;
-    const productId = story?.productId ? String(story.productId) : '';
-    if (!productId) return;
-    if (storyAdImpressionsRef.current.has(productId)) return;
-    storyAdImpressionsRef.current.add(productId);
-    void trackPromotionImpression({ productId, placement: 'story' }).catch(() => { });
-  }, [currentPlan, currentStory]);
-
-  const ownerId = useMemo(() => {
-    const s: any = currentStory;
-    return s && s.kind !== 'ad' && s.userId ? String(s.userId) : null;
-  }, [currentStory]);
-  const isOwner = Boolean(ownerId && viewerId && ownerId === viewerId);
-
-  const canReply = useMemo(() => {
-    return !!ownerId && !isOwner && !isAdStory;
-  }, [isAdStory, isOwner, ownerId]);
-
-  const openReply = useCallback(() => {
-    if (!canReply) return;
-    stopProgress();
-    try { videoRef.current?.pauseAsync?.(); } catch { }
-    setReplyOpen(true);
-    // Focus after a tick to allow render
-    setTimeout(() => {
-      try { replyInputRef.current?.focus(); } catch { }
-    }, 100);
-  }, [canReply, stopProgress]);
-
-  const openViewers = useCallback(() => {
-    if (!isOwner) return;
-    stopProgress();
-    try { videoRef.current?.pauseAsync?.(); } catch { }
-    setViewersOpen(true);
-    // Ensure sheet is mounted before presenting
-    requestAnimationFrame(() => {
-      try { viewersSheetRef.current?.present?.(); } catch { }
-    });
-  }, [isOwner, stopProgress]);
-
-  const closeViewers = useCallback(() => {
-    setViewersOpen(false);
-    try { viewersSheetRef.current?.dismiss?.(); } catch { }
-    setTimeout(() => resumePlayback(), 60);
-  }, [resumePlayback]);
-
-  const closeReply = useCallback((_options: { clearText?: boolean } = {}) => {
-    Keyboard.dismiss();
-    setReplyOpen(false);
-    setReplyText('');
-    // Resume story playback after reply overlay closes
-    setTimeout(() => resumePlayback(), 100);
-  }, [resumePlayback]);
-
-  const handleSendReplyText = useCallback(
-    async (text: string) => {
-      const trimmed = String(text || '').trim();
-      const story: any = currentStory;
-      const targetUserId = story?.userId ? String(story.userId) : null;
-      if (!trimmed || !targetUserId) return;
-
-      try {
-        const target: Profile = {
-          id: targetUserId,
-          displayName: story?.username || story?.title || 'Story',
-          photoURL: story?.avatar || story?.image || '',
-        } as any;
-        const conversationId = await findOrCreateConversation(target);
-        await sendMessage(conversationId, { text: trimmed });
-        closeReply({ clearText: true });
-      } catch (e) {
-        console.warn('Failed to send story reply', e);
-      }
-    },
-    [closeReply, currentStory]
-  );
-
-  const handleDeleteStory = useCallback(async () => {
-    if (!isOwner || !currentStory || (currentStory as any).kind === 'ad') return;
-    const storyId = (currentStory as any)?.id;
-    if (!storyId) return;
-    Alert.alert('Delete story', 'This story will be removed for everyone.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await runTransaction(firestore, async (tx: Transaction) => {
-              const ref = doc(firestore, 'stories', String(storyId));
-              tx.delete(ref);
-            });
-            router.back();
-          } catch (e) {
-            Alert.alert('Delete failed', 'Unable to delete this story right now.');
-          }
-        },
-      },
-    ]);
-  }, [currentStory, isOwner, router]);
-
-  const handleSwipeGestureEvent = useCallback((evt: any) => {
-    gestureTranslationRef.current = {
-      x: evt?.nativeEvent?.translationX ?? 0,
-      y: evt?.nativeEvent?.translationY ?? 0,
-    };
-  }, []);
-
-  const handleSwipeStateChange = useCallback(
-    (evt: any) => {
-      const state = evt?.nativeEvent?.state;
-      if (state !== GestureState.END) return;
-
-      const dy = gestureTranslationRef.current.y ?? evt?.nativeEvent?.translationY ?? 0;
-      const dx = gestureTranslationRef.current.x ?? evt?.nativeEvent?.translationX ?? 0;
-      gestureTranslationRef.current = { x: 0, y: 0 };
-
-      if (!overlayOpen && Math.abs(dx) > 55 && Math.abs(dy) < 80) {
-        if (dx < 0) handleNextStoryRef.current?.();
-        else handlePreviousStoryRef.current?.();
-        return;
-      }
-
-      if (!overlayOpen && dy < -55 && Math.abs(dx) < 80) {
-        if (isOwner) openViewers();
-        else openReply();
-        return;
-      }
-
-      if (overlayOpen && dy > 55 && Math.abs(dx) < 80) {
-        if (replyOpen) closeReply();
-        if (viewersOpen) closeViewers();
-      }
-    },
-    [closeReply, closeViewers, isOwner, openReply, openViewers, overlayOpen, replyOpen, viewersOpen],
-  );
-
-  useEffect(() => {
-    if (!currentStory) return;
-    if (overlayOpen) {
-      stopProgress();
-      return;
-    }
-
-    if (currentMedia?.type === 'image') {
-      startProgress(progressValueRef.current || 0, STORY_IMAGE_DURATION_MS);
-    } else {
-      // Video progress is driven by playback status
-      stopProgress();
-      progressValueRef.current = 0;
-      progress.setValue(0);
-    }
-    return () => { stopProgress(); };
-  }, [currentStoryIndex, currentMediaIndex, currentMedia?.type, overlayOpen, progress, startProgress, stopProgress]);
-
-  const handleNextStory = useCallback(() => {
-    if (currentStoryIndex < stories.length - 1) {
-      progressValueRef.current = 0;
-      pagerRef.current?.setPage(currentStoryIndex + 1);
-      setCurrentStoryIndex((p) => p + 1);
-      setCurrentMediaIndex(0);
-    } else {
-      router.back();
-    }
-  }, [currentStoryIndex, router, stories.length]);
-
-  const handlePreviousStory = useCallback(() => {
-    if (currentStoryIndex > 0) {
-      progressValueRef.current = 0;
-      pagerRef.current?.setPage(currentStoryIndex - 1);
-      setCurrentStoryIndex((p) => p - 1);
-      setCurrentMediaIndex(0);
-    } else {
-      router.back();
-    }
-  }, [currentStoryIndex, router]);
-
-  const handleNextMedia = useCallback(() => {
-    if (!currentStory) return;
-    const mediaLen = Array.isArray(currentStory.media) ? currentStory.media.length : 0;
-    if (currentMediaIndex < mediaLen - 1) {
-      progressValueRef.current = 0;
-      setCurrentMediaIndex((p) => p + 1);
-    } else {
-      handleNextStory();
-    }
-  }, [currentMediaIndex, currentStory, handleNextStory]);
-
-  const handlePreviousMedia = useCallback(() => {
-    if (!currentStory) return;
+  // Navigation and gesture handlers
+  const handlePressPrev = useCallback(() => {
+    const mediaList = Array.isArray((currentStory as any).media) ? ((currentStory as any).media as StoryMedia[]) : [];
     if (currentMediaIndex > 0) {
-      progressValueRef.current = 0;
-      setCurrentMediaIndex((p) => p - 1);
-    } else {
-      handlePreviousStory();
+      setCurrentMediaIndex(currentMediaIndex - 1);
+    } else if (currentStoryIndex > 0) {
+      const prevStory = stories[currentStoryIndex - 1] as any;
+      const prevMediaList = Array.isArray(prevStory?.media) ? prevStory.media : [];
+      setCurrentStoryIndex(currentStoryIndex - 1);
+      setCurrentMediaIndex(Math.max(0, prevMediaList.length - 1));
     }
-  }, [currentMediaIndex, currentStory, handlePreviousStory]);
-
-  const didLongPressRef = useRef(false);
+    stopProgress();
+    progressValueRef.current = 0;
+    progress.setValue(0);
+  }, [currentMediaIndex, currentStoryIndex, currentStory, stories, stopProgress, progress]);
 
   const handlePressNext = useCallback(() => {
-    if (didLongPressRef.current) return;
-    handleNextMedia();
-  }, [handleNextMedia]);
-
-  const handlePressPrev = useCallback(() => {
-    if (didLongPressRef.current) return;
-    handlePreviousMedia();
-  }, [handlePreviousMedia]);
+    const mediaList = Array.isArray((currentStory as any).media) ? ((currentStory as any).media as StoryMedia[]) : [];
+    if (currentMediaIndex < mediaList.length - 1) {
+      setCurrentMediaIndex(currentMediaIndex + 1);
+    } else if (currentStoryIndex < stories.length - 1) {
+      setCurrentStoryIndex(currentStoryIndex + 1);
+      setCurrentMediaIndex(0);
+    } else {
+      router.back();
+    }
+    stopProgress();
+    progressValueRef.current = 0;
+    progress.setValue(0);
+  }, [currentMediaIndex, currentStoryIndex, currentStory, stories, stopProgress, progress, router]);
 
   const handleLongPress = useCallback(() => {
-    didLongPressRef.current = true;
     pausePlayback();
   }, [pausePlayback]);
 
   const handlePressOut = useCallback(() => {
-    if (didLongPressRef.current) {
-      didLongPressRef.current = false;
-      resumePlayback();
-    }
+    resumePlayback();
   }, [resumePlayback]);
 
-  useEffect(() => { handleNextMediaRef.current = handleNextMedia; }, [handleNextMedia]);
-  useEffect(() => {
-    handleNextStoryRef.current = handleNextStory;
-    handlePreviousStoryRef.current = handlePreviousStory;
-  }, [handleNextStory, handlePreviousStory]);
-
-  useEffect(() => {
-    setCurrentStoryIndex(initialStoryIndex);
-    setCurrentMediaIndex(initialMediaIndex);
-    try { pagerRef.current?.setPage?.(initialStoryIndex); } catch { }
-  }, [initialStoryIndex, initialMediaIndex]);
-
-  const onPageSelected = useCallback((e: any) => {
-    const newIndex = e.nativeEvent.position;
-    setReplyOpen(false);
-    Keyboard.dismiss();
-    progressValueRef.current = 0;
-    setCurrentStoryIndex(newIndex);
-    setCurrentMediaIndex(0);
+  const handleSwipeGestureEvent = useCallback((event: any) => {
+    gestureTranslationRef.current = {
+      x: event.nativeEvent?.translationX ?? 0,
+      y: event.nativeEvent?.translationY ?? 0,
+    };
   }, []);
 
-  const onVideoPlaybackStatusUpdate = useCallback(
-    (status: any) => {
-      if (!status?.isLoaded) {
-        setVideoLoading(true);
-        stopProgress();
-        videoProgressDriveRef.current.started = false;
+  const handleSwipeStateChange = useCallback((event: any) => {
+    if (event.nativeEvent?.state === GestureState.END) {
+      const { x, y } = gestureTranslationRef.current;
+      
+      // Swipe down to close
+      if (y > 80) {
+        router.back();
         return;
       }
+      
+      // Swipe left for next story
+      if (x < -60 && currentStoryIndex < stories.length - 1) {
+        setCurrentStoryIndex(currentStoryIndex + 1);
+        setCurrentMediaIndex(0);
+        stopProgress();
+        progressValueRef.current = 0;
+        progress.setValue(0);
+        return;
+      }
+      
+      // Swipe right for previous story
+      if (x > 60 && currentStoryIndex > 0) {
+        setCurrentStoryIndex(currentStoryIndex - 1);
+        setCurrentMediaIndex(0);
+        stopProgress();
+        progressValueRef.current = 0;
+        progress.setValue(0);
+        return;
+      }
+    }
+  }, [currentStoryIndex, stories, stopProgress, progress, router]);
 
-      setVideoLoading(false);
+  const onPageSelected = useCallback((event: any) => {
+    const position = event.nativeEvent?.position;
+    if (typeof position === 'number' && position !== currentStoryIndex) {
+      setCurrentStoryIndex(position);
+      setCurrentMediaIndex(0);
+      stopProgress();
+      progressValueRef.current = 0;
+      progress.setValue(0);
+    }
+  }, [currentStoryIndex, stopProgress, progress]);
 
-      const durationMillis = typeof status.durationMillis === 'number' ? status.durationMillis : 0;
-      const positionMillis = typeof status.positionMillis === 'number' ? status.positionMillis : 0;
-      const isPlaying = Boolean(status.isPlaying);
-      const isBuffering = Boolean(status.isBuffering);
+  // Store navigation handlers in refs
+  useEffect(() => {
+    handleNextMediaRef.current = handlePressNext;
+    handleNextStoryRef.current = () => {
+      if (currentStoryIndex < stories.length - 1) {
+        setCurrentStoryIndex(currentStoryIndex + 1);
+        setCurrentMediaIndex(0);
+      }
+    };
+    handlePreviousStoryRef.current = () => {
+      if (currentStoryIndex > 0) {
+        setCurrentStoryIndex(currentStoryIndex - 1);
+        setCurrentMediaIndex(0);
+      }
+    };
+  }, [handlePressNext, currentStoryIndex, stories.length]);
+
+  useEffect(() => {
+    player.muted = isMuted;
+  }, [isMuted, player]);
+
+  useEffect(() => {
+    if (currentMedia?.type === 'video' && !overlayOpen) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [currentMedia?.type, overlayOpen, player]);
+
+  useEffect(() => {
+    const subStatus = player.addListener('statusChange', (status) => {
+      if (status === 'ready') setVideoLoading(false);
+      if (status === 'loading') setVideoLoading(true);
+      if (status === 'error') {
+        setMediaError(true);
+        setVideoLoading(false);
+        stopProgress();
+      }
+    });
+
+    const subTime = player.addListener('timeUpdate', (data) => {
+      const durationMillis = data.duration * 1000;
+      const positionMillis = data.currentTime * 1000;
 
       if (durationMillis > 0) {
         const ratio = Math.max(0, Math.min(1, positionMillis / durationMillis));
@@ -748,39 +620,39 @@ const StoryViewerScreen = () => {
         const keyChanged = drive.key !== driveKey;
         if (keyChanged) {
           drive.key = driveKey;
-          drive.isPlaying = false;
-          drive.isBuffering = false;
-          drive.durationMillis = durationMillis;
           drive.started = false;
           try { progress.setValue(ratio); } catch { }
         }
 
+        const isPlaying = player.playing;
+        const isBuffering = player.status === 'buffering';
         const shouldDrive = isPlaying && !isBuffering && !overlayOpen;
 
         if (shouldDrive) {
-          const shouldRestart = !drive.started || !drive.isPlaying || drive.isBuffering || drive.durationMillis !== durationMillis;
-          if (shouldRestart) {
+          if (!drive.started || drive.durationMillis !== durationMillis) {
             drive.durationMillis = durationMillis;
             drive.started = true;
-            drive.isPlaying = isPlaying;
-            drive.isBuffering = isBuffering;
             try { progress.setValue(ratio); } catch { }
             startProgress(ratio, durationMillis);
           }
         } else {
-          if (drive.started || drive.isPlaying || drive.isBuffering) stopProgress();
+          if (drive.started) stopProgress();
           drive.started = false;
-          drive.isPlaying = isPlaying;
-          drive.isBuffering = isBuffering;
-          drive.durationMillis = durationMillis;
           try { progress.setValue(ratio); } catch { }
         }
       }
+    });
 
-      if (status.didJustFinish) handleNextMedia();
-    },
-    [currentMediaIndex, currentStoryIndex, handleNextMedia, overlayOpen, progress, startProgress, stopProgress]
-  );
+    const subEnd = player.addListener('playToEnd', () => {
+      handleNextMediaRef.current?.();
+    });
+
+    return () => {
+      subStatus.remove();
+      subTime.remove();
+      subEnd.remove();
+    };
+  }, [currentMediaIndex, currentStoryIndex, overlayOpen, player, progress, startProgress, stopProgress]);
 
   const activeStoryDocId = useMemo(() => {
     const id = (currentMedia as any)?.storyId;
@@ -1090,25 +962,11 @@ const StoryViewerScreen = () => {
                         </View>
                       )}
                       {overlayOpen ? <View style={styles.mediaVideo} /> : (
-                        <Video
-                          key={`${currentMedia?.uri || ''}-${mediaReloadNonce}`}
-                          ref={videoRef}
+                        <VideoView
+                          player={player}
                           style={styles.mediaVideo}
-                          source={{ uri: String(currentMedia?.uri || '') }}
-                          useNativeControls={false}
-                          resizeMode={ResizeMode.COVER}
-                          isLooping={false}
-                          isMuted={isMuted}
-                          shouldPlay={storyIdx === currentStoryIndex}
-                          progressUpdateIntervalMillis={1000}
-                          onPlaybackStatusUpdate={onVideoPlaybackStatusUpdate}
-                          onLoadStart={() => setVideoLoading(true)}
-                          onReadyForDisplay={() => setVideoLoading(false)}
-                          onError={() => {
-                            setMediaError(true);
-                            setVideoLoading(false);
-                            stopProgress();
-                          }}
+                          contentFit="cover"
+                          showsPlaybackControls={false}
                         />
                       )}
                     </View>

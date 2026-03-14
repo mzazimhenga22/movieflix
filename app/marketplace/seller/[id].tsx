@@ -17,7 +17,7 @@ import {
 
 import ScreenWrapper from '../../../components/ScreenWrapper';
 import { useMarketplaceCart } from '../../../hooks/use-marketplace-cart';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '../../../components/app-components/AccentContext';
 import ProductCard from '../components/ProductCard';
 import { getProductsBySellerId, type Product } from '../api';
 import { findOrCreateConversation, getProfileById, type Profile } from '../../messaging/controller';

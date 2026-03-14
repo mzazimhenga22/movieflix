@@ -6,7 +6,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { useUser } from '../../hooks/use-user';
 import { useActiveProfile } from '../../hooks/use-active-profile';

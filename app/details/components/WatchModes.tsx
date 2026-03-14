@@ -1,8 +1,9 @@
-import React, { useRef, useEffect } from 'react';
-import { Animated, Dimensions, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Dimensions, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import LiquidGlass from '../../../components/app-components/LiquidGlass';
+
 
 interface Props {
   onWatchParty?: () => void;
@@ -82,7 +83,7 @@ export default function WatchModes({ onWatchParty, onDownload, onAddToList, onSh
 
   const handlePress = (mode: typeof modes[0], index: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    
+
     // Bounce animation
     Animated.sequence([
       Animated.timing(scaleAnims[index], { toValue: 0.9, duration: 100, useNativeDriver: true }),
@@ -118,17 +119,22 @@ export default function WatchModes({ onWatchParty, onDownload, onAddToList, onSh
                 },
               ]}
             >
-              <LinearGradient
-                colors={mode.gradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
+              <LiquidGlass
+                glowColor={mode.gradient[0]}
+                tintColor="#0a0c18"
+                tintOpacity={0.5}
+                cornerRadius={20}
+                glowIntensity={0.5}
+                borderWidth={1.5}
+                chromaticAberration={true}
+                refractionAmount={0.4}
                 style={styles.cardGradient}
               />
-              
+
               <View style={styles.iconContainer}>
                 <Ionicons name={mode.icon as any} size={28} color="#fff" />
               </View>
-              
+
               <Text style={styles.modeLabel}>{mode.label}</Text>
               <Text style={styles.modeSubtitle}>{mode.subtitle}</Text>
 
@@ -141,6 +147,17 @@ export default function WatchModes({ onWatchParty, onDownload, onAddToList, onSh
 
       {/* Features row */}
       <View style={styles.featuresRow}>
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0a0c18"
+          tintOpacity={0.4}
+          cornerRadius={16}
+          glowIntensity={0.2}
+          borderWidth={1}
+          chromaticAberration={true}
+          refractionAmount={0.3}
+          style={StyleSheet.absoluteFillObject}
+        />
         <View style={styles.featureItem}>
           <Ionicons name="checkmark-circle" size={16} color="#4cd964" />
           <Text style={styles.featureText}>4K Ultra HD</Text>

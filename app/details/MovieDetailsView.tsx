@@ -1,15 +1,17 @@
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FlashList } from '@shopify/flash-list';
-import { ResizeMode, Video } from 'expo-av';
-import { BlurView } from 'expo-blur';
 import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Animated, Easing, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, Easing, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator, Dimensions } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import Svg, { Defs, Path, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
+import { useAccent } from '../../components/app-components/AccentContext';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
 import { IMAGE_BASE_URL } from '../../constants/api';
 import { firestore } from '../../constants/firebase';
 import { useUser } from '../../hooks/use-user';
@@ -22,10 +24,13 @@ import { createPrefetchKey, storePrefetchedPlayback } from '../../lib/videoPrefe
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { scrapeImdbTrailer as scrapeIMDbTrailer } from '../../src/providers/scrapeImdbTrailer';
 import { searchClipCafe } from '../../src/providers/shortclips';
-import { scrapePStream, usePStream } from '../../src/pstream/usePStream';
-import { useAccent } from '../components/AccentContext';
+import { usePStream } from '../../src/pstream/usePStream';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnyVideoView = VideoView as any;
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList as any);
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 import { DownloadQualityPicker, type DownloadQualityOption } from '../../components/DownloadQualityPicker';
 
@@ -56,12 +61,14 @@ const StoryCardWithWater = ({
 }: {
   movie: Media | null;
   releaseDateValue: string | undefined;
-  storyCardAnim: Animated.Value;
+  storyCardAnim: any;
   accentColor: string;
 }) => {
   const waveAnim = useRef(new Animated.Value(0)).current;
   const shimmerAnim = useRef(new Animated.Value(0)).current;
   const bubbleAnim = useRef(new Animated.Value(0)).current;
+
+  const [dimensions, setDimensions] = useState({ width: 350, height: 420 });
 
   useEffect(() => {
     // Water wave animation
@@ -93,8 +100,8 @@ const StoryCardWithWater = ({
     ).start();
   }, []);
 
-  const cardWidth = 350;
-  const cardHeight = 420;
+  const cardWidth = dimensions.width;
+  const cardHeight = dimensions.height;
 
   const wave1Path = waveAnim.interpolate({
     inputRange: [0, 0.5, 1],
@@ -116,6 +123,12 @@ const StoryCardWithWater = ({
 
   return (
     <Animated.View
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        if (width > 0 && height > 0) {
+          setDimensions({ width, height });
+        }
+      }}
       style={[
         storyCardStyles.container,
         {
@@ -128,11 +141,14 @@ const StoryCardWithWater = ({
     >
       {/* Glass background */}
       <View style={storyCardStyles.glassWrap}>
-        {Platform.OS === 'ios' ? (
-          <BlurView intensity={30} tint="dark" style={StyleSheet.absoluteFillObject} />
-        ) : (
-          <View style={storyCardStyles.androidGlass} />
-        )}
+        <LiquidGlass
+          glowColor={accentColor || '#7dd8ff'}
+          tintOpacity={0.15}
+          cornerRadius={24}
+          glowIntensity={0.5}
+          borderOpacity={0.25}
+          style={StyleSheet.absoluteFillObject}
+        />
       </View>
 
       {/* Accent glow at top */}
@@ -485,6 +501,8 @@ const MovieDetailsView: React.FC<Props> = ({
   type DetailsRow =
     | { type: 'stickyHeader'; key: string }
     | { type: 'hero'; key: string }
+    | { type: 'actionButtons'; key: string }
+    | { type: 'tabs'; key: string }
     | { type: 'quickActions'; key: string }
     | { type: 'rating'; key: string }
     | { type: 'stats'; key: string }
@@ -506,14 +524,25 @@ const MovieDetailsView: React.FC<Props> = ({
   const [selectedTab, setSelectedTab] = useState<'story' | 'episodes' | 'trailers' | 'related' | 'cast'>('story');
   const [showMiniPlayer, setShowMiniPlayer] = useState(false);
   const [isInMyList, setIsInMyList] = useState(false);
+  const [playSliderProgress, setPlaySliderProgress] = useState(0);
+  const lastScrollUpdateRef = useRef(0);
   const countdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const trailerCountdownAnim = useRef(new Animated.Value(0)).current;
-  const videoRef = useRef<any>(null);
+  const scrollY = useRef(new Animated.Value(0)).current;
   const router = useRouter();
   const headerRef = React.useRef<any>(null);
   const normalizedMediaType: 'movie' | 'tv' = typeof mediaType === 'string' && mediaType === 'tv' ? 'tv' : 'movie';
   const { accentColor } = useAccent();
   const { currentPlan } = useSubscription();
+
+  const player = useVideoPlayer(imdbTrailer?.url || null, (p) => {
+    p.loop = true;
+    p.muted = isMuted;
+  });
+
+  useEffect(() => {
+    player.muted = isMuted;
+  }, [isMuted, player]);
 
   const [selectedSeasonId, setSelectedSeasonId] = useState<number | null>(() => {
     const first = Array.isArray(seasons) && seasons.length ? seasons[0] : null;
@@ -550,10 +579,9 @@ const MovieDetailsView: React.FC<Props> = ({
       headerRef.current?.pauseTrailer?.();
     } catch { }
 
-    // Pause the inline hero trailer (expo-av Video)
+    // Pause the inline hero trailer (expo-video)
     try {
-      void videoRef.current?.pauseAsync?.();
-      void videoRef.current?.stopAsync?.();
+      player.pause();
     } catch { }
 
     try {
@@ -613,6 +641,7 @@ const MovieDetailsView: React.FC<Props> = ({
     }).start();
   }, [heroFadeAnim, fabScaleAnim, storyCardAnim, sectionsAnim]);
   const [isLaunchingPlayer, setIsLaunchingPlayer] = React.useState(false);
+  const [isDownloadingMain, setIsDownloadingMain] = React.useState(false);
   const { scrape: scrapeDownload } = usePStream();
   const { user } = useUser();
 
@@ -697,7 +726,7 @@ const MovieDetailsView: React.FC<Props> = ({
               const episodesSnap = await getDocs(episodesQuery);
               const epProgress: Record<string, WatchProgressData> = {};
 
-              episodesSnap.forEach((epDoc) => {
+              episodesSnap.forEach((epDoc: any) => {
                 const data = epDoc.data();
                 if (data?.seasonNumber && data?.episodeNumber) {
                   const epKey = `s${data.seasonNumber}e${data.episodeNumber}`;
@@ -786,7 +815,7 @@ const MovieDetailsView: React.FC<Props> = ({
             toValue: 1,
             duration: autoplayMs,
             useNativeDriver: false,
-          }).start(({ finished }) => {
+          }).start(({ finished }: any) => {
             if (!finished || cancelled) return;
             try {
               countdownInterval.current && clearInterval(countdownInterval.current);
@@ -1060,7 +1089,7 @@ const MovieDetailsView: React.FC<Props> = ({
         const sourceOrder = buildSourceOrder(Boolean(preferAnimeSources));
         const debugTag = buildScrapeDebugTag('details-prefetch', title);
 
-        void (async () => {
+      void (async () => {
           try {
             const mediaPayload =
               normalizedMediaType === 'tv'
@@ -1091,14 +1120,29 @@ const MovieDetailsView: React.FC<Props> = ({
                   releaseYear,
                 };
 
-            const playback = await scrapePStream(mediaPayload as any, { sourceOrder, debugTag });
-            storePrefetchedPlayback(prefetchKey, {
-              playback,
-              title:
-                normalizedMediaType === 'tv'
-                  ? `${title} • S${String(Number((baseTarget.params as any).seasonNumber) || 1).padStart(2, '0')}E${String(Number((baseTarget.params as any).episodeNumber) || 1).padStart(2, '0')}`
-                  : title,
-            });
+            const formattedTitle =
+              normalizedMediaType === 'tv'
+                ? `${title} \u2022 S${String(Number((baseTarget.params as any).seasonNumber) || 1).padStart(2, '0')}E${String(Number((baseTarget.params as any).episodeNumber) || 1).padStart(2, '0')}`
+                : title;
+
+            // Attempt 1: standard source order (same as video-player)
+            let playback: any = null;
+            try {
+              playback = await scrapeDownload(mediaPayload as any, { sourceOrder, debugTag, isPrefetch: true });
+            } catch {
+              // Attempt 2: reversed source order (same fallback as video-player)
+              try {
+                const deepOrder = [...sourceOrder].reverse();
+                const retryTag = buildScrapeDebugTag('details-prefetch-retry', title);
+                playback = await scrapeDownload(mediaPayload as any, { sourceOrder: deepOrder, debugTag: retryTag, isPrefetch: true });
+              } catch {
+                // give up silently
+              }
+            }
+
+            if (playback) {
+              storePrefetchedPlayback(prefetchKey, { playback, title: formattedTitle });
+            }
           } catch {
             // ignore
           }
@@ -1115,6 +1159,14 @@ const MovieDetailsView: React.FC<Props> = ({
       );
     } finally {
       setIsLaunchingPlayer(false);
+    }
+  };
+
+  const handlePlaySliderComplete = (val: number) => {
+    if (val > 0.9) {
+      handlePlayMovie();
+    } else {
+      setPlaySliderProgress(0);
     }
   };
 
@@ -1178,11 +1230,26 @@ const MovieDetailsView: React.FC<Props> = ({
             },
           };
 
-          const playback = await scrapePStream(mediaPayload as any, { sourceOrder, debugTag });
-          storePrefetchedPlayback(prefetchKey, {
-            playback,
-            title: `${title} • S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`,
-          });
+          const formattedTitle = `${title} \u2022 S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
+
+          // Attempt 1: standard source order
+          let playback: any = null;
+          try {
+            playback = await scrapeDownload(mediaPayload as any, { sourceOrder, debugTag, isPrefetch: true });
+          } catch {
+            // Attempt 2: reversed source order (same fallback as video-player)
+            try {
+              const deepOrder = [...sourceOrder].reverse();
+              const retryTag = buildScrapeDebugTag('details-prefetch-episode-retry', title);
+              playback = await scrapeDownload(mediaPayload as any, { sourceOrder: deepOrder, debugTag: retryTag, isPrefetch: true });
+            } catch {
+              // give up silently
+            }
+          }
+
+          if (playback) {
+            storePrefetchedPlayback(prefetchKey, { playback, title: formattedTitle });
+          }
         } catch {
           // ignore
         }
@@ -1241,6 +1308,11 @@ const MovieDetailsView: React.FC<Props> = ({
         debugTag: `[download-episode] ${title}`,
         sourceOrder: downloadSourceOrder,
       });
+
+      if (!playback) {
+        throw new Error('No playback data found for this episode.');
+      }
+
       const headers = (playback.headers ?? {}) as Record<string, string>;
       const uri = playback.uri || '';
       const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
@@ -1292,12 +1364,12 @@ const MovieDetailsView: React.FC<Props> = ({
         }
       }
 
-      if (options.length === 1) {
-        await startQueuedDownload(options[0]);
-      } else {
+      if (options.length > 0) {
         openQualityPicker(`${title} ${episodeLabel}`, options, (opt) => {
           void startQueuedDownload(opt);
         });
+      } else {
+        throw new Error('No downloadable qualities found for this episode.');
       }
     } catch (err: any) {
       setEpisodeDownloadState(epKey, { state: 'error', progress: 0, error: err?.message ?? String(err) });
@@ -1306,11 +1378,20 @@ const MovieDetailsView: React.FC<Props> = ({
   };
 
   const handleDownload = async () => {
+    if (isDownloadingMain) return;
     try {
       if (!movie) return;
+      setIsDownloadingMain(true);
+      
       const payload = buildDownloadPayload();
       if (!payload) {
-        Alert.alert('Download unavailable', 'We could not find an episode to download yet.');
+        // If it's a TV show and episodes haven't loaded, try to force a load or show a better message
+        if (normalizedMediaType === 'tv') {
+            Alert.alert('Loading episodes', 'Please wait a moment for the episode list to load, then try again.');
+        } else {
+            Alert.alert('Download unavailable', 'We could not find a valid stream to download for this title.');
+        }
+        setIsDownloadingMain(false);
         return;
       }
 
@@ -1326,36 +1407,46 @@ const MovieDetailsView: React.FC<Props> = ({
       ].filter(Boolean);
       const subtitle = subtitleParts.length ? subtitleParts.join(' • ') : null;
 
+      console.log(`[MovieDetails] Starting download scrape for: ${title} (${normalizedMediaType})`);
       const playback = await scrapeDownload(payload as any, {
         debugTag: `[download] ${title}`,
         sourceOrder: downloadSourceOrder,
       });
+
+      if (!playback || !playback.uri) {
+        throw new Error('No downloadable stream found for this title. Try again later.');
+      }
+
       const headers = (playback.headers ?? {}) as Record<string, string>;
       const uri = playback.uri || '';
       const isHls = playback.stream?.type === 'hls' || uri.toLowerCase().includes('.m3u8');
 
       const startQueuedDownload = async (opt: DownloadQualityOption) => {
-        await enqueueDownload({
-          title,
-          mediaId: movie.id ?? undefined,
-          mediaType: normalizedMediaType,
-          subtitle,
-          runtimeMinutes,
-          seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
-          episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
-          releaseDate: releaseDateValue,
-          posterPath: movie.poster_path,
-          backdropPath: movie.backdrop_path,
-          overview: movie.overview ?? null,
-          downloadType: isHls ? 'hls' : 'file',
-          sourceUrl: opt.url,
-          headers,
-          qualityLabel: opt.label,
-        });
-        Alert.alert('Added to downloads', `${title}${episodeLabel ? ` • ${episodeLabel}` : ''} • ${opt.label}`, [
-          { text: 'OK' },
-          { text: 'Go to downloads', onPress: () => router.push('/downloads') },
-        ]);
+        try {
+            await enqueueDownload({
+                title,
+                mediaId: movie.id ?? undefined,
+                mediaType: normalizedMediaType,
+                subtitle,
+                runtimeMinutes,
+                seasonNumber: payload.type === 'show' ? payload.season.number : undefined,
+                episodeNumber: payload.type === 'show' ? payload.episode.number : undefined,
+                releaseDate: releaseDateValue,
+                posterPath: movie.poster_path,
+                backdropPath: movie.backdrop_path,
+                overview: movie.overview ?? null,
+                downloadType: isHls ? 'hls' : 'file',
+                sourceUrl: opt.url,
+                headers,
+                qualityLabel: opt.label,
+            });
+            Alert.alert('Added to downloads', `${title}${episodeLabel ? ` • ${episodeLabel}` : ''} • ${opt.label}`, [
+                { text: 'OK' },
+                { text: 'Go to downloads', onPress: () => router.push('/downloads') },
+            ]);
+        } catch (e: any) {
+            Alert.alert('Queue Error', e.message || 'Failed to add to download queue.');
+        }
       };
 
       let options: DownloadQualityOption[] = [];
@@ -1367,28 +1458,31 @@ const MovieDetailsView: React.FC<Props> = ({
       } else {
         const qualities = (playback.stream as any)?.qualities as Record<string, { url?: string }> | undefined;
         const order = ['4k', '1080', '720', '480', '360', 'unknown'];
-        options = (order
+        options = order
           .map((key) => ({ key, url: qualities?.[key]?.url }))
           .filter((q) => !!q.url)
           .map((q) => ({
             id: q.key,
             label: q.key === 'unknown' ? 'Auto' : `${q.key}p`,
             url: q.url as string,
-          })));
+          }));
         if (!options.length) {
           options = [{ id: 'auto', label: 'Auto', url: uri }];
         }
       }
 
-      if (options.length === 1) {
-        await startQueuedDownload(options[0]);
-      } else {
+      if (options.length > 0) {
         openQualityPicker(title, options, (opt) => {
           void startQueuedDownload(opt);
         });
+      } else {
+        throw new Error('No downloadable qualities found for this title.');
       }
     } catch (err: any) {
+      console.error('[MovieDetails] Download failed:', err);
       Alert.alert('Download failed', err?.message || 'Unable to queue this download right now.');
+    } finally {
+      setIsDownloadingMain(false);
     }
   };
 
@@ -1396,7 +1490,8 @@ const MovieDetailsView: React.FC<Props> = ({
     const base: DetailsRow[] = [
       { type: 'stickyHeader', key: 'stickyHeader' },
       { type: 'hero', key: 'hero' },
-      { type: 'quickActions', key: 'quickActions' },
+      { type: 'actionButtons', key: 'actionButtons' },
+      { type: 'tabs', key: 'tabs' },
     ];
 
     const hasEpisodeData =
@@ -1465,133 +1560,131 @@ const MovieDetailsView: React.FC<Props> = ({
   const renderRow = React.useCallback(
     ({ item }: { item: DetailsRow }) => {
       switch (item.type) {
-        case 'stickyHeader':
+        case 'stickyHeader': {
+          const headerScale = scrollY.interpolate({
+            inputRange: [0, 100],
+            outputRange: [1, 0.9],
+            extrapolate: 'clamp',
+          });
+          const headerTranslateY = scrollY.interpolate({
+            inputRange: [0, 100],
+            outputRange: [0, -5],
+            extrapolate: 'clamp',
+          });
+          const islandOpacity = scrollY.interpolate({
+            inputRange: [0, 60],
+            outputRange: [1, 0.95],
+            extrapolate: 'clamp',
+          });
+          const textOpacity = scrollY.interpolate({
+            inputRange: [0, 40],
+            outputRange: [1, 0],
+            extrapolate: 'clamp',
+          });
+
           return (
-            <View style={styles.stickyHeader}>
-              <View style={styles.headerWrap}>
-                <LinearGradient
-                  colors={[
-                    accentColor ? `${accentColor}33` : 'rgba(229,9,20,0.22)',
-                    'rgba(10,12,24,0.4)',
-                  ]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.headerGlow}
-                />
-                <View style={styles.headerBar}>
-                  <View style={styles.titleRow}>
-                    <View style={styles.accentDot} />
-                    <View>
-                      <Text style={styles.headerEyebrow}>Movie Details</Text>
-                      <Text style={styles.headerText}>{movie?.title || movie?.name || 'Details'}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.headerIcons}>
-                    <TouchableOpacity onPress={onOpenChatSheet} style={styles.iconBtn}>
-                      <LinearGradient
-                        colors={['#e50914', '#b20710']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons
-                          name="chatbubble-outline"
-                          size={22}
-                          color="#ffffff"
-                          style={styles.iconMargin}
-                        />
-                      </LinearGradient>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => movie && onAddToMyList(movie)} style={styles.iconBtn}>
-                      <LinearGradient
-                        colors={['#e50914', '#b20710']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons
-                          name="bookmark-outline"
-                          size={22}
-                          color="#ffffff"
-                          style={styles.iconMargin}
-                        />
-                      </LinearGradient>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={onBack} style={styles.iconBtn}>
-                      <LinearGradient
-                        colors={['#e50914', '#b20710']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.iconBg}
-                      >
-                        <Ionicons
-                          name="chevron-back"
-                          size={22}
-                          color="#ffffff"
-                          style={styles.iconMargin}
-                        />
-                      </LinearGradient>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                <View style={styles.headerMetaRow}>
-                  <View style={styles.metaPill}>
-                    <Ionicons name="star" size={14} color="#fff" />
-                    <Text style={styles.metaText}>
-                      {movie?.vote_average ? movie.vote_average.toFixed(1) : '0.0'}
+            <Animated.View style={[
+                styles.dynamicIsland, 
+                { 
+                    transform: [{ translateY: headerTranslateY }, { scale: headerScale }],
+                    opacity: islandOpacity,
+                }
+            ]}>
+              <LiquidGlass
+                tintOpacity={0.18}
+                tintColor="#000000"
+                cornerRadius={32}
+                borderOpacity={0.25}
+                glowIntensity={0.2}
+                glowColor={accentColor || '#e50914'}
+                chromaticAberration={true}
+                style={StyleSheet.absoluteFill}
+              />
+              <View style={styles.islandContent}>
+                <TouchableOpacity onPress={onBack} activeOpacity={0.8} style={styles.islandLeft}>
+                  <View style={[styles.accentDot, { backgroundColor: accentColor || '#e50914', shadowColor: accentColor || '#e50914' }]} />
+                  <Animated.View style={{ opacity: textOpacity, marginLeft: 8 }}>
+                    <Text style={styles.islandEyebrow}>MOVIE DETAILS</Text>
+                    <Text style={styles.islandTitle} numberOfLines={1}>
+                      {movie?.title || movie?.name || 'Details'}
                     </Text>
-                  </View>
-                  <View style={[styles.metaPill, styles.metaPillSoft]}>
-                    <Ionicons name="time-outline" size={14} color="#fff" />
-                    <Text style={styles.metaText}>{runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}</Text>
-                  </View>
-                  <View style={[styles.metaPill, styles.metaPillOutline]}>
-                    <Ionicons name="film-outline" size={14} color="#fff" />
-                    <Text style={styles.metaText}>{normalizedMediaType === 'tv' ? 'TV Show' : 'Movie'}</Text>
-                  </View>
+                  </Animated.View>
+                </TouchableOpacity>
+
+                <View style={styles.islandActions}>
+                  <TouchableOpacity style={styles.islandIconBtn} onPress={onOpenChatSheet}>
+                    <Ionicons name="chatbubble-outline" size={18} color="#fff" />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.islandIconBtn} onPress={() => movie && onAddToMyList(movie)}>
+                    <Ionicons name={isInMyList ? "bookmark" : "bookmark-outline"} size={18} color="#fff" />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.islandIconBtn} onPress={() => router.push('/search')}>
+                    <Ionicons name="search-outline" size={18} color="#fff" />
+                  </TouchableOpacity>
                 </View>
               </View>
-            </View>
+            </Animated.View>
           );
+        }
 
-        case 'hero':
+        case 'hero': {
+          const parallaxTranslateY = scrollY.interpolate({
+            inputRange: [-100, 0, 300],
+            outputRange: [-50, 0, 150],
+            extrapolate: 'clamp',
+          });
+          const parallaxScale = scrollY.interpolate({
+            inputRange: [-100, 0],
+            outputRange: [1.2, 1],
+            extrapolate: 'clamp',
+          });
+
           return (
             <>
-              <View style={styles.heroSection}>
-                {!showTrailer && (
+              {/* GIANT POSTER HERO - Full screen stunning poster */}
+              <Animated.View style={[styles.heroSection, { height: SCREEN_WIDTH * 1.6 }]}>
+                <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ translateY: parallaxTranslateY }, { scale: parallaxScale }] }]}>
+                  {/* Poster as hero */}
                   <ExpoImage
                     source={{
                       uri: movie?.poster_path
                         ? `${IMAGE_BASE_URL}${movie.poster_path}`
-                        : 'https://via.placeholder.com/800x450/111/fff?text=No+Poster',
+                        : movie?.backdrop_path
+                          ? `${IMAGE_BASE_URL}${movie.backdrop_path}`
+                          : 'https://via.placeholder.com/300x450/111/fff?text=No+Poster',
                     }}
-                    style={styles.heroImage}
+                    style={StyleSheet.absoluteFill}
                     contentFit="cover"
                     transition={220}
                     cachePolicy="memory-disk"
                   />
-                )}
 
-                {showTrailer && imdbTrailer?.url && (
-                  <Video
-                    ref={videoRef}
-                    source={{ uri: imdbTrailer.url }}
-                    style={styles.heroVideo}
-                    resizeMode={ResizeMode.COVER}
-                    shouldPlay
-                    isMuted={isMuted}
-                    isLooping
-                    onLoadStart={() => setTrailerLoading(true)}
-                    onLoad={() => setTrailerLoading(false)}
-                    onError={() => {
-                      setTrailerLoading(false);
-                      setShowTrailer(false);
-                    }}
-                  />
-                )}
+                  {/* Trailer overlay */}
+                  {showTrailer && imdbTrailer?.url && (
+                    <AnyVideoView
+                      player={player}
+                      style={StyleSheet.absoluteFill}
+                      contentFit="cover"
+                      showsPlaybackControls={false}
+                      onPictureInPictureStart={() => { }}
+                      onPictureInPictureStop={() => { }}
+                    />
+                  )}
+                </Animated.View>
 
+                {/* Cinematic gradient overlays */}
+                <LinearGradient
+                  colors={['rgba(0,0,0,0.3)', 'transparent', 'transparent', 'rgba(0,0,0,0.6)']}
+                  locations={[0, 0.15, 0.5, 1]}
+                  style={StyleSheet.absoluteFill}
+                />
+                <LinearGradient
+                  colors={['transparent', 'rgba(0,0,0,0.85)', 'rgba(10,6,20,0.95)', '#05060f']}
+                  locations={[0.4, 0.65, 0.85, 1]}
+                  style={StyleSheet.absoluteFill}
+                />
+
+                {/* Trailer loading indicator */}
                 {showTrailer && trailerLoading && (
                   <View style={styles.trailerLoading}>
                     <Ionicons name="play-circle-outline" size={60} color="rgba(255,255,255,0.8)" />
@@ -1599,52 +1692,14 @@ const MovieDetailsView: React.FC<Props> = ({
                   </View>
                 )}
 
-                <LinearGradient
-                  colors={[
-                    'rgba(0,0,0,0.1)',
-                    'rgba(0,0,0,0.3)',
-                    'rgba(10,6,20,0.7)',
-                    'rgba(10,6,20,0.9)',
-                  ]}
-                  locations={[0, 0.3, 0.7, 1]}
-                  start={{ x: 0.5, y: 0 }}
-                  end={{ x: 0.5, y: 1 }}
-                  style={styles.heroOverlay}
-                />
-
-                <Animated.View style={[styles.heroContent, { opacity: heroFadeAnim }]}>
-                  <Text style={styles.heroTitle} numberOfLines={2}>
-                    {movie?.title || movie?.name || 'Untitled'}
-                  </Text>
-                  <Text style={styles.heroYear}>
-                    {movie?.release_date
-                      ? new Date(movie.release_date).getFullYear()
-                      : movie?.first_air_date
-                        ? new Date(movie.first_air_date).getFullYear()
-                        : ''}
-                  </Text>
-
-                  <View style={styles.ratingBadge}>
-                    <Ionicons name="star" size={14} color="#FFD700" />
-                    <Text style={styles.ratingText}>
-                      {movie?.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}
-                    </Text>
-                  </View>
-                </Animated.View>
-
+                {/* Volume button for trailer */}
                 {showTrailer && !trailerLoading && (
                   <TouchableOpacity style={styles.volumeButton} onPress={() => setIsMuted(!isMuted)}>
                     <Ionicons name={isMuted ? 'volume-mute' : 'volume-high'} size={24} color="#fff" />
                   </TouchableOpacity>
                 )}
 
-                <View style={styles.genreTags}>
-                  <Text style={styles.genreText}>
-                    {normalizedMediaType === 'tv' ? 'TV Series' : 'Movie'} •{' '}
-                    {runtimeMinutes ? `${runtimeMinutes}m` : 'N/A'}
-                  </Text>
-                </View>
-
+                {/* Trailer countdown */}
                 {!showTrailer && imdbTrailer && (
                   <View style={styles.countdownContainer}>
                     <Text style={styles.countdownText}>Trailer in {autoPlaySecondsLeft || 1}s</Text>
@@ -1662,7 +1717,6 @@ const MovieDetailsView: React.FC<Props> = ({
                       />
                     </View>
                     <TouchableOpacity
-                      style={styles.inlinePlayNow}
                       onPress={() => {
                         setAutoPlayed(true);
                         setShowTrailer(true);
@@ -1672,106 +1726,218 @@ const MovieDetailsView: React.FC<Props> = ({
                         setAutoPlaySecondsLeft(0);
                       }}
                     >
-                      <Ionicons name="play" size={18} color="#fff" />
-                      <Text style={styles.inlinePlayText}>Play teaser now</Text>
+                      <LiquidGlass
+                        glowColor={accentColor || '#ff6b9d'}
+                        tintOpacity={0.8}
+                        cornerRadius={20}
+                        glowIntensity={0.5}
+                        borderOpacity={0}
+                        chromaticAberration={true}
+                        interactive={true}
+                        style={styles.inlinePlayNow}
+                      >
+                        <Ionicons name="play" size={18} color="#fff" />
+                        <Text style={styles.inlinePlayText}>Play teaser now</Text>
+                      </LiquidGlass>
                     </TouchableOpacity>
                   </View>
                 )}
-              </View>
-
-              <Animated.View style={[styles.floatingActions, { transform: [{ scale: fabScaleAnim }] }]}>
-                {/* Play button with progress */}
-                <View style={styles.playButtonContainer}>
+                
+                {/* GIANT PLAY NOW BUTTON - Floating over poster */}
+                <View style={styles.giantPlayContainer}>
                   <TouchableOpacity
-                    style={[
-                      styles.fabPrimary,
-                      isLaunchingPlayer && styles.fabDisabled,
-                      {
-                        backgroundColor: accentColor || '#ff6b9d',
-                        shadowColor: accentColor || '#ff6b9d',
-                      },
-                    ]}
-                    onPress={handlePlayMovie}
+                    style={styles.giantPlayBtn}
+                    onPress={() => handlePlaySliderComplete(1)}
                     disabled={isLaunchingPlayer}
+                    activeOpacity={0.9}
                   >
-                    <Ionicons name="play" size={24} color="#fff" />
-                    <Text style={styles.fabPrimaryText}>
-                      {isLaunchingPlayer ? 'Loading...' : watchProgress ? 'Resume' : 'Play'}
-                    </Text>
+                    <LinearGradient
+                      colors={['#ff8a00', accentColor || '#e50914']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={styles.giantPlayGradient}
+                    >
+                      {isLaunchingPlayer ? (
+                        <ActivityIndicator size="large" color="#fff" />
+                      ) : (
+                        <>
+                          <Ionicons name="play" size={42} color="#fff" />
+                          <Text style={styles.giantPlayText}>PLAY NOW</Text>
+                        </>
+                      )}
+                    </LinearGradient>
                   </TouchableOpacity>
-
-                  {/* Progress bar overlay */}
-                  {watchProgress && (
-                    <View style={styles.playProgressContainer}>
-                      <View style={styles.playProgressTrack}>
-                        <Animated.View
-                          style={[
-                            styles.playProgressFill,
-                            {
-                              width: progressBarAnim.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: ['0%', '100%'],
-                              }),
-                              backgroundColor: accentColor || '#ff6b9d',
-                            }
-                          ]}
-                        />
-                      </View>
-                      <View style={styles.playProgressInfo}>
-                        <Text style={styles.playProgressPercent}>
-                          {Math.round(watchProgress.progress * 100)}%
-                        </Text>
-                        {watchProgress.durationMs > 0 && (
-                          <Text style={styles.playProgressTime}>
-                            {formatRemainingTime(watchProgress)}
-                          </Text>
-                        )}
-                      </View>
-                    </View>
-                  )}
                 </View>
 
-                <TouchableOpacity style={styles.fabSecondary} onPress={handleDownload}>
-                  <Ionicons name="cloud-download-outline" size={20} color="#fff" />
-                </TouchableOpacity>
-              </Animated.View>
-
-              <Animated.View style={[styles.tabContainer, { opacity: sectionsAnim }]}>
-                <View style={styles.tabButtons}>
-                  {[
-                    { key: 'story', label: 'Story', icon: 'book-outline' },
-                    mediaType === 'tv' && seasons?.length > 0
-                      ? { key: 'episodes', label: 'Episodes', icon: 'albums-outline' }
-                      : null,
-                    { key: 'trailers', label: 'Trailers', icon: 'play-circle-outline' },
-                    { key: 'related', label: 'More Like This', icon: 'heart-outline' },
-                    { key: 'cast', label: 'Cast', icon: 'people-outline' },
-                  ]
-                    .filter(Boolean)
-                    .map((tab) => (
-                      <TouchableOpacity
-                        key={(tab as any).key}
-                        style={[styles.tabButton, selectedTab === (tab as any).key && styles.tabButtonActive]}
-                        onPress={() => setSelectedTab((tab as any).key as any)}
-                      >
-                        <Ionicons
-                          name={(tab as any).icon as any}
-                          size={18}
-                          color={selectedTab === (tab as any).key ? '#fff' : 'rgba(255,255,255,0.6)'}
-                        />
-                        <Text
-                          style={[
-                            styles.tabButtonText,
-                            selectedTab === (tab as any).key && styles.tabButtonTextActive,
-                          ]}
-                        >
-                          {(tab as any).label}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
+                {/* Movie Title Overlay - on poster */}
+                <View style={styles.movieTitleOverlay}>
+                  <Text style={styles.movieTitleHero} numberOfLines={2}>
+                    {movie?.title || movie?.name || 'Untitled'}
+                  </Text>
+                  <View style={styles.movieMetaHero}>
+                    <View style={styles.ratingPill}>
+                      <Ionicons name="star" size={14} color="#FFD700" />
+                      <Text style={styles.ratingPillText}>
+                        {movie?.vote_average ? movie.vote_average.toFixed(1) : 'N/A'}
+                      </Text>
+                    </View>
+                    <Text style={styles.yearText}>
+                      {movie?.release_date
+                        ? new Date(movie.release_date).getFullYear()
+                        : movie?.first_air_date
+                          ? new Date(movie.first_air_date).getFullYear()
+                          : ''}
+                    </Text>
+                    {runtimeMinutes && (
+                      <Text style={styles.runtimeText}>{runtimeMinutes} min</Text>
+                    )}
+                  </View>
+                  <View style={styles.qualityBadges}>
+                    <View style={styles.qualityBadge}>
+                      <Text style={styles.qualityBadgeText}>4K</Text>
+                    </View>
+                    <View style={styles.qualityBadge}>
+                      <Text style={styles.qualityBadgeText}>HDR</Text>
+                    </View>
+                    <View style={[styles.qualityBadge, styles.dolbyBadge]}>
+                      <MaterialCommunityIcons name="dolby" size={16} color="#0096FF" />
+                    </View>
+                  </View>
                 </View>
               </Animated.View>
             </>
+          );
+        }
+
+        case 'actionButtons':
+          return (
+            <Animated.View key="actionButtons" style={[styles.actionButtonsCard, { opacity: heroFadeAnim }]}>
+                <LiquidGlass
+                  glowColor={accentColor || '#ffffff'}
+                  tintColor="#0a0c18"
+                  tintOpacity={0.6}
+                  cornerRadius={20}
+                  glowIntensity={0.25}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={styles.actionButtonsRow}>
+                  <TouchableOpacity
+                    onPress={() => handlePlaySliderComplete(1)}
+                    style={styles.heroPlayBtn}
+                    disabled={isLaunchingPlayer}
+                    activeOpacity={0.8}
+                  >
+                    <LiquidGlass
+                      glowColor={accentColor || '#e50914'}
+                      tintOpacity={0.85}
+                      tintColor="#e50914"
+                      cornerRadius={14}
+                      glowIntensity={0.6}
+                      style={StyleSheet.absoluteFill}
+                    />
+                    <Ionicons name="play" size={22} color="#fff" />
+                    <Text style={styles.heroPlayText}>
+                      {watchProgress ? 'Resume' : 'Play Now'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={handleDownload}
+                    style={styles.heroDownloadBtn}
+                    activeOpacity={0.8}
+                    disabled={isDownloadingMain}
+                  >
+                    <LiquidGlass
+                      glowColor="#fff"
+                      tintOpacity={0.15}
+                      tintColor="#000"
+                      cornerRadius={14}
+                      borderOpacity={0.25}
+                      style={StyleSheet.absoluteFill}
+                    />
+                    {isDownloadingMain ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                        <Ionicons name="cloud-download" size={20} color="#fff" />
+                    )}
+                    <Text style={styles.heroDownloadText}>
+                        {isDownloadingMain ? 'Preparing...' : 'Download'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.myListInline}
+                    onPress={() => movie && onAddToMyList(movie)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name={isInMyList ? 'checkmark-circle' : 'add-circle-outline'} size={18} color="#fff" />
+                    <Text style={styles.myListInlineText}>{isInMyList ? 'In My List' : 'My List'}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Watch Progress Bar */}
+                {watchProgress && watchProgress.progress > 0.01 && (
+                  <View style={styles.posterProgressWrap}>
+                    <View style={styles.posterProgressTrack}>
+                      <Animated.View
+                        style={[
+                          styles.posterProgressFill,
+                          {
+                            backgroundColor: accentColor || '#e50914',
+                            width: progressBarAnim.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: ['0%', '100%'],
+                            }),
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.posterProgressText}>
+                      {formatRemainingTime(watchProgress) || `${Math.round(watchProgress.progress * 100)}%`}
+                    </Text>
+                  </View>
+                )}
+            </Animated.View>
+          );
+
+        case 'tabs':
+          return (
+            <Animated.View key="tabs" style={[styles.tabContainer, { opacity: sectionsAnim }]}>
+                <LiquidGlass
+                  glowColor={accentColor || '#ffffff'}
+                  tintColor="#0a0c18"
+                  tintOpacity={0.65}
+                  cornerRadius={20}
+                  glowIntensity={0.3}
+                  borderWidth={1.5}
+                  chromaticAberration={true}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View style={styles.tabBar}>
+                  {(['story', 'episodes', 'related'] as const).map((tab) => {
+                    const active = selectedTab === tab;
+                    if (tab === 'episodes' && normalizedMediaType !== 'tv') return null;
+                    const labels: Record<string, string> = { story: 'Story', episodes: 'Episodes', related: 'Related' };
+
+                    return (
+                      <TouchableOpacity
+                        key={tab}
+                        onPress={() => {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                          setSelectedTab(tab);
+                        }}
+                        style={[styles.tabItem, active && styles.tabItemActive]}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
+                          {labels[tab] || tab}
+                        </Text>
+                        {active && <View style={[styles.tabIndicator, { backgroundColor: accentColor || '#e50914' }]} />}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+            </Animated.View>
           );
 
         case 'story':
@@ -1974,7 +2140,7 @@ const MovieDetailsView: React.FC<Props> = ({
         onClose={() => setQualityPickerVisible(false)}
         onSelect={handleQualityPick}
       />
-      <FlashList<DetailsRow>
+      <AnimatedFlashList
         data={rows}
         renderItem={renderRow}
         keyExtractor={(item: DetailsRow) => item.key}
@@ -1982,14 +2148,25 @@ const MovieDetailsView: React.FC<Props> = ({
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollViewContent}
         stickyHeaderIndices={[0]}
-        onScroll={(e: any) => {
-          const y = e.nativeEvent.contentOffset.y;
-          if (y > 400 && !showMiniPlayer) {
-            setShowMiniPlayer(true);
-          } else if (y <= 400 && showMiniPlayer) {
-            setShowMiniPlayer(false);
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+          {
+            useNativeDriver: false,
+            listener: (e: any) => {
+              const now = Date.now();
+              if (now - lastScrollUpdateRef.current < 16) return; // Throttle to ~60fps
+              lastScrollUpdateRef.current = now;
+
+              const y = e.nativeEvent.contentOffset.y;
+              if (y > 400 && !showMiniPlayer) {
+                setShowMiniPlayer(true);
+              } else if (y <= 400 && showMiniPlayer) {
+                setShowMiniPlayer(false);
+              }
+            }
           }
-        }}
+        )}
+        scrollEventThrottle={16}
       />
 
       <FloatingMiniPlayer
@@ -2006,9 +2183,10 @@ const MovieDetailsView: React.FC<Props> = ({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+    backgroundColor: '#000',
   },
   scrollViewContent: {
-    paddingBottom: 40,
+    paddingBottom: 100,
     paddingTop: 0,
   },
   tabContentOuter: {
@@ -2045,119 +2223,72 @@ const styles = StyleSheet.create({
   seasonPillTextSelected: {
     color: '#fff',
   },
-  // Sticky Header Container
-  stickyHeader: {
-    backgroundColor: 'transparent',
-  },
-  // Designed Header like movies.tsx
-  headerWrap: {
-    marginHorizontal: 12,
-    marginTop: Platform.OS === 'ios' ? 80 : 50,
-    marginBottom: 0,
-    borderRadius: 18,
+  dynamicIsland: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 40,
+    left: 16,
+    right: 16,
+    height: 56,
+    zIndex: 100,
+    borderRadius: 32,
     overflow: 'hidden',
-  },
-  headerGlow: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.7,
-  },
-  headerBar: {
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.14,
-    shadowRadius: 20,
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
   },
-  titleRow: {
+  islandContent: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+  },
+  islandLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 10,
   },
   accentDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#e50914',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.6,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
   },
-  headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 0.6,
-  },
-  headerText: {
-    color: '#FFFFFF',
-    fontSize: 22,
+  islandEyebrow: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
     fontWeight: '800',
-    letterSpacing: 0.3,
+    letterSpacing: 1,
   },
-  headerIcons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconBtn: {
-    marginLeft: 8,
-    borderRadius: 12,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.28,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  iconBg: {
-    padding: 10,
-    borderRadius: 12,
-  },
-  iconMargin: {
-    marginRight: 4,
-  },
-  headerMetaRow: {
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 10,
-  },
-  metaPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-  },
-  metaPillSoft: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  metaPillOutline: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  metaText: {
+  islandTitle: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 14,
+    fontWeight: '900',
   },
-  // Hero Section
+  islandActions: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 20,
+    padding: 4,
+    flexShrink: 0,
+  },
+  islandIconBtn: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Hero Section (backdrop)
   heroSection: {
-    marginHorizontal: 12,
+    marginHorizontal: 0,
     marginTop: 0,
-    marginBottom: 24,
-    borderRadius: 18,
+    marginBottom: 0,
+    borderRadius: 0,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 8 },
@@ -2167,12 +2298,12 @@ const styles = StyleSheet.create({
   },
   heroImage: {
     width: '100%',
-    height: 520,
+    height: '100%',
     backgroundColor: 'rgba(5,6,15,0.8)',
   },
   heroVideo: {
     width: '100%',
-    height: 520,
+    height: '100%',
     backgroundColor: '#000',
   },
   heroOverlay: {
@@ -2205,272 +2336,324 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.7)',
   },
-  loadingText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginTop: 12,
-  },
-  countdownContainer: {
+  // Giant Play Button
+  giantPlayContainer: {
     position: 'absolute',
-    bottom: 60,
-    left: 20,
-    right: 20,
+    top: '35%',
+    left: 0,
+    right: 0,
     alignItems: 'center',
   },
-  countdownText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-    marginBottom: 8,
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
-  },
-  countdownBar: {
-    width: '100%',
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 2,
+  giantPlayBtn: {
+    borderRadius: 50,
     overflow: 'hidden',
+    shadowColor: '#e50914',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 20,
   },
-  countdownProgress: {
-    height: '100%',
-    backgroundColor: '#e50914',
-    borderRadius: 2,
-  },
-  inlinePlayNow: {
-    marginTop: 12,
+  giantPlayGradient: {
+    width: 150,
+    height: 70,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 24,
   },
-  inlinePlayText: {
+  giantPlayText: {
     color: '#fff',
-    fontWeight: '700',
-    letterSpacing: 0.4,
+    fontSize: 20,
+    fontWeight: '900',
+    letterSpacing: 1,
   },
-  heroContent: {
+  // Movie Title Overlay
+  movieTitleOverlay: {
     position: 'absolute',
+    bottom: 80,
     left: 20,
     right: 20,
-    bottom: 80,
-    alignItems: 'center',
   },
-  heroTitle: {
+  movieTitleHero: {
     color: '#fff',
     fontSize: 28,
     fontWeight: '900',
-    textAlign: 'center',
     textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0, height: 3 },
+    textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 8,
+    marginBottom: 12,
+  },
+  movieMetaHero: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 12,
+  },
+  ratingPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  ratingPillText: {
+    color: '#FFD700',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  yearText: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  runtimeText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
+  },
+  qualityBadges: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  qualityBadge: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  qualityBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  dolbyBadge: {
+    backgroundColor: 'rgba(0,150,255,0.2)',
+    borderColor: 'rgba(0,150,255,0.4)',
+  },
+  // Action Buttons Card (simplified)
+  actionButtonsCard: {
+    marginHorizontal: 12,
+    marginTop: 16,
     marginBottom: 8,
+    borderRadius: 20,
+    overflow: 'hidden',
+    padding: 12,
+  },
+  // Poster Card Container - Now action buttons only (poster is hero)
+  posterCardContainer: {
+    marginHorizontal: 12,
+    marginTop: -40,
+    marginBottom: 8,
+    borderRadius: 24,
+    overflow: 'hidden',
+    padding: 16,
+  },
+  posterRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginBottom: 0,
+  },
+  posterImageWrap: {
+    display: 'none', // Hidden - poster is now the hero
+  },
+  posterImage: {
+    width: 0,
+    height: 0,
+  },
+  posterOverlay: {
+    display: 'none',
+  },
+  infoColumn: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingBottom: 0,
+    gap: 8,
+  },
+  myListInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    alignSelf: 'flex-start',
+  },
+  myListInlineText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  actionButtonsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 8,
+    width: '100%',
+  },
+  heroMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  heroTitle: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+    marginBottom: 4,
+    lineHeight: 28,
   },
   heroYear: {
     color: 'rgba(255,255,255,0.9)',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
-    textAlign: 'center',
-    marginBottom: 16,
   },
   ratingBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     backgroundColor: 'rgba(255,215,0,0.2)',
-    borderRadius: 16,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: 'rgba(255,215,0,0.4)',
   },
   ratingText: {
     color: '#FFD700',
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '800',
   },
-  genreTags: {
-    position: 'absolute',
-    left: 20,
-    right: 20,
-    bottom: 20,
-  },
-  genreText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  // Floating Action Buttons
-  floatingActions: {
+  premiumBadgeRow: {
     flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginHorizontal: 20,
-    marginBottom: 32,
-    gap: 16,
+    gap: 6,
+    marginVertical: 4,
   },
-  fabPrimary: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 32,
-    paddingVertical: 16,
-    backgroundColor: '#ff6b9d',
-    borderRadius: 28,
-    shadowColor: '#ff6b9d',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    elevation: 12,
-  },
-  fabPrimaryText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  fabSecondary: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+  premiumPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 8,
   },
-  fabDisabled: {
-    opacity: 0.5,
-  },
-  // Story Card
-  storyCard: {
-    marginHorizontal: 20,
-    marginBottom: 32,
-    padding: 20,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,107,157,0.1)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  storyTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 12,
-  },
-  storyText: {
+  premiumPillText: {
     color: 'rgba(255,255,255,0.9)',
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: '500',
+    fontSize: 9,
+    fontWeight: '900',
   },
-  metaGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 18,
-    gap: 10,
-  },
-  metaTile: {
-    width: '48%',
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  metaTileLabel: {
-    color: 'rgba(255,255,255,0.65)',
-    fontSize: 12,
-    marginBottom: 4,
-    letterSpacing: 0.2,
-  },
-  metaTileValue: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  immersiveRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 16,
-    gap: 8,
-  },
-  immersiveBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+  heroPlayBtn: {
+    flex: 1.4,
+    height: 54,
     borderRadius: 14,
-    backgroundColor: 'rgba(229,9,20,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(229,9,20,0.3)',
-  },
-  immersiveText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  // Tab Container
-  tabContainer: {
-    marginHorizontal: 12,
-    marginTop: 20,
-  },
-  tabButtons: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 16,
-    padding: 4,
-    marginBottom: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  tabButton: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
+    overflow: 'hidden',
+  },
+  heroPlayText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  heroDownloadBtn: {
+    flex: 1,
+    height: 54,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    overflow: 'hidden',
+  },
+  heroDownloadText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  posterProgressWrap: {
+    marginTop: 12,
+    alignItems: 'center',
     gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 12,
   },
-  tabButtonActive: {
-    backgroundColor: '#e50914',
+  posterProgressTrack: {
+    width: '100%',
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 2,
+    overflow: 'hidden',
   },
-  tabButtonText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
+  posterProgressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  posterProgressText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 11,
     fontWeight: '600',
   },
-  tabButtonTextActive: {
-    color: '#fff',
+  // Tab Container - pushed below hero poster
+  tabContainer: {
+    marginHorizontal: 12,
+    marginTop: 20,
+    marginBottom: 16,
+    borderRadius: 20,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  tabContent: {
-    minHeight: 300,
+  tabBar: {
+    flexDirection: 'row',
+    padding: 6,
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 16,
+    position: 'relative',
+  },
+  tabItemActive: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  tabLabel: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 14,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  tabLabelActive: {
+    color: '#fff',
+    fontWeight: '800',
+  },
+  tabIndicator: {
+    position: 'absolute',
+    bottom: 4,
+    width: 20,
+    height: 3,
+    borderRadius: 1.5,
   },
   // Sections Container
-  sectionsContainer: {
-    marginHorizontal: 20,
-    gap: 24,
-  },
   sectionCard: {
     backgroundColor: 'rgba(255,255,255,0.03)',
     borderRadius: 16,
@@ -2501,41 +2684,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
     marginLeft: 'auto',
-  },
-  // Watch progress styles
-  playButtonContainer: {
-    alignItems: 'center',
-  },
-  playProgressContainer: {
-    marginTop: 8,
-    alignItems: 'center',
-    width: '100%',
-  },
-  playProgressTrack: {
-    width: 120,
-    height: 4,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  playProgressFill: {
-    height: '100%',
-    borderRadius: 2,
-  },
-  playProgressInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 4,
-    gap: 8,
-  },
-  playProgressPercent: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  playProgressTime: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 11,
   },
 });
 

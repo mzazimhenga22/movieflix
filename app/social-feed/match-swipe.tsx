@@ -12,6 +12,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  StatusBar,
 } from 'react-native';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
@@ -23,8 +24,11 @@ import {
   type ComputedMatch,
 } from '../../lib/movieMatch/hooks';
 import { IMAGE_BASE_URL } from '../../constants/api';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import { logInteraction } from '../../lib/algo';
+import { useUser } from '../../hooks/use-user';
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
 const SWIPE_THRESHOLD = width * 0.28;
 const SWIPE_OUT_DURATION = 220;
 
@@ -32,11 +36,6 @@ const resolvePosterUri = (path?: string | null) => {
   if (!path) return undefined;
   return path.startsWith('http') ? path : `${IMAGE_BASE_URL}${path}`;
 };
-
-import { logInteraction } from '../../lib/algo';
-import { useUser } from '../../hooks/use-user';
-
-// ... (existing constants)
 
 export default function MatchSwipeScreen() {
   const router = useRouter();
@@ -50,13 +49,7 @@ export default function MatchSwipeScreen() {
   useEffect(() => {
     setActiveIndex(0);
     position.setValue({ x: 0, y: 0 });
-  }, [deck.length, position]);
-
-  useEffect(() => {
-    if (!lastSwipe) return;
-    const timeout = setTimeout(() => setLastSwipe(null), 2200);
-    return () => clearTimeout(timeout);
-  }, [lastSwipe]);
+  }, [deck.length]);
 
   const current = deck[activeIndex];
 
@@ -70,27 +63,18 @@ export default function MatchSwipeScreen() {
 
   const onSwipeComplete = (direction: 'left' | 'right') => {
     const swipedMatch = deck[activeIndex];
-    
-    // Log Interaction for the Algorithm
     if (swipedMatch && user?.uid) {
       void logInteraction({
         type: direction === 'right' ? 'match_swipe_right' : 'match_swipe_left',
         actorId: user.uid,
-        targetId: swipedMatch.id, // Profile ID
+        targetId: swipedMatch.id,
         targetType: 'user',
-        meta: {
-          matchScore: swipedMatch.matchScore,
-          sharedGenres: swipedMatch.sharedGenres,
-          profileName: swipedMatch.profileName
-        }
+        meta: { matchScore: swipedMatch.matchScore, profileName: swipedMatch.profileName }
       });
     }
-
     setActiveIndex((prev) => prev + 1);
     position.setValue({ x: 0, y: 0 });
-    if (swipedMatch) {
-      setLastSwipe({ direction, match: swipedMatch });
-    }
+    if (swipedMatch) setLastSwipe({ direction, match: swipedMatch });
   };
 
   const forceSwipe = (direction: 'left' | 'right') => {
@@ -102,25 +86,15 @@ export default function MatchSwipeScreen() {
     }).start(() => onSwipeComplete(direction));
   };
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => Boolean(current),
-        onPanResponderMove: (_, gesture) => {
-          position.setValue({ x: gesture.dx, y: gesture.dy });
-        },
-        onPanResponderRelease: (_, gesture) => {
-          if (gesture.dx > SWIPE_THRESHOLD) {
-            forceSwipe('right');
-          } else if (gesture.dx < -SWIPE_THRESHOLD) {
-            forceSwipe('left');
-          } else {
-            resetPosition();
-          }
-        },
-      }),
-    [current],
-  );
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => Boolean(current),
+    onPanResponderMove: (_, gesture) => { position.setValue({ x: gesture.dx, y: gesture.dy }); },
+    onPanResponderRelease: (_, gesture) => {
+      if (gesture.dx > SWIPE_THRESHOLD) forceSwipe('right');
+      else if (gesture.dx < -SWIPE_THRESHOLD) forceSwipe('left');
+      else resetPosition();
+    },
+  }), [current]);
 
   const rotate = position.x.interpolate({
     inputRange: [-width, 0, width],
@@ -128,532 +102,136 @@ export default function MatchSwipeScreen() {
     extrapolate: 'clamp',
   });
 
-  const likeOpacity = position.x.interpolate({
-    inputRange: [0, SWIPE_THRESHOLD],
-    outputRange: [0, 1],
-    extrapolate: 'clamp',
-  });
-
-  const skipOpacity = position.x.interpolate({
-    inputRange: [-SWIPE_THRESHOLD, 0],
-    outputRange: [1, 0],
-    extrapolate: 'clamp',
-  });
+  const likeOpacity = position.x.interpolate({ inputRange: [0, SWIPE_THRESHOLD], outputRange: [0, 1], extrapolate: 'clamp' });
+  const skipOpacity = position.x.interpolate({ inputRange: [-SWIPE_THRESHOLD, 0], outputRange: [1, 0], extrapolate: 'clamp' });
 
   const renderCard = (match: ComputedMatch, index: number) => {
     if (index < activeIndex) return null;
     const isTop = index === activeIndex;
     const stackOffset = index - activeIndex;
+    if (stackOffset > 2) return null;
+
     const style = isTop
-      ? [
-          styles.card,
-          {
-            transform: [...position.getTranslateTransform(), { rotate }],
-            elevation: 10,
-            zIndex: 20,
-          },
-        ]
-      : [
-          styles.card,
-          {
-            top: stackOffset * 10,
-            transform: [{ scale: 1 - stackOffset * 0.04 }],
-            opacity: 1 - stackOffset * 0.15,
-            zIndex: 20 - stackOffset,
-          },
-        ];
+      ? [styles.card, { transform: [...position.getTranslateTransform(), { rotate }], zIndex: 20 }]
+      : [styles.card, { top: stackOffset * 12, transform: [{ scale: 1 - stackOffset * 0.05 }], opacity: 1 - stackOffset * 0.2, zIndex: 20 - stackOffset }];
 
     const posterUri = resolvePosterUri(match.bestPick?.posterPath ?? undefined);
 
-    const cardBody = (
-      <>
-        {isTop && (
-          <>
-            <Animated.View style={[styles.badgeLike, { opacity: likeOpacity }]}> 
-              <Ionicons name="sparkles" size={18} color="#fff" />
-              <Text style={styles.badgeText}>In sync</Text>
-            </Animated.View>
-            <Animated.View style={[styles.badgeNope, { opacity: skipOpacity }]}> 
-              <Ionicons name="close" size={18} color="#fff" />
-              <Text style={styles.badgeText}>Skip</Text>
-            </Animated.View>
-          </>
-        )}
-
-        <View style={styles.cardMeta}>
-          <View style={styles.nameRow}>
-            <Text style={styles.name}>{match.profileName}</Text>
-            <View style={styles.scorePill}>
-              <Ionicons name="flame" size={14} color="#fff" />
-              <Text style={styles.score}>{match.matchScore}%</Text>
-            </View>
-          </View>
-          <Text style={styles.vibe}>{vibeLabel[match.vibe]}</Text>
-          <Text style={styles.shared}>{formatSharedTitles(match.sharedTitles)}</Text>
-          <View style={styles.genreRow}>
-            {match.sharedGenres.slice(0, 3).map((genre) => (
-              <View key={`${match.id}-${genre}`} style={styles.genreChip}>
-                <Text style={styles.genreChipText}>{getGenreName(genre)}</Text>
-              </View>
-            ))}
-          </View>
-          <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/watchparty')}>
-              <MaterialCommunityIcons name="movie-play-outline" size={20} color="#fff" />
-              <Text style={styles.actionText}>Watch party</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/messaging')}>
-              <Ionicons name="chatbubble-outline" size={18} color="#fff" />
-              <Text style={styles.actionText}>Say hi</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </>
-    );
-
     return (
-      <Animated.View
-        key={match.id}
-        style={style}
-        {...(isTop ? panResponder.panHandlers : {})}
-      >
-        {posterUri ? (
-          <ImageBackground
-            source={{ uri: posterUri }}
-            style={styles.cardBackground}
-            imageStyle={styles.cardBackgroundImage}
-          >
-            <LinearGradient
-              colors={['rgba(5,6,15,0.1)', 'rgba(5,6,15,0.9)']}
-              style={StyleSheet.absoluteFillObject}
-            />
-            {cardBody}
-          </ImageBackground>
-        ) : (
-          <View style={[styles.cardBackground, styles.cardBackgroundFallback]}>
-            <LinearGradient
-              colors={['rgba(5,6,15,0.15)', 'rgba(5,6,15,0.95)']}
-              style={StyleSheet.absoluteFillObject}
-            />
-            {cardBody}
-          </View>
-        )}
+      <Animated.View key={match.id} style={style} {...(isTop ? panResponder.panHandlers : {})}>
+        <ImageBackground source={{ uri: posterUri }} style={styles.cardBg} imageStyle={{ borderRadius: 32 }}>
+            <LinearGradient colors={['rgba(0,0,0,0.1)', 'rgba(0,0,0,0.95)']} style={StyleSheet.absoluteFill} />
+            
+            {isTop && (
+                <>
+                    <Animated.View style={[styles.badge, styles.badgeLike, { opacity: likeOpacity }]}>
+                        <Ionicons name="sparkles" size={20} color="#fff" />
+                        <Text style={styles.badgeText}>SYNC</Text>
+                    </Animated.View>
+                    <Animated.View style={[styles.badge, styles.badgeSkip, { opacity: skipOpacity }]}>
+                        <Ionicons name="close" size={20} color="#fff" />
+                        <Text style={styles.badgeText}>SKIP</Text>
+                    </Animated.View>
+                </>
+            )}
+
+            <View style={styles.cardInfo}>
+                <View style={styles.nameRow}>
+                    <Text style={styles.name}>{match.profileName}</Text>
+                    <LiquidGlass cornerRadius={12} tintOpacity={0.2} tintColor="#ff4b4b" style={styles.scoreGlass}>
+                        <Text style={styles.score}>{match.matchScore}%</Text>
+                    </LiquidGlass>
+                </View>
+                <Text style={styles.vibe}>{vibeLabel[match.vibe]}</Text>
+                <Text style={styles.sharedTitles} numberOfLines={1}>{formatSharedTitles(match.sharedTitles)}</Text>
+                <View style={styles.genreRow}>
+                    {match.sharedGenres.slice(0, 3).map(g => (
+                        <View key={g} style={styles.genreChip}><Text style={styles.genreText}>{getGenreName(g)}</Text></View>
+                    ))}
+                </View>
+            </View>
+        </ImageBackground>
       </Animated.View>
     );
   };
 
-  const remaining = deck.length - activeIndex;
-
   return (
-    <ScreenWrapper>
-      <View style={styles.header}>
-        <Text style={styles.eyebrow}>Movie Match</Text>
-        <Text style={styles.title}>Swipe to connect</Text>
-        <Text style={styles.subtitle}>
-          Discover film friends even if you haven’t followed them yet.
-        </Text>
-      </View>
+    <View style={styles.root}>
+      <ScreenWrapper>
+        <StatusBar barStyle="light-content" />
+        <LinearGradient colors={['#1a0f1f', '#050509']} style={StyleSheet.absoluteFill} />
+        <View style={[styles.bgOrb, { top: -100, right: -50, backgroundColor: '#ff4b4b10' }]} />
 
-      {loading && (
-        <View style={styles.loader}>
-          <ActivityIndicator size="small" color="#fff" />
-          <Text style={styles.loaderText}>Scanning profiles…</Text>
+        <View style={styles.header}>
+          <Text style={styles.eyebrow}>DISCOVERY</Text>
+          <Text style={styles.title}>Movie Match</Text>
         </View>
-      )}
 
-      {!loading && errorCopy && (
-        <View style={styles.errorCard}>
-          <Text style={styles.errorText}>{errorCopy}</Text>
-        </View>
-      )}
-
-      {!loading && !errorCopy && deck.length === 0 && (
-        <View style={styles.emptyCard}>
-          <Ionicons name="people-outline" size={48} color="rgba(255,255,255,0.6)" />
-          <Text style={styles.emptyTitle}>No matches yet</Text>
-          <Text style={styles.emptyCopy}>
-            Watch a bit more or refresh the Movie Match tab to gather new recommendations.
-          </Text>
-          <TouchableOpacity
-            style={styles.primaryBtn}
-            onPress={() => router.push('/social-feed')}
-          >
-            <Text style={styles.primaryBtnText}>Back to social feed</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {!loading && !errorCopy && deck.length > 0 && (
-        <View style={styles.deckContainer}>
-          {deck.map(renderCard)}
-          {remaining <= 3 && remaining > 0 && (
-            <View style={styles.remainingHint}>
-              <Text style={styles.remainingText}>{remaining} left</Text>
+        {loading ? (
+            <View style={styles.loader}><ActivityIndicator size="large" color="#ff4b4b" /></View>
+        ) : (
+            <View style={styles.deck}>
+                {deck.length > 0 ? deck.map(renderCard) : (
+                    <View style={styles.empty}>
+                        <Ionicons name="people-outline" size={64} color="rgba(255,255,255,0.1)" />
+                        <Text style={styles.emptyText}>No more matches nearby</Text>
+                    </View>
+                )}
             </View>
-          )}
-        </View>
-      )}
+        )}
 
-      {!loading && deck.length > 0 && (
-        <View style={styles.ctaRow}>
-          <TouchableOpacity style={[styles.circleBtn, styles.skipBtn]} onPress={() => forceSwipe('left')}>
-            <Ionicons name="close" size={28} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.circleBtn, styles.superBtn]} onPress={refreshLocalHistory}>
-            <Ionicons name="refresh" size={24} color="#fff" />
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.circleBtn, styles.likeBtn]} onPress={() => forceSwipe('right')}>
-            <Ionicons name="heart" size={26} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {!loading && deck.length > 0 && lastSwipe && (
-        <View
-          style={[
-            styles.nextActions,
-            lastSwipe.direction === 'right' ? styles.nextActionsLike : styles.nextActionsSkip,
-          ]}
-        >
-          <View style={styles.nextActionsHeader}>
-            <Ionicons
-              name={lastSwipe.direction === 'right' ? 'heart' : 'close'}
-              size={18}
-              color="#fff"
-            />
-            <View>
-              <Text style={styles.nextActionsTitle}>
-                {lastSwipe.direction === 'right' ? 'Connected' : 'Skipped'} {lastSwipe.match.profileName}
-              </Text>
-              <Text style={styles.nextActionsCopy}>
-                {lastSwipe.direction === 'right'
-                  ? 'Start something together right away.'
-                  : 'No worries—keep swiping to find your best fit.'}
-              </Text>
+        {deck.length > activeIndex && (
+            <View style={styles.controls}>
+                <TouchableOpacity style={styles.btn} onPress={() => forceSwipe('left')}>
+                    <LiquidGlass cornerRadius={35} tintOpacity={0.1} style={styles.btnGlass}>
+                        <Ionicons name="close" size={32} color="#ff4b4b" />
+                    </LiquidGlass>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.btnSmall} onPress={refreshLocalHistory}>
+                    <LiquidGlass cornerRadius={25} tintOpacity={0.1} style={styles.btnGlass}>
+                        <Ionicons name="refresh" size={24} color="#fff" />
+                    </LiquidGlass>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.btn} onPress={() => forceSwipe('right')}>
+                    <LiquidGlass cornerRadius={35} tintOpacity={0.1} style={styles.btnGlass}>
+                        <Ionicons name="heart" size={32} color="#0ecb7a" />
+                    </LiquidGlass>
+                </TouchableOpacity>
             </View>
-          </View>
-
-          {lastSwipe.direction === 'right' ? (
-            <View style={styles.nextActionsRow}>
-              <TouchableOpacity style={[styles.nextActionBtn, styles.nextActionPrimary]} onPress={() => router.push('/watchparty')}>
-                <MaterialCommunityIcons name="movie-play-outline" size={18} color="#fff" />
-                <Text style={styles.nextActionText}>Start watch party</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.nextActionBtn, styles.nextActionSecondary]} onPress={() => router.push('/messaging')}>
-                <Ionicons name="chatbubble-outline" size={16} color="#fff" />
-                <Text style={styles.nextActionText}>Say hi now</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <Text style={styles.nextActionsHint}>Swipe right to immediately launch a watch party or chat.</Text>
-          )}
-        </View>
-      )}
-    </ScreenWrapper>
+        )}
+      </ScreenWrapper>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  header: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 16,
-  },
-  eyebrow: {
-    color: 'rgba(255,255,255,0.65)',
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  title: {
-    color: '#fff',
-    fontSize: 26,
-    fontWeight: '800',
-  },
-  subtitle: {
-    color: 'rgba(255,255,255,0.75)',
-    marginTop: 6,
-    fontSize: 14,
-  },
-  deckContainer: {
-    flex: 1,
-    marginHorizontal: 20,
-    marginTop: 10,
-    marginBottom: 30,
-  },
-  card: {
-    position: 'absolute',
-    width: '100%',
-    height: '100%',
-    borderRadius: 28,
-    overflow: 'hidden',
-    backgroundColor: '#11131f',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  cardBackground: {
-    flex: 1,
-  },
-  cardBackgroundImage: {
-    resizeMode: 'cover',
-  },
-  cardBackgroundFallback: {
-    backgroundColor: '#11131f',
-  },
-  badgeLike: {
-    position: 'absolute',
-    top: 24,
-    left: 24,
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(52, 199, 89, 0.85)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  badgeNope: {
-    position: 'absolute',
-    top: 24,
-    right: 24,
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(229, 57, 53, 0.8)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  badgeText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 13,
-  },
-  cardMeta: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    padding: 20,
-  },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  name: {
-    color: '#fff',
-    fontSize: 26,
-    fontWeight: '800',
-  },
-  scorePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    gap: 6,
-  },
-  score: {
-    color: '#fff',
-    fontWeight: '700',
-  },
-  vibe: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: 14,
-    marginTop: 8,
-  },
-  shared: {
-    color: '#fff',
-    marginTop: 4,
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  genreRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 10,
-  },
-  genreChip: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  genreChipText: {
-    color: '#fff',
-    fontSize: 12,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 16,
-  },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-  },
-  actionText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 13,
-  },
-  loader: {
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  loaderText: {
-    color: 'rgba(255,255,255,0.7)',
-    marginTop: 10,
-  },
-  errorCard: {
-    marginHorizontal: 20,
-    padding: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(255,75,75,0.3)',
-    backgroundColor: 'rgba(255,75,75,0.08)',
-  },
-  errorText: {
-    color: '#ff9b9b',
-  },
-  emptyCard: {
-    marginHorizontal: 24,
-    marginTop: 40,
-    padding: 24,
-    borderRadius: 24,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    gap: 12,
-  },
-  emptyTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  emptyCopy: {
-    color: 'rgba(255,255,255,0.7)',
-    textAlign: 'center',
-  },
-  primaryBtn: {
-    marginTop: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 22,
-    borderRadius: 999,
-    backgroundColor: '#e50914',
-  },
-  primaryBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  ctaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-evenly',
-    alignItems: 'center',
-    paddingBottom: 12,
-  },
-  circleBtn: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-  },
-  skipBtn: {
-    backgroundColor: 'rgba(229, 57, 53, 0.8)',
-  },
-  likeBtn: {
-    backgroundColor: '#0ecb7a',
-  },
-  superBtn: {
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  remainingHint: {
-    position: 'absolute',
-    top: 16,
-    right: 24,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  remainingText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 12,
-  },
-  nextActions: {
-    marginHorizontal: 20,
-    marginBottom: 16,
-    padding: 14,
-    borderRadius: 18,
-    gap: 10,
-  },
-  nextActionsLike: {
-    backgroundColor: 'rgba(14,203,122,0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(14,203,122,0.45)',
-  },
-  nextActionsSkip: {
-    backgroundColor: 'rgba(229,57,53,0.14)',
-    borderWidth: 1,
-    borderColor: 'rgba(229,57,53,0.4)',
-  },
-  nextActionsHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  nextActionsTitle: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: 15,
-  },
-  nextActionsCopy: {
-    color: 'rgba(255,255,255,0.78)',
-    marginTop: 2,
-  },
-  nextActionsRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  nextActionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    borderRadius: 14,
-  },
-  nextActionPrimary: {
-    backgroundColor: '#0ecb7a',
-  },
-  nextActionSecondary: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.35)',
-  },
-  nextActionText: {
-    color: '#fff',
-    fontWeight: '700',
-  },
-  nextActionsHint: {
-    color: 'rgba(255,255,255,0.75)',
-    fontWeight: '600',
-  },
+  root: { flex: 1, backgroundColor: '#000' },
+  bgOrb: { position: 'absolute', width: 400, height: 400, borderRadius: 200, filter: 'blur(100px)' as any },
+  header: { paddingHorizontal: 24, paddingTop: 20, marginBottom: 20 },
+  eyebrow: { color: '#ff4b4b', fontSize: 12, fontWeight: '900', letterSpacing: 2 },
+  title: { fontSize: 34, fontWeight: '900', color: '#fff', letterSpacing: -1 },
+  deck: { flex: 1, marginHorizontal: 16, marginBottom: 40, position: 'relative' },
+  card: { position: 'absolute', width: '100%', height: '100%' },
+  cardBg: { flex: 1, padding: 24, justifyContent: 'flex-end' },
+  badge: { position: 'absolute', top: 30, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 2 },
+  badgeLike: { left: 24, borderColor: '#0ecb7a', backgroundColor: 'rgba(14,203,122,0.2)' },
+  badgeSkip: { right: 24, borderColor: '#ff4b4b', backgroundColor: 'rgba(255,75,75,0.2)' },
+  badgeText: { color: '#fff', fontWeight: '900', fontSize: 14 },
+  cardInfo: { gap: 8 },
+  nameRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  name: { fontSize: 32, fontWeight: '900', color: '#fff' },
+  scoreGlass: { paddingHorizontal: 12, paddingVertical: 6 },
+  score: { color: '#fff', fontWeight: '900', fontSize: 16 },
+  vibe: { color: 'rgba(255,255,255,0.7)', fontSize: 16, fontWeight: '600' },
+  sharedTitles: { color: '#fff', fontSize: 14, opacity: 0.8 },
+  genreRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  genreChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.1)' },
+  genreText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  controls: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 30, paddingBottom: 40 },
+  btn: { width: 70, height: 70 },
+  btnSmall: { width: 50, height: 50 },
+  btnGlass: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  loader: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  empty: { flex: 1, justifyContent: 'center', alignItems: 'center', opacity: 0.5 },
+  emptyText: { color: '#fff', fontSize: 18, fontWeight: '800', marginTop: 20 },
 });

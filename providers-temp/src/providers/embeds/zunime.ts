@@ -25,7 +25,7 @@ export function makeZunimeEmbed(id: string, rank: number = 100) {
       const query = JSON.parse(ctx.url);
       const { anilistId, episode } = query;
 
-      const res = await ctx.proxiedFetcher(`${'/sources'}`, {
+      let resText = await ctx.proxiedFetcher<string>(`${'/sources'}`, {
         baseUrl,
         headers,
         query: {
@@ -34,12 +34,44 @@ export function makeZunimeEmbed(id: string, rank: number = 100) {
           host: serverName,
           type: 'dub',
         },
+        readAsText: true, // We must read as text first because it might be HTML instead of JSON
       });
 
-      // eslint-disable-next-line no-console
-      console.log(res);
+      // Handle fingerprint proxy bypass
+      if (resText.includes('<title>xaiby.sbs</title>') || resText.includes('var redirect_link')) {
+        const redirectMatch = resText.match(/var redirect_link\s*=\s*'([^']+)'/);
+        const noscriptMatch = resText.match(/URL=([^'"]+)&fp=-5/);
+        const fallbackMatch = resText.match(/href='([^']+&fp=-3)'/);
 
-      const resAny: any = res as any;
+        let finalUrl = '';
+        if (redirectMatch && redirectMatch[1]) {
+          finalUrl = redirectMatch[1] + 'fp=-7';
+        } else if (noscriptMatch && noscriptMatch[1]) {
+          finalUrl = noscriptMatch[1] + '&fp=-5';
+        } else if (fallbackMatch && fallbackMatch[1]) {
+          finalUrl = fallbackMatch[1];
+        }
+
+        if (finalUrl) {
+          // eslint-disable-next-line no-console
+          console.log(`[Zunime] Bypassing fingerprint for ${serverName}:`, finalUrl);
+          resText = await ctx.proxiedFetcher<string>(finalUrl, {
+            headers,
+            readAsText: true,
+          });
+        }
+      }
+
+      let resAny: any;
+      try {
+        resAny = JSON.parse(resText);
+      } catch (err) {
+        console.error('[Zunime] Failed to parse response:', resText.slice(0, 100));
+        throw new NotFoundError('Invalid response format');
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(resAny);
 
       if (!resAny?.success || !resAny?.sources?.url) {
         throw new NotFoundError('No stream URL found in response');

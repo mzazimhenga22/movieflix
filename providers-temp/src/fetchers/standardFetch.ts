@@ -23,7 +23,7 @@ export function makeStandardFetcher(f: FetchLike): Fetcher {
 
     // AbortController
     const controller = new AbortController();
-    const timeout = 30000; // 30s timeout
+    const timeout = ops.timeout ?? 10000; // Default to 10s for mobile responsiveness
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {

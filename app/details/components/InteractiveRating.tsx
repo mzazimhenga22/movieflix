@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import LiquidGlass from '../../../components/app-components/LiquidGlass';
+
 
 interface Props {
   currentRating: number;
@@ -50,7 +52,7 @@ export default function InteractiveRating({ currentRating, voteCount, userRating
   const handleStarPress = (star: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSelectedRating(star);
-    
+
     // Bounce animation
     Animated.sequence([
       Animated.timing(starAnims[star - 1], { toValue: 1.4, duration: 100, useNativeDriver: true }),
@@ -76,13 +78,18 @@ export default function InteractiveRating({ currentRating, voteCount, userRating
       {/* Main rating display */}
       <TouchableOpacity onPress={toggleExpand} activeOpacity={0.9}>
         <View style={styles.mainCard}>
-          <LinearGradient
-            colors={['rgba(255,215,0,0.15)', 'rgba(255,215,0,0.05)', 'transparent']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
+          <LiquidGlass
+            glowColor={accentColor}
+            tintColor="#0a0c18"
+            tintOpacity={0.5}
+            cornerRadius={20}
+            glowIntensity={0.5}
+            borderWidth={1.5}
+            chromaticAberration={true}
+            refractionAmount={0.4}
             style={styles.cardGradient}
           />
-          
+
           <Animated.View style={[styles.glow, { opacity: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.6] }) }]}>
             <LinearGradient colors={['#ffd700', 'transparent']} style={styles.glowGradient} />
           </Animated.View>
@@ -143,6 +150,17 @@ export default function InteractiveRating({ currentRating, voteCount, userRating
 
       {/* Expandable rating section */}
       <Animated.View style={[styles.expandedSection, { height: expandedHeight, opacity: expandAnim }]}>
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0a0c18"
+          tintOpacity={0.6}
+          cornerRadius={20}
+          glowIntensity={0.2}
+          borderWidth={1}
+          chromaticAberration={true}
+          refractionAmount={0.3}
+          style={StyleSheet.absoluteFillObject}
+        />
         <View style={styles.rateSection}>
           <Text style={styles.rateTitle}>Rate this movie</Text>
           <View style={styles.starRow}>

@@ -8,6 +8,15 @@ export interface Comment {
   spoiler?: boolean;
 }
 
+// Music track attached to a post
+export interface MusicTrack {
+  videoId: string;
+  title: string;
+  artist: string;
+  thumbnail: string;
+  startTime?: number;
+}
+
 // This is now the single source of truth for a review item's shape,
 // matching the data provided by the useSocialReactions hook.
 export interface Review {
@@ -32,6 +41,7 @@ export interface Review {
   likerAvatars?: ImageSourcePropType[];
   videoUrl?: string;
   tags?: string[];
+  musicTrack?: MusicTrack | null;
 }
 
 // This type is no longer needed as Review now has the correct shape.

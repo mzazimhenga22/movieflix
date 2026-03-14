@@ -1,5 +1,5 @@
-import { useAccent } from '@/app/components/AccentContext';
-import LiquidGlass from '@/app/components/LiquidGlass';
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { IMAGE_BASE_URL } from '@/constants/api';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 import { Media } from '@/types';
@@ -607,14 +607,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    ...StyleSheet.absoluteFillObject,
-  },
-  secondaryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
     paddingVertical: 11,
     paddingHorizontal: 16,
+    position: 'relative',
+  },
+  secondaryButton: {
     borderRadius: 14,
     position: 'relative',
     overflow: 'hidden',
@@ -625,22 +622,25 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   infoButtonLiquid: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  infoButton: {
     width: 46,
     height: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  infoButton: {
     borderRadius: 23,
     position: 'relative',
     overflow: 'hidden',
   },
   shareButtonLiquid: {
-    ...StyleSheet.absoluteFillObject,
-    marginLeft: 'auto',
-  },
-  shareButton: {
     width: 42,
     height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  shareButton: {
     borderRadius: 21,
     position: 'relative',
     overflow: 'hidden',

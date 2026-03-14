@@ -22,7 +22,7 @@ import {
 } from 'react-native'
 
 import { Feather, Ionicons } from '@expo/vector-icons'
-import { Video, ResizeMode } from 'expo-av'
+import { useVideoPlayer, VideoView } from 'expo-video'
 import { LinearGradient } from 'expo-linear-gradient'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import AsyncStorage from '@react-native-async-storage/async-storage'
@@ -237,6 +237,37 @@ const TrailerSlide = React.memo(function TrailerSlide({
   const { user } = useUser()
   const activeProfilePhoto = useActiveProfilePhoto()
 
+  const player = useVideoPlayer(item.videoUrl || null, (p) => {
+    p.loop = true;
+    p.muted = muted;
+  });
+
+  useEffect(() => {
+    player.muted = muted;
+  }, [muted, player]);
+
+  useEffect(() => {
+    if (active && autoPlayReels) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [active, autoPlayReels, player]);
+
+  useEffect(() => {
+    const sub = player.addListener('playToEnd', () => {
+      onAutoPlayNext();
+    });
+    const statusSub = player.addListener('statusChange', (status) => {
+      if (status === 'ready') setLoading(false);
+      if (status === 'loading') setLoading(true);
+    });
+    return () => {
+      sub.remove();
+      statusSub.remove();
+    };
+  }, [onAutoPlayNext, player]);
+
   // Memoize derived values
   const fallbackAvatar = React.useMemo(() =>
     item.avatar || 'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?auto=format&fit=crop&q=80&w=1780&ixlib=rb-4.0.3',
@@ -365,18 +396,11 @@ const TrailerSlide = React.memo(function TrailerSlide({
     <View style={styles.slide}>
       <Pressable style={StyleSheet.absoluteFill} onPress={handleTap} />
 
-      <Video
-        source={{ uri: item.videoUrl }}
+      <VideoView
+        player={player}
         style={styles.video}
-        resizeMode={ResizeMode.COVER}
-        shouldPlay={active && autoPlayReels}
-        isLooping
-        isMuted={muted}
-        onLoadStart={() => setLoading(true)}
-        onLoad={() => setLoading(false)}
-        onPlaybackStatusUpdate={(status: any) => {
-          if (status?.didJustFinish) onAutoPlayNext()
-        }}
+        contentFit="cover"
+        showsPlaybackControls={false}
       />
 
       {/* Heart burst animation */}

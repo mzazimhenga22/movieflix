@@ -46,7 +46,7 @@ const ProfileScreen = () => {
   };
 
   const handleEditProfile = () => {
-    router.push('/edit-profile');
+    router.push('/profile/edit');
   };
 
   return (

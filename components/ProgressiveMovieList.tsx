@@ -15,7 +15,7 @@ import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getProfileScopedKey } from '@/lib/profileStorage';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
-import { useAccent } from '@/app/components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { getResponsiveCardDimensions } from '@/hooks/useResponsive';
 import * as Haptics from 'expo-haptics';
 import ProgressiveMovieCard from './ProgressiveMovieCard';

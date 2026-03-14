@@ -337,3 +337,5 @@ const styles = StyleSheet.create({
         backgroundColor: 'black',
     },
 })
+
+export default function DummyRoute() { return null; }

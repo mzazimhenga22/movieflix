@@ -15,7 +15,9 @@ import {
 } from 'react-native';
 
 import { usePStream } from '../../../../src/pstream/usePStream';
-import { useAccent } from '../../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
+
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 
 export type MusicData = {
     videoId: string;
@@ -170,11 +172,16 @@ export default function ChatMusicPicker({ visible, onClose, onSelect }: Props) {
     return (
         <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
             <View style={styles.overlay}>
-                <View style={styles.sheet}>
-                    <LinearGradient
-                        colors={['rgba(35,40,55,0.98)', 'rgba(25,28,40,0.98)']}
-                        style={StyleSheet.absoluteFill}
-                    />
+                <LiquidGlass
+                    glowColor={accentColor}
+                    tintColor="#191c28"
+                    tintOpacity={0.95}
+                    cornerRadius={24}
+                    glowIntensity={0.3}
+                    borderOpacity={0.2}
+                    animated={true}
+                    style={styles.sheet}
+                >
 
                     {/* Header */}
                     <View style={styles.header}>
@@ -236,7 +243,7 @@ export default function ChatMusicPicker({ visible, onClose, onSelect }: Props) {
                             </TouchableOpacity>
                         </View>
                     )}
-                </View>
+                </LiquidGlass>
             </View>
         </Modal>
     );

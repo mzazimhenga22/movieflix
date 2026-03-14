@@ -1,7 +1,7 @@
 ﻿import React from 'react';
-import { requireNativeComponent } from 'react-native';
-import type { NativeSyntheticEvent } from 'react-native/Libraries/Types/CoreEventTypes';
+import { requireNativeComponent, UIManager, View } from 'react-native';
 import type { ViewStyle } from 'react-native/Libraries/StyleSheet/StyleSheetTypes';
+import type { NativeSyntheticEvent } from 'react-native/Libraries/Types/CoreEventTypes';
 
 interface NativeStoryViewProps {
     stories: string;
@@ -15,8 +15,19 @@ interface NativeStoryViewProps {
     onSwipeUp?: (event: NativeSyntheticEvent<{}>) => void;
 }
 
-const NativeStoryViewComponent = requireNativeComponent('StoryView') as React.ComponentType<NativeStoryViewProps>;
+let NativeStoryViewComponent: React.ComponentType<NativeStoryViewProps> | null = null;
+
+if (UIManager.getViewManagerConfig('StoryView') != null) {
+    try {
+        NativeStoryViewComponent = requireNativeComponent('StoryView');
+    } catch (e) {
+        console.warn('StoryView native component not found');
+    }
+} else {
+    // Silently fall back
+}
 
 export const NativeStoryView: React.FC<NativeStoryViewProps> = (props) => {
+    if (!NativeStoryViewComponent) return <View {...props as any} />;
     return <NativeStoryViewComponent {...props} style={[{ flex: 1 }, props.style] as any} />;
 };

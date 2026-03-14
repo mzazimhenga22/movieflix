@@ -79,3 +79,5 @@ export const FloatingParticles = React.memo(function FloatingParticles({
         </View>
     );
 });
+
+export default function DummyRoute() { return null; }

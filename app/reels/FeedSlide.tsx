@@ -6,7 +6,6 @@ import {
     Dimensions,
     Easing,
     FlatList,
-    GestureResponderEvent,
     Image,
     KeyboardAvoidingView,
     Modal,
@@ -21,23 +20,22 @@ import {
 
 import { Feather, Ionicons } from '@expo/vector-icons'
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import { ResizeMode, Video } from 'expo-av'
+import { useVideoPlayer, VideoView } from 'expo-video'
 import { LinearGradient } from 'expo-linear-gradient'
+const AnyVideoView = VideoView as any;
 import { useRouter } from 'expo-router'
 import {
     addDoc,
     collection,
-    deleteField,
     doc,
-    increment,
     limit,
     onSnapshot,
     orderBy,
     query,
-    runTransaction,
     serverTimestamp,
     updateDoc,
 } from 'firebase/firestore'
+import { deleteField, increment, runTransaction } from '@firebase/firestore'
 
 import { useStoryAudio } from '@/hooks/use-story-audio'
 import { firestore } from '../../constants/firebase'
@@ -106,7 +104,45 @@ export const FeedSlide = React.memo(function FeedSlide({
 
     // ✅ spinning disc
     const spinningAnim = useRef(new Animated.Value(0)).current
-    const spinLoopRef = useRef<Animated.CompositeAnimation | null>(null)
+    const spinLoopRef = useRef<any>(null)
+
+    const videoSource = useMemo(() => {
+        if (!item.videoUrl) return null;
+        return { uri: String(item.videoUrl), headers: (item as any).headers };
+    }, [item.videoUrl, (item as any).headers]);
+
+    const player = useVideoPlayer(videoSource, (p) => {
+        p.loop = true;
+        p.muted = muted;
+    });
+
+    useEffect(() => {
+        player.muted = muted;
+    }, [muted, player]);
+
+    useEffect(() => {
+        if (active && autoPlayReels && !paused) {
+            player.play();
+        } else {
+            player.pause();
+        }
+    }, [active, autoPlayReels, paused, player]);
+
+    useEffect(() => {
+        const sub = player.addListener('playToEnd', () => {
+            if (active && item.mediaType !== 'clip') {
+                onAutoPlayNext();
+            }
+        });
+        const statusSub = player.addListener('statusChange', (event: any) => {
+            if (event.status === 'readyToPlay' || event.status === 'ready') setLoading(false);
+            if (event.status === 'loading') setLoading(true);
+        });
+        return () => {
+            sub.remove();
+            statusSub.remove();
+        };
+    }, [active, item.mediaType, onAutoPlayNext, player]);
 
     useEffect(() => {
         if (active) {
@@ -194,7 +230,7 @@ export const FeedSlide = React.memo(function FeedSlide({
 
         try {
             const reviewRef = doc(firestore, 'reviews', docId)
-            const result = await runTransaction(firestore, async (tx) => {
+            const result = await runTransaction(firestore, async (tx: any) => {
                 const snap = await tx.get(reviewRef)
                 if (!snap.exists()) return null
                 const data = snap.data() as any
@@ -302,9 +338,9 @@ export const FeedSlide = React.memo(function FeedSlide({
 
         const unsub = onSnapshot(
             q,
-            (snap) => {
+            (snap: any) => {
                 const uid = (user as any)?.uid ? String((user as any).uid) : null
-                const next = snap.docs.map((d) => {
+                const next = snap.docs.map((d: any) => {
                     const data = d.data() as any
                     const likedBy = data?.likedBy && typeof data.likedBy === 'object' ? data.likedBy : {}
                     return {
@@ -420,7 +456,7 @@ export const FeedSlide = React.memo(function FeedSlide({
         outputRange: [0, 1, 1, 0],
     })
 
-    const handleTap = (e: GestureResponderEvent) => {
+    const handleTap = (e: any) => {
         const now = Date.now()
 
         if (now - lastTapRef.current < 280) {
@@ -556,18 +592,11 @@ export const FeedSlide = React.memo(function FeedSlide({
             )}
 
             {canRenderVideo ? (
-                <Video
-                    source={{ uri: String(item.videoUrl), headers: (item as any).headers }}
+                <AnyVideoView
+                    player={player}
                     style={[styles.video, isClip && { backgroundColor: '#000' }]}
-                    resizeMode={isClip ? ResizeMode.CONTAIN : ResizeMode.COVER}
-                    shouldPlay={active && autoPlayReels && !paused}
-                    isLooping
-                    isMuted={muted}
-                    volume={muted ? 0 : 1}
-                    progressUpdateIntervalMillis={active ? 250 : 1000}
-                    onLoadStart={handleLoadStart}
-                    onLoad={handleLoad}
-                    onPlaybackStatusUpdate={handleStatusUpdate}
+                    contentFit={isClip ? 'contain' : 'cover'}
+                    showsPlaybackControls={false}
                 />
             ) : (
                 item.avatar ? (
@@ -707,8 +736,8 @@ export const FeedSlide = React.memo(function FeedSlide({
 
                         <FlatList
                             data={threadedComments}
-                            keyExtractor={(c) => String(c.id)}
-                            renderItem={({ item: comment }) => (
+                            keyExtractor={(c: any) => String(c.id)}
+                            renderItem={({ item: comment }: any) => (
                                 <View style={[styles.commentRow, comment.__depth ? styles.commentRowReply : undefined]}>
                                     <Image source={{ uri: comment.avatar || undefined }} style={styles.commentAvatar} />
                                     <View style={styles.commentTextContainer}>
@@ -973,3 +1002,5 @@ const styles = StyleSheet.create({
         borderColor: 'rgba(255,255,255,0.2)',
     },
 })
+
+export default function DummyRoute() { return null; }

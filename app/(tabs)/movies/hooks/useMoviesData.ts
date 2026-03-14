@@ -1,18 +1,29 @@
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '@/constants/api';
+import { authPromise, firestore } from '@/constants/firebase';
+import { runInBackground } from '@/lib/backgroundScheduler';
 import { NativeCache } from '@/lib/nativeCache';
+import { buildProfileScopedKey } from '@/lib/profileStorage';
+import MoviesModule from '@/modules/MoviesModule';
+import { scrapeImdbTrailer } from '@/src/providers/scrapeImdbTrailer';
+import { searchClipCafe } from '@/src/providers/shortclips';
+import { Genre, Media } from '@/types/index';
 import { useFocusEffect } from 'expo-router';
 import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { InteractionManager } from 'react-native';
-import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../../constants/api';
-import { authPromise, firestore } from '../../../../constants/firebase';
-import { runInBackground } from '../../../../lib/backgroundScheduler';
-import { buildProfileScopedKey } from '../../../../lib/profileStorage';
-import MoviesModule from '../../../../modules/MoviesModule';
-import { scrapeImdbTrailer } from '../../../../src/providers/scrapeImdbTrailer';
-import { searchClipCafe } from '../../../../src/providers/shortclips';
-import { Genre, Media } from '../../../../types/index';
 // import { KIDS_GENRE_IDS, shuffleArray } from '../utils/constants'; // Fix relative import
-import { KIDS_GENRE_IDS, shuffleArray } from '../../movies/utils/constants';
+import { KIDS_GENRE_IDS, shuffleArray } from '../utils/constants';
+
+
+const safeParse = <T,>(json: string | null | undefined, fallback: T): T => {
+  if (!json || !json.trim()) return fallback;
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    console.warn('[JSON Parse Error]', e, 'Input:', json?.slice(0, 100));
+    return fallback;
+  }
+};
 
 
 const HOME_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -50,31 +61,15 @@ type HomeFeedDerivedState = {
   genresList: Genre[];
 };
 
+// Global in-memory cache for immediate restoration on component mount
+const memoryCache: Record<string, HomeFeedDerivedState> = {};
+
 export const useMoviesData = (
   activeProfileId: string | null,
   isKidsProfile: boolean,
   profileReady: boolean,
   isScreenFocused: boolean,
 ) => {
-  const [trending, setTrending] = useState<Media[]>([]);
-  const [movieReels, setMovieReels] = useState<Media[]>([]);
-  const [movieTrailers, setMovieTrailers] = useState<(Media & { trailerUrl: string })[]>([]);
-  const [recommended, setRecommended] = useState<Media[]>([]);
-  const [songs, setSongs] = useState<Media[]>([]);
-  const [trendingMoviesOnly, setTrendingMoviesOnly] = useState<Media[]>([]);
-  const [trendingTvOnly, setTrendingTvOnly] = useState<Media[]>([]);
-  const [genres, setGenres] = useState<Genre[]>([]);
-  const [featuredMovie, setFeaturedMovie] = useState<Media | null>(null);
-  const [stories, setStories] = useState<any[]>([]);
-  const [netflix, setNetflix] = useState<Media[]>([]);
-  const [amazon, setAmazon] = useState<Media[]>([]);
-  const [hbo, setHbo] = useState<Media[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [continueWatching, setContinueWatching] = useState<Media[]>([]);
-  const [lastWatched, setLastWatched] = useState<Media | null>(null);
-  const feedSignatureRef = useRef<string | null>(null);
-
   const homeFeedCacheScope = useMemo(
     () => `${activeProfileId ?? 'global'}${isKidsProfile ? ':kids' : ''}`,
     [activeProfileId, isKidsProfile],
@@ -83,6 +78,28 @@ export const useMoviesData = (
     () => `homeFeedCache:${homeFeedCacheScope}`,
     [homeFeedCacheScope],
   );
+
+  // Initial state from memory cache if available
+  const initialData = memoryCache[homeFeedCacheScope];
+
+  const [trending, setTrending] = useState<Media[]>(initialData?.trendingResults || []);
+  const [movieReels, setMovieReels] = useState<Media[]>(initialData?.movieReelsSafe || []);
+  const [movieTrailers, setMovieTrailers] = useState<(Media & { trailerUrl: string })[]>([]);
+  const [recommended, setRecommended] = useState<Media[]>(initialData?.recommendedSafe || []);
+  const [songs, setSongs] = useState<Media[]>(initialData?.songsSafe || []);
+  const [trendingMoviesOnly, setTrendingMoviesOnly] = useState<Media[]>(initialData?.movieStoriesList || []);
+  const [trendingTvOnly, setTrendingTvOnly] = useState<Media[]>(initialData?.tvStoriesList || []);
+  const [genres, setGenres] = useState<Genre[]>(initialData?.genresList || []);
+  const [featuredMovie, setFeaturedMovie] = useState<Media | null>(initialData?.trendingResults?.[0] || null);
+  const [stories, setStories] = useState<any[]>(initialData?.combinedStories || []);
+  const [netflix, setNetflix] = useState<Media[]>(initialData?.netflixSafe || []);
+  const [amazon, setAmazon] = useState<Media[]>(initialData?.amazonSafe || []);
+  const [hbo, setHbo] = useState<Media[]>(initialData?.hboSafe || []);
+  const [loading, setLoading] = useState(!initialData);
+  const [error, setError] = useState<string | null>(null);
+  const [continueWatching, setContinueWatching] = useState<Media[]>([]);
+  const [lastWatched, setLastWatched] = useState<Media | null>(null);
+  const feedSignatureRef = useRef<string | null>(null);
 
   const filterForKids = useCallback(
     (items: Media[] | undefined | null): Media[] => {
@@ -171,8 +188,18 @@ export const useMoviesData = (
 
   const fetchWithKids = useCallback(
     async (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
-      const response = await fetch(buildKidsUrl(input, type));
-      return response.json();
+      try {
+        const response = await fetch(buildKidsUrl(input, type));
+        if (!response.ok) {
+          console.warn('[fetchWithKids] HTTP Error', response.status, 'for', input);
+          return { results: [] };
+        }
+        const text = await response.text();
+        return safeParse(text, { results: [] });
+      } catch (err) {
+        console.error('[fetchWithKids] Request Failed', err);
+        return { results: [] };
+      }
     },
     [buildKidsUrl],
   );
@@ -204,13 +231,13 @@ export const useMoviesData = (
 
         // 1. Read from NativeCache (fastest)
         const stored = await NativeCache.getItem(key);
-        if (stored) {
-          const parsed: Media[] = JSON.parse(stored);
+        if (stored && stored.trim()) {
+          const parsed: Media[] = safeParse(stored, []);
           parsed.forEach((entry) => {
             const mediaType = String((entry as any)?.media_type || (entry as any)?.mediaType || 'movie');
             const id = entry?.id ?? (entry as any)?.tmdbId ?? entry?.title ?? entry?.name;
             if (id == null) return;
-            mergedByKey.set(`${mediaType}:${String(id)}`, entry);
+            mergedByKey.set(`${mediaType}:${String(id)} `, entry);
           });
         }
 
@@ -234,7 +261,7 @@ export const useMoviesData = (
               const tmdbId = data?.tmdbId;
               if (!tmdbId) return;
               const mediaType = String(data?.mediaType || 'movie');
-              const entryKey = `${mediaType}:${String(tmdbId)}`;
+              const entryKey = `${mediaType}:${String(tmdbId)} `;
 
               const existing = mergedByKey.get(entryKey);
               const existingTs = existing?.watchProgress?.updatedAt ?? 0;
@@ -322,18 +349,18 @@ export const useMoviesData = (
       );
 
       return {
-        netflixSafe: JSON.parse(raw.netflixSafe || '[]'),
-        amazonSafe: JSON.parse(raw.amazonSafe || '[]'),
-        hboSafe: JSON.parse(raw.hboSafe || '[]'),
-        combinedStories: JSON.parse(raw.combinedStories || '[]'),
-        movieStoriesList: JSON.parse(raw.movieStoriesList || '[]'),
-        tvStoriesList: JSON.parse(raw.tvStoriesList || '[]'),
-        trendingResults: JSON.parse(raw.trendingResults || '[]'),
-        trendingRaw: JSON.parse(raw.trendingRaw || '[]'),
-        songsSafe: JSON.parse(raw.songsSafe || '[]'),
-        movieReelsSafe: JSON.parse(raw.movieReelsSafe || '[]'),
-        recommendedSafe: JSON.parse(raw.recommendedSafe || '[]'),
-        genresList: JSON.parse(raw.genresList || '[]'),
+        netflixSafe: safeParse(raw.netflixSafe, []),
+        amazonSafe: safeParse(raw.amazonSafe, []),
+        hboSafe: safeParse(raw.hboSafe, []),
+        combinedStories: safeParse(raw.combinedStories, []),
+        movieStoriesList: safeParse(raw.movieStoriesList, []),
+        tvStoriesList: safeParse(raw.tvStoriesList, []),
+        trendingResults: safeParse(raw.trendingResults, []),
+        trendingRaw: safeParse(raw.trendingRaw, []),
+        songsSafe: safeParse(raw.songsSafe, []),
+        movieReelsSafe: safeParse(raw.movieReelsSafe, []),
+        recommendedSafe: safeParse(raw.recommendedSafe, []),
+        genresList: safeParse(raw.genresList, []),
       };
     },
     [isKidsProfile]
@@ -343,14 +370,14 @@ export const useMoviesData = (
     async (movies: Media[]) => {
       if (!movies || movies.length === 0) return;
       console.log('[MovieTrailers] Starting fetch for movies:', movies.length);
-      const cacheKey = `movieTrailers:${homeFeedCacheScope}`;
+      const cacheKey = `movieTrailers:${homeFeedCacheScope} `;
 
       try {
         // Read cached trailers first
         try {
           const cached = await NativeCache.getItem(cacheKey);
-          if (cached) {
-            const parsed = JSON.parse(cached) as (Media & { trailerUrl: string })[];
+          if (cached && cached.trim()) {
+            const parsed = safeParse(cached, []) as (Media & { trailerUrl: string })[];
             if (parsed?.length) {
               setMovieTrailers(parsed);
             }
@@ -388,17 +415,17 @@ export const useMoviesData = (
                   const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
                   if (trailer?.url) {
                     trailerUrl = trailer.url;
-                    console.log('[MovieTrailers] IMDB Found:', movie?.title);
+                    console.log('[MovieTrailers] IMDB Found:', movie?.title || movie?.name);
                   }
                 }
 
                 // Fallback to ClipCafe if IMDB fails
                 if (!trailerUrl) {
                   const year = movie.release_date ? movie.release_date.substring(0, 4) : undefined;
-                  const clip = await searchClipCafe(movie.title || '', year);
+                  const clip = await searchClipCafe(movie.title || movie.name || '', year);
                   if (clip?.url) {
                     trailerUrl = clip.url;
-                    console.log('[MovieTrailers] ClipCafe Found:', movie?.title);
+                    console.log('[MovieTrailers] ClipCafe Found:', movie?.title || movie?.name);
                   }
                 }
 
@@ -413,7 +440,7 @@ export const useMoviesData = (
                   });
                 }
               } catch (err) {
-                console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
+                console.warn('[MovieTrailers] Error fetching trailer for', movie?.title || movie?.name, err);
               }
             }
           };
@@ -439,6 +466,9 @@ export const useMoviesData = (
 
   const applyDerivedState = useCallback(
     (derived: HomeFeedDerivedState) => {
+      // Update memory cache
+      memoryCache[homeFeedCacheScope] = derived;
+
       setNetflix(derived.netflixSafe);
       setAmazon(derived.amazonSafe);
       setHbo(derived.hboSafe);
@@ -456,11 +486,18 @@ export const useMoviesData = (
       feedSignatureRef.current = signature;
       fetchTrailersForMovies(derived.trendingResults.slice(0, 6));
     },
-    [buildFeedSignature, fetchTrailersForMovies]
+    [buildFeedSignature, fetchTrailersForMovies, homeFeedCacheScope]
   );
 
   const loadFromCache = useCallback(async (): Promise<{ applied: boolean; fresh: boolean }> => {
     try {
+      // If we already have memory cache, we consider it applied
+      if (memoryCache[homeFeedCacheScope]) {
+        // We still check the persistent cache for freshness info if needed, 
+        // but for now, we trust the memory cache is the same as persistent
+        return { applied: true, fresh: false }; // fresh: false forces a background update check
+      }
+
       const cached = await NativeCache.getItem(homeFeedCacheKey);
       if (!cached) return { applied: false, fresh: false };
 
@@ -468,7 +505,11 @@ export const useMoviesData = (
       return new Promise((resolve) => {
         InteractionManager.runAfterInteractions(() => {
           try {
-            const parsed = JSON.parse(cached) as HomeFeedCacheEnvelope | HomeFeedCachePayload;
+            const parsed = safeParse(cached, null) as HomeFeedCacheEnvelope | HomeFeedCachePayload | null;
+            if (!parsed) {
+              resolve({ applied: false, fresh: false });
+              return;
+            }
             const envelope: HomeFeedCacheEnvelope = (parsed as HomeFeedCacheEnvelope)?.payload
               ? (parsed as HomeFeedCacheEnvelope)
               : { payload: parsed as HomeFeedCachePayload, updatedAt: 0 };
@@ -566,14 +607,14 @@ export const useMoviesData = (
           genresData,
         };
 
-      const derived = await deriveFeedState(payload);
-      const newSignature = buildFeedSignature(derived);
-      const hasChanged = feedSignatureRef.current !== newSignature;
+        const derived = await deriveFeedState(payload);
+        const newSignature = buildFeedSignature(derived);
+        const hasChanged = feedSignatureRef.current !== newSignature;
 
-      if (hasChanged) {
-        applyDerivedState(derived);
-        setLoading(false);
-      }
+        if (hasChanged) {
+          applyDerivedState(derived);
+          setLoading(false);
+        }
 
         try {
           const envelope: HomeFeedCacheEnvelope = {
@@ -664,3 +705,5 @@ export const useMoviesData = (
     filterForKids,
   };
 };
+
+export default function DummyTsRoute() { return null; }

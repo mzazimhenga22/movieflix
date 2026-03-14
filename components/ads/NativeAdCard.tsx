@@ -3,7 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { useAccent } from '../../app/components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import type { Product } from '../../app/marketplace/api';
 
 export default function NativeAdCard({

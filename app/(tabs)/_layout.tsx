@@ -3,7 +3,7 @@ import { Tabs } from 'expo-router';
 import React from 'react';
 import { useColorScheme } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import BottomNav from '../components/BottomNav'; // adjust path if needed
+import BottomNav from '../../components/app-components/BottomNav'; // adjust path if needed
 
 export default function TabLayout(): React.ReactElement {
   const colorScheme = useColorScheme();
@@ -27,6 +27,7 @@ export default function TabLayout(): React.ReactElement {
       <Tabs.Screen name="music" options={{ title: 'Music' }} />
       <Tabs.Screen name="downloads" options={{ title: 'Downloads' }} />
       <Tabs.Screen name="marketplace" options={{ title: 'Marketplace' }} />
+      <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
       <Tabs.Screen name="interactive" options={{ title: 'More' }} />
     </Tabs>
   );

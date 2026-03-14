@@ -14,7 +14,7 @@ import {
   View,
 } from 'react-native';
 import { Image as ExpoImage } from 'expo-image';
-import { BlurView } from 'expo-blur';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
 import { LinearGradient } from 'expo-linear-gradient';
 import ReanimatedView, { FadeInUp, FadeOutDown } from 'react-native-reanimated';
 import {
@@ -149,6 +149,14 @@ const EpisodeList: React.FC<EpisodeListProps> = ({
                 onPress={() => handleSeasonChange(season, index)}
                 activeOpacity={0.7}
               >
+                <LiquidGlass
+                  glowColor={isSelected ? accentColor : '#ffffff'}
+                  tintOpacity={isSelected ? 0.12 : 0.05}
+                  cornerRadius={12}
+                  glowIntensity={isSelected ? 0.3 : 0}
+                  borderOpacity={isSelected ? 0.4 : 0.05}
+                  style={StyleSheet.absoluteFillObject}
+                />
                 <Text style={[
                   styles.seasonTabText,
                   isSelected && styles.seasonTabTextSelected,
@@ -275,7 +283,15 @@ export const EpisodeCard = ({
   };
 
   return (
-    <Animated.View style={[styles.cardOuter, { transform: [{ scale: pulseAnim }] }]}>
+    <Animated.View style={[styles.cardOuter, { transform: [{ scale: pulseAnim }], backgroundColor: 'transparent' }]}>
+      <LiquidGlass
+        glowColor={accentColor}
+        tintOpacity={0.06}
+        cornerRadius={16}
+        glowIntensity={0.25}
+        borderOpacity={0.15}
+        style={StyleSheet.absoluteFillObject}
+      />
       {/* Accent glow */}
       <LinearGradient 
         colors={[`${accentColor}40`, `${accentColor}10`, 'transparent']} 
@@ -397,6 +413,14 @@ export const EpisodeCard = ({
               onPress={() => !disabled && onDownload?.(episode, season)}
               activeOpacity={0.7}
             >
+              <LiquidGlass
+                glowColor={accentColor}
+                tintOpacity={0.2}
+                cornerRadius={8}
+                glowIntensity={0.2}
+                borderOpacity={0.2}
+                style={StyleSheet.absoluteFillObject}
+              />
               <MaterialIcons name="file-download" size={18} color="#fff" />
               <Text style={styles.downloadBtnText}>Download</Text>
             </TouchableOpacity>
@@ -461,13 +485,13 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 16,
     borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'transparent',
     borderWidth: 1,
     borderColor: 'transparent',
     alignItems: 'center',
   },
   seasonTabSelected: {
-    backgroundColor: 'rgba(229,9,20,0.12)',
+    // handled by LiquidGlass
   },
   seasonTabText: {
     color: 'rgba(255,255,255,0.7)',
@@ -491,7 +515,6 @@ const styles = StyleSheet.create({
   },
   cardOuter: {
     borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.04)',
     overflow: 'hidden',
   },
   cardGlow: {

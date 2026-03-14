@@ -1,0 +1,759 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { InteractionManager, Platform } from 'react-native';
+import NetInfo from '@react-native-community/netinfo';
+import { scrapeImdbTrailer } from '../../../../src/providers/scrapeImdbTrailer';
+import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../../../constants/api';
+import { buildProfileScopedKey } from '../../../../lib/profileStorage';
+import { Media, Genre } from '../../../../types/index';
+import { shuffleArray, KIDS_GENRE_IDS } from '../utils/constants';
+import { useFocusEffect } from 'expo-router';
+
+const HOME_FEED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+type HomeFeedCachePayload = {
+  netflix: Media[];
+  amazon: Media[];
+  hbo: Media[];
+  netflixTv?: Media[];
+  amazonTv?: Media[];
+  hboTv?: Media[];
+  movieStoriesData: any;
+  tvStoriesData: any;
+  trendingData: any;
+  movieReelsData: any;
+  recommendedData: any;
+  songsData: any;
+  genresData: any;
+  tvOnTheAirData?: any;
+  tvRecommendedData?: any;
+  tvPopularData?: any;
+  tvGenresData?: any;
+};
+
+type HomeFeedCacheEnvelope = {
+  updatedAt: number;
+  payload: HomeFeedCachePayload;
+};
+
+type HomeFeedDerivedState = {
+  netflixSafe: Media[];
+  amazonSafe: Media[];
+  hboSafe: Media[];
+  netflixTvSafe: Media[];
+  amazonTvSafe: Media[];
+  hboTvSafe: Media[];
+  combinedStories: any[];
+  movieStoriesList: Media[];
+  tvStoriesList: Media[];
+  trendingResults: Media[];
+  trendingRaw: Media[];
+  songsSafe: Media[];
+  movieReelsSafe: Media[];
+  recommendedSafe: Media[];
+  genresList: Genre[];
+  tvOnTheAirSafe: Media[];
+  tvRecommendedSafe: Media[];
+  tvPopularSafe: Media[];
+  tvGenresList: Genre[];
+};
+
+export const useMoviesData = (activeProfileId: string | null, isKidsProfile: boolean, profileReady: boolean) => {
+  const [trending, setTrending] = useState<Media[]>([]);
+  const [movieReels, setMovieReels] = useState<Media[]>([]);
+  const [movieTrailers, setMovieTrailers] = useState<(Media & { trailerUrl: string })[]>([]);
+  const [recommended, setRecommended] = useState<Media[]>([]);
+  const [recommendedTv, setRecommendedTv] = useState<Media[]>([]);
+  const [songs, setSongs] = useState<Media[]>([]);
+  const [songsTv, setSongsTv] = useState<Media[]>([]);
+  const [trendingMoviesOnly, setTrendingMoviesOnly] = useState<Media[]>([]);
+  const [trendingTvOnly, setTrendingTvOnly] = useState<Media[]>([]);
+  const [genres, setGenres] = useState<Genre[]>([]);
+  const [genresTv, setGenresTv] = useState<Genre[]>([]);
+  const [featuredMovie, setFeaturedMovie] = useState<Media | null>(null);
+  const [stories, setStories] = useState<any[]>([]);
+  const [netflix, setNetflix] = useState<Media[]>([]);
+  const [amazon, setAmazon] = useState<Media[]>([]);
+  const [hbo, setHbo] = useState<Media[]>([]);
+  const [netflixTv, setNetflixTv] = useState<Media[]>([]);
+  const [amazonTv, setAmazonTv] = useState<Media[]>([]);
+  const [hboTv, setHboTv] = useState<Media[]>([]);
+  const [tvOnTheAir, setTvOnTheAir] = useState<Media[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [hasCachedContent, setHasCachedContent] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [continueWatching, setContinueWatching] = useState<Media[]>([]);
+  const [lastWatched, setLastWatched] = useState<Media | null>(null);
+  const feedSignatureRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const sub = NetInfo.addEventListener((state) => {
+      const connected = Boolean(state.isConnected);
+      const reachable = state.isInternetReachable;
+      const online = connected && (reachable == null ? true : Boolean(reachable));
+      setIsOnline(online);
+      setOffline(!online);
+    });
+    return () => {
+      sub();
+    };
+  }, []);
+
+  const homeFeedCacheScope = useMemo(
+    () => `${activeProfileId ?? 'global'}${isKidsProfile ? ':kids' : ''}`,
+    [activeProfileId, isKidsProfile],
+  );
+  const homeFeedCacheKey = useMemo(
+    () => `homeFeedCache:${homeFeedCacheScope}`,
+    [homeFeedCacheScope],
+  );
+
+  const filterForKids = useCallback(
+    (items: Media[] | undefined | null): Media[] => {
+      if (!items || items.length === 0) {
+        return [];
+      }
+      if (!isKidsProfile) {
+        return items;
+      }
+      return items.filter((item) => {
+        const ids = (item.genre_ids || []) as number[];
+        const hasKidsGenre = ids.some((id) => KIDS_GENRE_IDS.includes(id));
+        return !item.adult && hasKidsGenre;
+      });
+    },
+    [isKidsProfile],
+  );
+
+  const buildKidsUrl = useCallback(
+    (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
+      if (!isKidsProfile) return input;
+      // NOTE: Avoid `new URL()` in RN release builds (it may not be available depending on runtime/polyfills).
+      const upsertQueryParams = (url: string, updates: Record<string, string>) => {
+        const hashIndex = url.indexOf('#');
+        const hash = hashIndex >= 0 ? url.slice(hashIndex) : '';
+        const withoutHash = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+
+        const qIndex = withoutHash.indexOf('?');
+        const base = qIndex >= 0 ? withoutHash.slice(0, qIndex) : withoutHash;
+        const query = qIndex >= 0 ? withoutHash.slice(qIndex + 1) : '';
+
+        const params: Record<string, string> = {};
+        if (query) {
+          for (const part of query.split('&')) {
+            if (!part) continue;
+            const eq = part.indexOf('=');
+            const rawKey = eq >= 0 ? part.slice(0, eq) : part;
+            const rawVal = eq >= 0 ? part.slice(eq + 1) : '';
+            let key = rawKey;
+            let val = rawVal;
+            try {
+              key = decodeURIComponent(rawKey);
+            } catch {
+              // keep as-is
+            }
+            try {
+              val = decodeURIComponent(rawVal);
+            } catch {
+              // keep as-is
+            }
+            if (key) params[key] = val;
+          }
+        }
+
+        for (const [k, v] of Object.entries(updates)) {
+          params[k] = v;
+        }
+
+        const qs = Object.entries(params)
+          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+          .join('&');
+        return `${base}${qs ? `?${qs}` : ''}${hash}`;
+      };
+
+      const updates: Record<string, string> = {
+        include_adult: 'false',
+        with_genres: '10751',
+      };
+
+      if (type === 'movie' || type === 'discover') {
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'G';
+      } else if (type === 'tv') {
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'TV-Y';
+      } else if (type === 'all') {
+        // when mixing media, prefer the most restrictive rating
+        updates.certification_country = 'US';
+        updates['certification.lte'] = 'TV-Y';
+      }
+
+      return upsertQueryParams(input, updates);
+    },
+    [isKidsProfile],
+  );
+
+  const fetchWithKids = useCallback(
+    async (input: string, type: 'movie' | 'tv' | 'all' | 'discover' = 'movie') => {
+      const response = await fetch(buildKidsUrl(input, type));
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`TMDB request failed (${response.status}): ${text || response.statusText}`);
+      }
+      return response.json();
+    },
+    [buildKidsUrl],
+  );
+
+  const fetchProviderMovies = useCallback(
+    async (providerId: number): Promise<Media[]> => {
+      const url = `${API_BASE_URL}/discover/movie?api_key=${API_KEY}&with_watch_providers=${providerId}&watch_region=US&with_watch_monetization_types=flatrate`;
+      const json = await fetchWithKids(url, 'discover');
+      const results = (json?.results || []) as Media[];
+      return results.map((m) => ({ ...m, media_type: (m as any)?.media_type ?? 'movie' }));
+    },
+    [fetchWithKids],
+  );
+
+  const fetchProviderTv = useCallback(
+    async (providerId: number): Promise<Media[]> => {
+      const url = `${API_BASE_URL}/discover/tv?api_key=${API_KEY}&with_watch_providers=${providerId}&watch_region=US&with_watch_monetization_types=flatrate`;
+      const json = await fetchWithKids(url, 'tv');
+      const results = (json?.results || []) as Media[];
+      return results.map((m) => ({ ...m, media_type: (m as any)?.media_type ?? 'tv' }));
+    },
+    [fetchWithKids],
+  );
+
+  const loadWatchHistory = useCallback(() => {
+    let isActive = true;
+    const run = async () => {
+      if (!profileReady) {
+        if (isActive) {
+          setContinueWatching([]);
+          setLastWatched(null);
+        }
+        return;
+      }
+      try {
+        const key = buildProfileScopedKey('watchHistory', activeProfileId);
+        const stored = await AsyncStorage.getItem(key);
+        if (!isActive) return;
+        if (stored) {
+          const parsed: Media[] = JSON.parse(stored);
+          setContinueWatching(parsed);
+          setLastWatched(parsed[0] || null);
+        } else {
+          setContinueWatching([]);
+          setLastWatched(null);
+        }
+      } catch (err) {
+        if (isActive) {
+          console.error('Failed to load watch history', err);
+          setContinueWatching([]);
+          setLastWatched(null);
+        }
+      }
+    };
+    run();
+    return () => {
+      isActive = false;
+    };
+  }, [activeProfileId, profileReady]);
+
+  useFocusEffect(loadWatchHistory);
+
+  const buildFeedSignature = useCallback((derived: HomeFeedDerivedState) => {
+    const pickIds = (items: { id?: string | number }[] = []) =>
+      items.map((item) => item?.id ?? null).filter(Boolean).slice(0, 50);
+    return JSON.stringify({
+      trending: pickIds(derived.trendingResults),
+      netflix: pickIds(derived.netflixSafe),
+      amazon: pickIds(derived.amazonSafe),
+      hbo: pickIds(derived.hboSafe),
+      netflixTv: pickIds(derived.netflixTvSafe),
+      amazonTv: pickIds(derived.amazonTvSafe),
+      hboTv: pickIds(derived.hboTvSafe),
+      songs: pickIds(derived.songsSafe),
+      reels: pickIds(derived.movieReelsSafe),
+      recommended: pickIds(derived.recommendedSafe),
+      tvOnTheAir: pickIds(derived.tvOnTheAirSafe),
+      tvRecommended: pickIds(derived.tvRecommendedSafe),
+      tvPopular: pickIds(derived.tvPopularSafe),
+      stories: pickIds(derived.combinedStories),
+    });
+  }, []);
+
+  const deriveFeedState = useCallback(
+    (payload: HomeFeedCachePayload): HomeFeedDerivedState => {
+      const tagMediaType = (items: Media[], type: 'movie' | 'tv'): Media[] =>
+        items.map((item) => ({
+          ...item,
+          media_type: (item as any)?.media_type ?? (item?.title ? 'movie' : item?.name ? 'tv' : type),
+        }));
+
+      const movieStoriesList = tagMediaType(
+        filterForKids((payload.movieStoriesData?.results || []) as Media[]),
+        'movie',
+      );
+      const tvStoriesList = tagMediaType(
+        filterForKids((payload.tvStoriesData?.results || []) as Media[]),
+        'tv',
+      );
+      const combinedStories = [...movieStoriesList, ...tvStoriesList]
+        .map((item: any) => {
+          const image = item?.poster_path ? `${IMAGE_BASE_URL}${item.poster_path}` : '';
+          const title = item?.title || item?.name || 'Untitled';
+          const id = item?.id;
+
+          return {
+            id,
+            title,
+            image,
+            avatar: image,
+            media_type: item?.media_type,
+            media: image ? [{ type: 'image', uri: image, storyId: id }] : [],
+          };
+        })
+        .filter((s: any) => Boolean(s?.image));
+
+      const trendingRaw = (payload.trendingData?.results || []) as Media[];
+      const trendingResults = tagMediaType(filterForKids(trendingRaw), 'movie');
+      const netflixSafe = tagMediaType(filterForKids(payload.netflix || []), 'movie');
+      const amazonSafe = tagMediaType(filterForKids(payload.amazon || []), 'movie');
+      const netflixTvSafe = tagMediaType(filterForKids(payload.netflixTv || []), 'tv');
+      const amazonTvSafe = tagMediaType(filterForKids(payload.amazonTv || []), 'tv');
+      const songsSafe = filterForKids((payload.songsData?.results || []) as Media[]);
+      const songsTvSafe = tagMediaType(
+        filterForKids((payload.tvPopularData?.results || []) as Media[]),
+        'tv',
+      );
+      const movieReelsSafe = filterForKids((payload.movieReelsData?.results || []) as Media[]);
+      const recommendedSafe = filterForKids((payload.recommendedData?.results || []) as Media[]);
+      const tvOnTheAirSafe = tagMediaType(
+        filterForKids((payload.tvOnTheAirData?.results || []) as Media[]),
+        'tv',
+      );
+      const tvRecommendedSafe = tagMediaType(
+        filterForKids((payload.tvRecommendedData?.results || []) as Media[]),
+        'tv',
+      );
+      const tvPopularSafe = songsTvSafe;
+      const hboSource = payload.hbo?.length
+        ? payload.hbo
+        : trendingRaw.filter((m) => m.media_type === 'tv');
+      const hboSafe = tagMediaType(filterForKids(hboSource), 'movie');
+      const hboTvSafe = tagMediaType(filterForKids(payload.hboTv || []), 'tv');
+      const genresList = (payload.genresData?.genres || []) as Genre[];
+      const tvGenresList = (payload.tvGenresData?.genres || []) as Genre[];
+
+      return {
+        netflixSafe,
+        amazonSafe,
+        hboSafe,
+        netflixTvSafe,
+        amazonTvSafe,
+        hboTvSafe,
+        combinedStories,
+        movieStoriesList,
+        tvStoriesList,
+        trendingResults,
+        trendingRaw,
+        songsSafe,
+        movieReelsSafe,
+        recommendedSafe,
+        genresList,
+        tvOnTheAirSafe,
+        tvRecommendedSafe,
+        tvPopularSafe,
+        tvGenresList,
+      };
+    },
+    [filterForKids]
+  );
+
+  const fetchTrailersForMovies = useCallback(
+    async (movies: Media[]) => {
+      if (!movies || movies.length === 0) return;
+      console.log('[MovieTrailers] Starting fetch for movies:', movies.length);
+      const cacheKey = `movieTrailers:${homeFeedCacheScope}`;
+
+      try {
+        // Read cached trailers first
+        try {
+          const cached = await AsyncStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached) as (Media & { trailerUrl: string })[];
+            if (parsed?.length) {
+              setMovieTrailers(parsed);
+            }
+          }
+        } catch (err) {
+          console.warn('[MovieTrailers] Failed to read cache', err);
+        }
+
+        InteractionManager.runAfterInteractions(() => {
+          void (async () => {
+            const concurrency = 2;
+            const results: (Media & { trailerUrl: string })[] = [];
+            const queue = movies.slice(0, 6);
+            let index = 0;
+
+            const worker = async () => {
+              while (true) {
+                const i = index++;
+                if (i >= queue.length) return;
+                const movie = queue[i];
+                try {
+                  let imdbId = movie.imdb_id;
+                  if (!imdbId && movie.id) {
+                    const externalIdsUrl = `${API_BASE_URL}/movie/${movie.id}/external_ids?api_key=${API_KEY}`;
+                    const externalRes = await fetch(externalIdsUrl);
+                    if (externalRes.ok) {
+                      const externalData = await externalRes.json();
+                      imdbId = externalData.imdb_id;
+                    }
+                  }
+
+                  if (imdbId) {
+                    const trailer = await scrapeImdbTrailer({ imdb_id: imdbId });
+                    if (trailer?.url) {
+                      results.push({ ...movie, imdb_id: imdbId, trailerUrl: trailer.url });
+                      setMovieTrailers([...results]);
+                    }
+                  }
+                } catch (err) {
+                  console.warn('[MovieTrailers] Error fetching trailer for', movie?.title, err);
+                }
+              }
+            };
+
+            const workers = [] as Promise<void>[];
+            for (let w = 0; w < concurrency; w++) workers.push(worker());
+            await Promise.all(workers);
+
+            try {
+              await AsyncStorage.setItem(cacheKey, JSON.stringify(results));
+            } catch (err) {
+              console.warn('[MovieTrailers] Failed to persist cache', err);
+            }
+
+            console.log('[MovieTrailers] Completed, found:', results.length);
+          })();
+        });
+      } catch (err) {
+        console.error('[MovieTrailers] Unexpected error:', err);
+      }
+    },
+    [homeFeedCacheScope]
+  );
+
+  const applyDerivedState = useCallback(
+    (derived: HomeFeedDerivedState) => {
+      setNetflix(derived.netflixSafe);
+      setAmazon(derived.amazonSafe);
+      setHbo(derived.hboSafe);
+      setNetflixTv(derived.netflixTvSafe);
+      setAmazonTv(derived.amazonTvSafe);
+      setHboTv(derived.hboTvSafe);
+      setStories(shuffleArray(derived.combinedStories));
+      setTrending(derived.trendingResults);
+      setFeaturedMovie(derived.trendingResults[0] || null);
+      setTrendingMoviesOnly(derived.movieStoriesList);
+      setTrendingTvOnly(derived.tvStoriesList);
+      setSongs(derived.songsSafe);
+      setSongsTv(derived.tvPopularSafe);
+      setMovieReels(derived.movieReelsSafe);
+      setRecommended(derived.recommendedSafe);
+      setRecommendedTv(derived.tvRecommendedSafe);
+      setGenres(derived.genresList);
+      setGenresTv(derived.tvGenresList);
+      setTvOnTheAir(derived.tvOnTheAirSafe);
+
+      const anyContent = Boolean(
+        derived.trendingResults?.length ||
+          derived.netflixSafe?.length ||
+          derived.amazonSafe?.length ||
+          derived.hboSafe?.length ||
+          derived.netflixTvSafe?.length ||
+          derived.amazonTvSafe?.length ||
+          derived.hboTvSafe?.length ||
+          derived.tvOnTheAirSafe?.length ||
+          derived.recommendedSafe?.length ||
+          derived.tvRecommendedSafe?.length,
+      );
+      if (anyContent) setHasCachedContent(true);
+
+      const signature = buildFeedSignature(derived);
+      feedSignatureRef.current = signature;
+      fetchTrailersForMovies(derived.trendingResults.slice(0, 6));
+    },
+    [buildFeedSignature, fetchTrailersForMovies]
+  );
+
+  const loadFromCache = useCallback(async (): Promise<{ applied: boolean; fresh: boolean }> => {
+    try {
+      const cached = await AsyncStorage.getItem(homeFeedCacheKey);
+      if (!cached) return { applied: false, fresh: false };
+
+      const parsed = JSON.parse(cached) as HomeFeedCacheEnvelope | HomeFeedCachePayload;
+      const envelope: HomeFeedCacheEnvelope = (parsed as HomeFeedCacheEnvelope)?.payload
+        ? (parsed as HomeFeedCacheEnvelope)
+        : { payload: parsed as HomeFeedCachePayload, updatedAt: 0 };
+
+      if (!envelope.payload) return { applied: false, fresh: false };
+
+      const derived = deriveFeedState(envelope.payload);
+      applyDerivedState(derived);
+      setLoading(false);
+
+      const fresh = envelope.updatedAt
+        ? Date.now() - envelope.updatedAt < HOME_FEED_CACHE_TTL_MS
+        : false;
+
+      return { applied: true, fresh };
+    } catch (err) {
+      console.error('Failed to load home feed cache', err);
+      return { applied: false, fresh: false };
+    }
+  }, [applyDerivedState, deriveFeedState, homeFeedCacheKey]);
+
+  const fetchData = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!isOnline) {
+        setOffline(true);
+        if (!silent) setLoading(false);
+        return;
+      }
+      if (!silent) setLoading(true);
+      setError(null);
+      setOffline(false);
+      try {
+        if (!API_KEY) {
+          throw new Error('Missing TMDB API key. Set EXPO_PUBLIC_TMDB_API_KEY in movieflixtv/.env.local');
+        }
+
+        const [
+          netflixMovies,
+          amazonMovies,
+          hboMovies,
+          netflixTv,
+          amazonTv,
+          hboTv,
+          movieStoriesData,
+          tvStoriesData,
+          trendingData,
+          movieReelsData,
+          recommendedData,
+          tvRecommendedData,
+          tvOnTheAirData,
+          songsData,
+          tvPopularData,
+          genresData,
+          tvGenresData,
+        ] = await Promise.all([
+          fetchProviderMovies(8),
+          fetchProviderMovies(9),
+          fetchProviderMovies(384),
+          fetchProviderTv(8),
+          fetchProviderTv(9),
+          fetchProviderTv(384),
+          fetchWithKids(`${API_BASE_URL}/trending/movie/day?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/trending/tv/day?api_key=${API_KEY}`, 'tv'),
+          fetchWithKids(`${API_BASE_URL}/trending/all/day?api_key=${API_KEY}`, 'all'),
+          fetchWithKids(`${API_BASE_URL}/movie/upcoming?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/movie/top_rated?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/tv/top_rated?api_key=${API_KEY}`, 'tv'),
+          fetchWithKids(`${API_BASE_URL}/tv/on_the_air?api_key=${API_KEY}`, 'tv'),
+          fetchWithKids(`${API_BASE_URL}/movie/popular?api_key=${API_KEY}`, 'movie'),
+          fetchWithKids(`${API_BASE_URL}/tv/popular?api_key=${API_KEY}`, 'tv'),
+          fetch(`${API_BASE_URL}/genre/movie/list?api_key=${API_KEY}`).then((r) => r.json()),
+          fetch(`${API_BASE_URL}/genre/tv/list?api_key=${API_KEY}`).then((r) => r.json()),
+        ]);
+
+        const payload: HomeFeedCachePayload = {
+          netflix: netflixMovies || [],
+          amazon: amazonMovies || [],
+          hbo: hboMovies || [],
+          netflixTv: netflixTv || [],
+          amazonTv: amazonTv || [],
+          hboTv: hboTv || [],
+          movieStoriesData,
+          tvStoriesData,
+          trendingData,
+          movieReelsData,
+          recommendedData,
+          tvRecommendedData,
+          songsData,
+          tvOnTheAirData,
+          tvPopularData,
+          genresData,
+          tvGenresData,
+        };
+
+        const derived = deriveFeedState(payload);
+        const newSignature = buildFeedSignature(derived);
+        const hasChanged = feedSignatureRef.current !== newSignature;
+
+        if (hasChanged) {
+          applyDerivedState(derived);
+          setLoading(false);
+        }
+
+        try {
+          const envelope: HomeFeedCacheEnvelope = {
+            updatedAt: Date.now(),
+            payload,
+          };
+          await AsyncStorage.setItem(homeFeedCacheKey, JSON.stringify(envelope));
+        } catch (err) {
+          console.error('Failed to write home feed cache', err);
+        }
+
+        if (!hasChanged && !silent) {
+          setLoading(false);
+        }
+      } catch (error) {
+        console.error('Error fetching data:', error);
+        setOffline(true);
+        if (!hasCachedContent) {
+          setError(error instanceof Error ? error.message : 'Failed to load content. Please try again later.');
+        }
+        if (!silent) setLoading(false);
+      }
+    },
+    [
+      applyDerivedState,
+      buildFeedSignature,
+      deriveFeedState,
+      fetchProviderMovies,
+      fetchWithKids,
+      fetchProviderTv,
+      hasCachedContent,
+      homeFeedCacheKey,
+      isOnline,
+    ]
+  );
+
+  // Use refs to avoid re-triggering the effect when callbacks change
+  const fetchDataRef = useRef(fetchData);
+  const loadFromCacheRef = useRef(loadFromCache);
+  const isOnlineRef = useRef(isOnline);
+  
+  useEffect(() => {
+    fetchDataRef.current = fetchData;
+  }, [fetchData]);
+  
+  useEffect(() => {
+    loadFromCacheRef.current = loadFromCache;
+  }, [loadFromCache]);
+  
+  useEffect(() => {
+    isOnlineRef.current = isOnline;
+  }, [isOnline]);
+
+  useEffect(() => {
+    if (!profileReady) return;
+    let cancelled = false;
+    let interactionTask: { cancel?: () => void } | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleFetch = (fn: () => void) => {
+      // On web, `InteractionManager.runAfterInteractions` can be unreliable and never fire,
+      // which leaves the home feed in a perpetual loading state.
+      if (Platform.OS === 'web') {
+        timeoutId = setTimeout(fn, 0);
+        return;
+      }
+      try {
+        interactionTask = InteractionManager.runAfterInteractions(fn);
+      } catch {
+        timeoutId = setTimeout(fn, 0);
+      }
+    };
+
+    const init = async () => {
+      const result = await loadFromCacheRef.current();
+      if (cancelled) return;
+
+      if (!isOnlineRef.current) {
+        if (!result.applied) {
+          setError('You\'re offline. Connect to the internet to load movies for the first time.');
+        }
+        setLoading(false);
+        setOffline(true);
+        return;
+      }
+
+      if (!result.applied) {
+        scheduleFetch(() => {
+          if (cancelled) return;
+          void fetchDataRef.current();
+        });
+        return;
+      }
+
+      if (!result.fresh) {
+        scheduleFetch(() => {
+          if (cancelled) return;
+          void fetchDataRef.current({ silent: true });
+        });
+      }
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      try {
+        interactionTask?.cancel?.();
+      } catch {
+        // ignore
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+  }, [profileReady, homeFeedCacheKey]);
+
+  return {
+    trending,
+    movieReels,
+    movieTrailers,
+    recommended,
+    recommendedTv,
+    songs,
+    songsTv,
+    trendingMoviesOnly,
+    trendingTvOnly,
+    genres,
+    genresTv,
+    featuredMovie,
+    setFeaturedMovie,
+    stories,
+    setStories,
+    netflix,
+    amazon,
+    hbo,
+    netflixTv,
+    amazonTv,
+    hboTv,
+    tvOnTheAir,
+    loading,
+    error,
+    offline,
+    hasCachedContent,
+    continueWatching,
+    lastWatched,
+    filterForKids,
+  };
+};
+
+// NOTE: This file lives under `app/` so expo-router may treat it as a route module.
+// Provide a harmless default export to avoid router warnings.
+export default function UseMoviesDataRoute() {
+  return null;
+}

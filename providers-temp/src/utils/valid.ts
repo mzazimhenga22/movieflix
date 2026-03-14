@@ -94,6 +94,9 @@ export async function validatePlayableStream(
     const useNormalFetch = alwaysUseNormalFetch || isAlreadyProxyUrl(stream.playlist);
 
     let result;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500); // Tight 3.5s validation timeout
+
     if (useNormalFetch) {
       try {
         const response = await fetch(stream.playlist, {
@@ -101,7 +104,9 @@ export async function validatePlayableStream(
           headers: {
             ...stream.preferredHeaders,
             ...stream.headers,
+            Range: 'bytes=0-1023', // Just get the beginning
           },
+          signal: controller.signal,
         });
         result = {
           statusCode: response.status,
@@ -110,15 +115,25 @@ export async function validatePlayableStream(
         };
       } catch (error) {
         return null;
+      } finally {
+        clearTimeout(timeoutId);
       }
     } else {
-      result = await ops.proxiedFetcher.full(stream.playlist, {
-        method: 'GET',
-        headers: {
-          ...stream.preferredHeaders,
-          ...stream.headers,
-        },
-      });
+      try {
+        result = await ops.proxiedFetcher.full(stream.playlist, {
+          method: 'GET',
+          headers: {
+            ...stream.preferredHeaders,
+            ...stream.headers,
+            Range: 'bytes=0-1023',
+          },
+          timeout: 3500,
+        });
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
 
     if (result.statusCode < 200 || result.statusCode >= 400 || isErrorResponse(result)) return null;

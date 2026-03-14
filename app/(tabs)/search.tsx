@@ -1,7 +1,6 @@
 // app/(tabs)/search.tsx  (SearchScreen - Premium Redesign)
 import { Ionicons } from '@expo/vector-icons';
 import { FlashList } from '@shopify/flash-list';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
@@ -28,6 +27,12 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useAccent } from '../../components/app-components/AccentContext';
+import ParticleSystem from '../../components/app-components/effects/ParticleSystem';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import ResultCard3D from '../../components/app-components/search/ResultCard3D';
+import TrendingChips from '../../components/app-components/search/TrendingChips';
+import VoiceSearchOrb from '../../components/app-components/search/VoiceSearchOrb';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
 import { firestore } from '../../constants/firebase';
@@ -37,12 +42,6 @@ import { filterForKidsMedia } from '../../lib/kidsContent';
 import MoviesModule from '../../modules/MoviesModule';
 import { usePStream } from '../../src/pstream/usePStream';
 import { Media } from '../../types';
-import { useAccent } from '../components/AccentContext';
-import ParticleSystem from '../components/effects/ParticleSystem';
-import ResultCard3D from '../components/search/ResultCard3D';
-import TrendingChips from '../components/search/TrendingChips';
-import VoiceSearchOrb from '../components/search/VoiceSearchOrb';
-import LiquidGlass from '../components/LiquidGlass';
 
 const AnimatedView = Animated.View as any;
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -114,9 +113,17 @@ const SearchStickyHeader = memo(({
           onPress={onBack}
           activeOpacity={0.7}
         >
-          <BlurView intensity={40} tint="dark" style={styles.backBtnBlur}>
-            <Ionicons name="arrow-back" size={20} color="#fff" />
-          </BlurView>
+          <LiquidGlass
+            glowColor={accentColor}
+            tintColor="#0d0d12"
+            tintOpacity={0.6}
+            cornerRadius={20}
+            glowIntensity={0.5}
+            borderWidth={1}
+            style={styles.backBtnGlass}
+            animated={false}
+          />
+          <Ionicons name="arrow-back" size={20} color="#fff" />
         </TouchableOpacity>
 
         <View style={styles.heroText}>
@@ -237,9 +244,18 @@ const SearchStateView = memo(({
   if (loading) {
     return (
       <AnimatedView entering={FadeIn} exiting={FadeOut} style={styles.loadingContainer}>
-        <View style={styles.loadingOrb}>
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0d0d12"
+          tintOpacity={0.5}
+          cornerRadius={30}
+          glowIntensity={0.5}
+          borderWidth={1}
+          style={styles.loadingOrb}
+          animated={true}
+        >
           <ActivityIndicator size="large" color={accentColor} />
-        </View>
+        </LiquidGlass>
         <Text style={styles.loadingText}>Searching the universe...</Text>
       </AnimatedView>
     );
@@ -251,7 +267,16 @@ const SearchStateView = memo(({
   if (searchQuery.length > 2) {
     return (
       <AnimatedView entering={FadeIn.duration(300)} style={styles.emptyState}>
-        <View style={styles.emptyIcon}>
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0d0d12"
+          tintOpacity={0.5}
+          cornerRadius={40}
+          glowIntensity={0.4}
+          borderWidth={1}
+          style={styles.emptyIcon}
+          animated={false}
+        >
           <Ionicons
             name={
               activeTab === 'music' ? 'musical-notes-outline' :
@@ -262,7 +287,7 @@ const SearchStateView = memo(({
             size={48}
             color={accentColor + '80'}
           />
-        </View>
+        </LiquidGlass>
         <Text style={styles.emptyTitle}>
           {activeTab === 'music' ? 'No songs found' : 'No results found'}
         </Text>
@@ -277,9 +302,15 @@ const SearchStateView = memo(({
   return (
     <AnimatedView entering={FadeIn.duration(300)} style={styles.idleState}>
       <View style={styles.idleIconContainer}>
-        <LinearGradient
-          colors={[accentColor + '40', 'transparent']}
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0d0d12"
+          tintOpacity={0.4}
+          cornerRadius={50}
+          glowIntensity={0.4}
+          borderWidth={1}
           style={styles.idleOrb}
+          animated={true}
         />
         <Ionicons
           name={
@@ -793,11 +824,13 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     overflow: 'hidden',
-  },
-  backBtnBlur: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    position: 'relative',
+  },
+  backBtnGlass: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 20,
   },
   heroText: {
     alignItems: 'center',
@@ -911,10 +944,10 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 30,
-    backgroundColor: 'rgba(255,255,255,0.05)',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 20,
+    overflow: 'hidden',
   },
   loadingText: {
     color: 'rgba(255,255,255,0.5)',
@@ -933,10 +966,10 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: 'rgba(255,255,255,0.05)',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 20,
+    overflow: 'hidden',
   },
   emptyTitle: {
     color: '#fff',
@@ -967,6 +1000,7 @@ const styles = StyleSheet.create({
     height: 100,
     borderRadius: 50,
     position: 'absolute',
+    overflow: 'hidden',
   },
   idleTitle: {
     color: '#fff',

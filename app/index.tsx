@@ -17,6 +17,20 @@ import { useUnreadMessagesBadgeCount } from '../hooks/use-unread-messages';
 import { buildProfileScopedKey, getLastAuthUid, getStoredActiveProfile } from '../lib/profileStorage';
 import { onAuthChange } from './messaging/controller';
 
+if (__DEV__) {
+  const originalError = console.error;
+  console.error = (...args) => {
+    if (args.length > 0 && typeof args[0] === 'string' && args[0].includes('Element type is invalid: expected a string')) {
+      originalError('\n\n🚨🚨🚨 CAUGHT INVALID ELEMENT TRACE 🚨🚨🚨\n');
+      originalError(`Args: ${JSON.stringify(args)}`);
+      originalError(new Error('INVALID ELEMENT TRACE').stack);
+      originalError('\n🚨🚨🚨 END TRACE 🚨🚨🚨\n\n');
+    }
+    originalError(...args);
+  };
+}
+
+
 type RouteContext = 'authed' | 'guest' | 'offline-downloads' | 'offline-profiles';
 
 type RouteTarget = '/downloads' | '/select-profile' | '/(auth)/login';

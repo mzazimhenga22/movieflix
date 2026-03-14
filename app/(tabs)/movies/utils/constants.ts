@@ -9,3 +9,5 @@ export const shuffleArray = <T,>(array: T[] | undefined): T[] => {
 };
 
 export const KIDS_GENRE_IDS = [10751, 16, 10762];
+
+export default function DummyTsRoute() { return null; }

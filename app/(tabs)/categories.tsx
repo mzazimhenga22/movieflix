@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
@@ -24,6 +23,11 @@ import Animated, {
   withTiming
 } from 'react-native-reanimated';
 
+import { useAccent } from '../../components/app-components/AccentContext';
+import GenreOrb from '../../components/app-components/categories/GenreOrb';
+import SpotlightCard3D from '../../components/app-components/categories/SpotlightCard3D';
+import ParticleSystem from '../../components/app-components/effects/ParticleSystem';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
@@ -31,13 +35,8 @@ import { getAccentFromPosterPath } from '../../constants/theme';
 import { useActiveProfile } from '../../hooks/use-active-profile';
 import { getFavoriteGenre, setFavoriteGenre, type FavoriteGenre } from '../../lib/favoriteGenreStorage';
 import { KIDS_GENRE_IDS } from '../../lib/kidsContent';
-import { Genre, Media } from '../../types';
 import MoviesModule from '../../modules/MoviesModule';
-import { useAccent } from '../components/AccentContext';
-import GenreOrb from '../components/categories/GenreOrb';
-import SpotlightCard3D from '../components/categories/SpotlightCard3D';
-import ParticleSystem from '../components/effects/ParticleSystem';
-import LiquidGlass from '../components/LiquidGlass';
+import { Genre, Media } from '../../types';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -272,49 +271,49 @@ const MoodSection = memo(({
       animated={true}
       style={styles.sectionCard}
     >
-    <View style={styles.sectionHeader}>
-      <Ionicons name="color-palette" size={16} color={accentBase} />
-      <Text style={styles.sectionTitle}>Mood Filters</Text>
-    </View>
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.moodRow}
-    >
-      {filters.map((filter) => {
-        const isActive = selectedGenre === filter.genreId;
-        return (
-          <TouchableOpacity
-            key={filter.key}
-            activeOpacity={0.9}
-            onPress={() => onPress(filter.genreId)}
-          >
-            <Animated.View
-              layout={Layout.springify()}
-              style={[
-                styles.moodChip,
-                isActive && { transform: [{ scale: 1.05 }], borderWidth: 1, borderColor: '#fff' },
-              ]}
+      <View style={styles.sectionHeader}>
+        <Ionicons name="color-palette" size={16} color={accentBase} />
+        <Text style={styles.sectionTitle}>Mood Filters</Text>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.moodRow}
+      >
+        {filters.map((filter) => {
+          const isActive = selectedGenre === filter.genreId;
+          return (
+            <TouchableOpacity
+              key={filter.key}
+              activeOpacity={0.9}
+              onPress={() => onPress(filter.genreId)}
             >
-              <LinearGradient
-                colors={filter.colors as any}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
+              <Animated.View
+                layout={Layout.springify()}
                 style={[
-                  styles.moodGradient,
-                  isActive && styles.moodGradientActive,
+                  styles.moodChip,
+                  isActive && { transform: [{ scale: 1.05 }], borderWidth: 1, borderColor: '#fff' },
                 ]}
               >
-                <View style={styles.moodIconWrap}>
-                  <Ionicons name={filter.icon as any} size={18} color="#fff" />
-                </View>
-                <Text style={styles.moodChipText}>{filter.label}</Text>
-              </LinearGradient>
-            </Animated.View>
-          </TouchableOpacity>
-        );
-      })}
-    </ScrollView>
+                <LinearGradient
+                  colors={filter.colors as any}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[
+                    styles.moodGradient,
+                    isActive && styles.moodGradientActive,
+                  ]}
+                >
+                  <View style={styles.moodIconWrap}>
+                    <Ionicons name={filter.icon as any} size={18} color="#fff" />
+                  </View>
+                  <Text style={styles.moodChipText}>{filter.label}</Text>
+                </LinearGradient>
+              </Animated.View>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
     </LiquidGlass>
   </Animated.View>
 ));

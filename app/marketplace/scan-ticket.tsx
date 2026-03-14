@@ -5,7 +5,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { useUser } from '../../hooks/use-user';
 import { redeemTicketByTicketId } from './api';
 

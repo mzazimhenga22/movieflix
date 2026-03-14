@@ -1,0 +1,34 @@
+diff --git a/node_modules/hermes-parser/dist/index.js b/node_modules/hermes-parser/dist/index.js
+index 083d51a..2032d61 100644
+--- a/node_modules/hermes-parser/dist/index.js
++++ b/node_modules/hermes-parser/dist/index.js
+@@ -18,8 +18,10 @@ var _exportNames = {
+   Transforms: true,
+   FlowVisitorKeys: true,
+   astArrayMutationHelpers: true,
+-  astNodeMutationHelpers: true
++  astNodeMutationHelpers: true,
++  ParserOptionsKeys: true
+ };
++exports.ParserOptionsKeys = void 0;
+ exports.mutateESTreeASTForPrettier = exports.astNodeMutationHelpers = exports.astArrayMutationHelpers = exports.Transforms = void 0;
+ exports.parse = parse;
+ 
+@@ -49,6 +51,7 @@ Object.keys(_ParserOptions).forEach(function (key) {
+   if (key in exports && exports[key] === _ParserOptions[key]) return;
+   exports[key] = _ParserOptions[key];
+ });
++exports.ParserOptionsKeys = _ParserOptions.ParserOptionsKeys;
+ 
+ var _SimpleTraverser = require("./traverse/SimpleTraverser");
+ 
+@@ -99,7 +102,8 @@ const DEFAULTS = {
+   flow: 'detect'
+ };
+ 
+-function getOptions(options = { ...DEFAULTS
++function getOptions(options = {
++  ...DEFAULTS
+ }) {
+   // Default to detecting whether to parse Flow syntax by the presence
+   // of an  pragma.

@@ -3,6 +3,7 @@ import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Link } from 'expo-router';
 import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import LiquidGlass from '../../../../components/app-components/LiquidGlass';
 
 interface HeaderProps {
   accountName: string;
@@ -44,70 +45,50 @@ const Header: React.FC<HeaderProps> = ({
 
           <View style={styles.headerIcons}>
             <Link href="/messaging" asChild>
-              <TouchableOpacity style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
+              <TouchableOpacity style={styles.iconBtn} activeOpacity={0.8}>
+                <LiquidGlass cornerRadius={12} tintOpacity={0.15} borderOpacity={0.2} style={styles.iconBg}>
                   <Ionicons name="chatbubble-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
+                </LiquidGlass>
               </TouchableOpacity>
             </Link>
             <Link href="/marketplace" asChild>
-              <TouchableOpacity style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
+              <TouchableOpacity style={styles.iconBtn} activeOpacity={0.8}>
+                <LiquidGlass cornerRadius={12} tintOpacity={0.15} borderOpacity={0.2} style={styles.iconBg}>
                   <Ionicons name="bag-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
+                </LiquidGlass>
               </TouchableOpacity>
             </Link>
             <Link href="/social-feed" asChild>
-              <TouchableOpacity style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
+              <TouchableOpacity style={styles.iconBtn} activeOpacity={0.8}>
+                <LiquidGlass cornerRadius={12} tintOpacity={0.15} borderOpacity={0.2} style={styles.iconBg}>
                   <Ionicons name="people-outline" size={22} color="#ffffff" style={styles.iconMargin} />
-                </LinearGradient>
+                </LiquidGlass>
               </TouchableOpacity>
             </Link>
 
             <Link href="/profile" asChild>
-              <TouchableOpacity style={styles.iconBtn}>
-                <LinearGradient
-                  colors={['#e50914', '#b20710']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.iconBg}
-                >
+              <TouchableOpacity style={styles.iconBtn} activeOpacity={0.8}>
+                <LiquidGlass cornerRadius={12} tintOpacity={0.15} borderOpacity={0.2} style={styles.iconBg}>
                   <FontAwesome name="user-circle" size={24} color="#ffffff" />
-                </LinearGradient>
+                </LiquidGlass>
               </TouchableOpacity>
             </Link>
           </View>
         </View>
 
         <View style={styles.headerMetaRow}>
-          <View style={styles.metaPill}>
+          <LiquidGlass cornerRadius={999} tintOpacity={0.12} borderOpacity={0.18} style={styles.metaPill}>
             <Ionicons name="flame" size={14} color="#fff" />
             <Text style={styles.metaText}>{trendingCount} trending</Text>
-          </View>
-          <View style={[styles.metaPill, styles.metaPillSoft]}>
+          </LiquidGlass>
+          <LiquidGlass cornerRadius={999} tintOpacity={0.08} borderOpacity={0.18} style={[styles.metaPill, styles.metaPillSoft]}>
             <Ionicons name="film-outline" size={14} color="#fff" />
             <Text style={styles.metaText}>{reelsCount} reels</Text>
-          </View>
-          <View style={[styles.metaPill, styles.metaPillOutline]}>
+          </LiquidGlass>
+          <LiquidGlass cornerRadius={999} tintOpacity={0.05} borderOpacity={0.18} style={[styles.metaPill, styles.metaPillOutline]}>
             <Ionicons name="star" size={14} color="#fff" />
             <Text style={styles.metaText}>Fresh drops</Text>
-          </View>
+          </LiquidGlass>
         </View>
       </View>
 
@@ -201,17 +182,9 @@ const styles = StyleSheet.create({
   iconBtn: {
     marginLeft: 8,
     borderRadius: 12,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.16)',
-    shadowColor: '#e50914',
-    shadowOpacity: 0.28,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
   },
   iconBg: {
     padding: 10,
-    borderRadius: 12,
   },
   iconMargin: {
     marginRight: 4,
@@ -228,16 +201,10 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
   },
   metaPillSoft: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
   },
   metaPillOutline: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
   },
   metaText: {
     color: '#fff',

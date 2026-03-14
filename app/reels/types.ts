@@ -28,3 +28,5 @@ export type FeedReelItem = {
 }
 
 export type ReelItem = FeedReelItem | { type: 'ad'; id: string; productId: string }
+
+export default function DummyTsRoute() { return null; }

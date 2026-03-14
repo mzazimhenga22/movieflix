@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { useUser } from '../../hooks/use-user';
 import { formatKsh } from '../../lib/money';
 import {

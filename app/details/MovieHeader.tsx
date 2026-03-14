@@ -1,5 +1,5 @@
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
-import { Video } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import {
@@ -66,12 +66,6 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
       : 'Downloading...'
     : 'Download';
 
-  const videoRef = useRef<Video | null>(null);
-  const [isTrailerPlaying, setIsTrailerPlaying] = useState<boolean>(false);
-  const [dynamicColors, setDynamicColors] = useState<string[]>([]);
-  const colorUpdateInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastColorUpdate = useRef<number>(0);
-
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
   const fontScale = PixelRatio.getFontScale();
@@ -79,29 +73,33 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
   const topBarTop = Math.max(10, (insets.top || 0) + 6);
   const topBarHeight = isCompactLayout ? 44 : 40;
 
+  const player = useVideoPlayer(trailer?.url || null, (p) => {
+    p.loop = false;
+  });
+
   useEffect(() => {
     if (trailer && trailerAutoPlay) {
       setIsTrailerPlaying(true);
+      player.play();
     }
     return () => {
       setIsTrailerPlaying(false);
+      player.pause();
     };
-  }, [trailer, trailerAutoPlay]);
+  }, [trailer, trailerAutoPlay, player]);
 
   useImperativeHandle(ref, () => ({
     pauseTrailer: async () => {
       try {
         setIsTrailerPlaying(false);
-        if (videoRef.current && typeof videoRef.current.pauseAsync === 'function') {
-          await videoRef.current.pauseAsync();
-        }
+        player.pause();
       } catch {}
     },
     playTrailer: async () => {
       try {
-        if (trailer) setIsTrailerPlaying(true);
-        if (videoRef.current && typeof videoRef.current.playAsync === 'function') {
-          await videoRef.current.playAsync();
+        if (trailer) {
+          setIsTrailerPlaying(true);
+          player.play();
         }
       } catch {}
     },
@@ -166,14 +164,11 @@ const MovieHeader = forwardRef(function MovieHeader(props: Props, ref) {
         />
       )}
       {trailer && isTrailerPlaying ? (
-        <Video
-          ref={(r) => { videoRef.current = r; }}
-          source={{ uri: trailer.url }}
+        <VideoView
+          player={player}
           style={styles.backdropImage}
-          resizeMode={'cover' as any}
-          shouldPlay
-          isLooping={false}
-          useNativeControls={false}
+          contentFit="cover"
+          showsPlaybackControls={false}
         />
       ) : backdropUri ? (
         <Image source={{ uri: backdropUri }} style={styles.backdropImage} />

@@ -1,18 +1,20 @@
-import { FontAwesome, Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { FlashList } from '@shopify/flash-list';
-import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
+  Dimensions,
   FlatList,
   Image,
   Modal,
   PixelRatio,
   Platform,
+  Pressable,
   RefreshControl,
   StatusBar,
   StyleSheet,
@@ -23,6 +25,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList as any);
+
 
 
 type ActiveTab = 'For You' | 'Live' | 'Stories';
@@ -30,6 +34,19 @@ type ActiveTab = 'For You' | 'Live' | 'Stories';
 import { listenToBoostedLiveStreams, listenToLiveStreams } from '@/lib/live/liveService';
 import type { LiveStream } from '@/lib/live/types';
 import { putNavPayload } from '@/lib/navPayloadCache';
+import { useAccent } from '../../components/app-components/AccentContext';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import FeedCard from '../../components/app-components/social-feed/FeedCard';
+import FeedCardPlaceholder from '../../components/app-components/social-feed/FeedCardPlaceholder';
+import FeedCollageTile, {
+  FeedCollageTilePlaceholder,
+} from '../../components/app-components/social-feed/FeedCollageTile';
+import { ReviewItem, useSocialReactions } from '../../components/app-components/social-feed/hooks';
+import MovieMatchView from '../../components/app-components/social-feed/MovieMatchView';
+import PostMovieReview from '../../components/app-components/social-feed/PostMovieReview';
+import RecommendedView from '../../components/app-components/social-feed/RecommendedView';
+import StoriesRow from '../../components/app-components/social-feed/StoriesRow';
+import FeedTabs from '../../components/app-components/social-feed/Tabs';
 import MovieList from '../../components/MovieList';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
@@ -38,18 +55,6 @@ import { useNavigationGuard } from '../../hooks/use-navigation-guard';
 import { useUnreadMessagesBadgeCount } from '../../hooks/use-unread-messages';
 import { useSubscription } from '../../providers/SubscriptionProvider';
 import { Media } from '../../types';
-import { useAccent } from '../components/AccentContext';
-import FeedCard from '../components/social-feed/FeedCard';
-import FeedCardPlaceholder from '../components/social-feed/FeedCardPlaceholder';
-import FeedCollageTile, {
-  FeedCollageTilePlaceholder,
-} from '../components/social-feed/FeedCollageTile';
-import { ReviewItem, useSocialReactions } from '../components/social-feed/hooks';
-import MovieMatchView from '../components/social-feed/MovieMatchView';
-import PostMovieReview from '../components/social-feed/PostMovieReview';
-import RecommendedView from '../components/social-feed/RecommendedView';
-import StoriesRow from '../components/social-feed/StoriesRow';
-import FeedTabs from '../components/social-feed/Tabs';
 import { getProducts, isProductPromoted, type Product as MarketplaceProduct } from '../marketplace/api';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
 
@@ -150,215 +155,474 @@ const SocialFeed = () => {
   const [liveLoading, setLiveLoading] = useState(false);
   const [boostedLiveStreams, setBoostedLiveStreams] = useState<LiveStream[]>([]);
 
-  // Header animations - Liquid glass effect
+  const scrollY = useRef(new Animated.Value(0)).current;
+
+  // ==========================================
+  // MIND-BLOWING HOLOGRAPHIC HEADER ANIMATIONS
+  // ==========================================
+  
   const headerFadeAnim = useRef(new Animated.Value(0)).current;
-  const headerSlideAnim = useRef(new Animated.Value(-30)).current;
-  const glassShineAnim = useRef(new Animated.Value(0)).current;
-  const statsScaleAnim = useRef(new Animated.Value(0.85)).current;
-  const iconPulseAnim = useRef(new Animated.Value(1)).current;
+  const headerSlideAnim = useRef(new Animated.Value(-50)).current;
+  const headerScaleAnim = useRef(new Animated.Value(0.9)).current;
+  
+  // Aurora wave animation
+  const auroraPhase = useRef(new Animated.Value(0)).current;
+  
+  // Parallax depth layers
+  const parallaxLayer1 = useRef(new Animated.Value(0)).current;
+  const parallaxLayer2 = useRef(new Animated.Value(0)).current;
+  const parallaxLayer3 = useRef(new Animated.Value(0)).current;
+  
+  // Morphing orb animations
+  const orbPulse = useRef(new Animated.Value(1)).current;
+  const orbRotate = useRef(new Animated.Value(0)).current;
+  const orbGlow = useRef(new Animated.Value(0)).current;
+  
+  // Holographic shimmer
+  const hologramShimmer = useRef(new Animated.Value(0)).current;
+  
+  // Prismatic gradient phase
+  const prismPhase = useRef(new Animated.Value(0)).current;
+  
+  // Dynamic Island Animations - Enhanced
+  const islandWidth = scrollY.interpolate({
+    inputRange: [0, 60, 100],
+    outputRange: ['100%', '85%', '55%'],
+    extrapolate: 'clamp',
+  });
+
+  const islandTranslateY = scrollY.interpolate({
+    inputRange: [0, 100],
+    outputRange: [0, -8],
+    extrapolate: 'clamp',
+  });
+  
+  const islandBlur = scrollY.interpolate({
+    inputRange: [0, 50, 100],
+    outputRange: [0, 0.3, 0.5],
+    extrapolate: 'clamp',
+  });
+
+  const textOpacity = scrollY.interpolate({
+    inputRange: [0, 30, 60],
+    outputRange: [1, 0.7, 0],
+    extrapolate: 'clamp',
+  });
+  
+  const headerParallaxY = scrollY.interpolate({
+    inputRange: [0, 100],
+    outputRange: [0, -30],
+    extrapolate: 'clamp',
+  });
+  
+  // Aurora particle system
+  const auroraParticles = useRef(
+    Array.from({ length: 12 }, (_, i) => ({
+      x: new Animated.Value(Math.random() * screenWidth),
+      y: new Animated.Value(50 + Math.random() * 100),
+      scale: new Animated.Value(0.5 + Math.random() * 0.5),
+      opacity: new Animated.Value(0),
+      hue: new Animated.Value(Math.random() * 360),
+    }))
+  ).current;
+  
+  // Magnetic orb positions
+  const magneticOrbs = useRef(
+    Array.from({ length: 3 }, (_, i) => ({
+      x: new Animated.Value(screenWidth * (0.2 + i * 0.3)),
+      y: new Animated.Value(80 + i * 20),
+      scale: new Animated.Value(1),
+    }))
+  ).current;
 
   useEffect(() => {
-    // Entrance animation
-    Animated.parallel([
-      Animated.timing(headerFadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
-      Animated.spring(headerSlideAnim, { toValue: 0, tension: 60, friction: 12, useNativeDriver: true }),
-      Animated.spring(statsScaleAnim, { toValue: 1, tension: 80, friction: 10, useNativeDriver: true }),
+    // Grand entrance animation sequence
+    Animated.sequence([
+      // Phase 1: Header emerges from void
+      Animated.parallel([
+        Animated.spring(headerSlideAnim, { toValue: 0, tension: 40, friction: 8, useNativeDriver: true }),
+        Animated.spring(headerScaleAnim, { toValue: 1, tension: 50, friction: 7, useNativeDriver: true }),
+        Animated.timing(headerFadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]),
+      // Phase 2: Aurora awakens
+      Animated.stagger(50, auroraParticles.map((p) => 
+        Animated.loop(
+          Animated.parallel([
+            Animated.sequence([
+              Animated.timing(p.opacity, { toValue: 0.8, duration: 1000 + Math.random() * 500, useNativeDriver: true }),
+              Animated.timing(p.opacity, { toValue: 0.2, duration: 2000 + Math.random() * 1000, useNativeDriver: true }),
+            ]),
+            Animated.loop(
+              Animated.sequence([
+                Animated.timing(p.y, { toValue: -50, duration: 8000 + Math.random() * 4000, useNativeDriver: true }),
+                Animated.timing(p.y, { toValue: 150, duration: 0, useNativeDriver: true }),
+              ])
+            ),
+            Animated.loop(
+              Animated.timing(p.hue, { toValue: 360, duration: 5000 + Math.random() * 3000, useNativeDriver: true }),
+            ),
+          ])
+        )
+      )),
+      // Phase 3: Magnetic orbs pulse
+      Animated.parallel([
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(orbPulse, { toValue: 1.2, duration: 2000, useNativeDriver: true }),
+            Animated.timing(orbPulse, { toValue: 1, duration: 2000, useNativeDriver: true }),
+          ])
+        ),
+        Animated.loop(
+          Animated.timing(orbRotate, { toValue: 1, duration: 8000, useNativeDriver: true })
+        ),
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(orbGlow, { toValue: 1, duration: 1500, useNativeDriver: true }),
+            Animated.timing(orbGlow, { toValue: 0.3, duration: 1500, useNativeDriver: true }),
+          ])
+        ),
+      ]),
     ]).start();
 
-    // Continuous glass shine effect
+    // Aurora wave animation
     Animated.loop(
-      Animated.sequence([
-        Animated.timing(glassShineAnim, { toValue: 1, duration: 3000, useNativeDriver: true }),
-        Animated.timing(glassShineAnim, { toValue: 0, duration: 3000, useNativeDriver: true }),
-      ])
+      Animated.timing(auroraPhase, { toValue: 1, duration: 6000, useNativeDriver: true })
     ).start();
-
-    // Subtle icon pulse
+    
+    // Holographic shimmer
     Animated.loop(
-      Animated.sequence([
-        Animated.timing(iconPulseAnim, { toValue: 1.05, duration: 2000, useNativeDriver: true }),
-        Animated.timing(iconPulseAnim, { toValue: 1, duration: 2000, useNativeDriver: true }),
-      ])
+      Animated.timing(hologramShimmer, { toValue: 1, duration: 3000, useNativeDriver: true })
     ).start();
+    
+    // Prismatic phase
+    Animated.loop(
+      Animated.timing(prismPhase, { toValue: 1, duration: 10000, useNativeDriver: true })
+    ).start();
+    
+    // Magnetic orb floating
+    magneticOrbs.forEach((orb, i) => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(orb.y, { toValue: 70 + i * 25, duration: 3000 + i * 500, useNativeDriver: true }),
+          Animated.timing(orb.y, { toValue: 90 + i * 25, duration: 3000 + i * 500, useNativeDriver: true }),
+        ])
+      ).start();
+    });
   }, []);
 
-  const HeaderComponent = () => (
-    <Animated.View
-      style={[
-        styles.headerWrap,
-        {
-          opacity: headerFadeAnim,
-          transform: [{ translateY: headerSlideAnim }],
-        }
-      ]}
-    >
-      {/* Liquid glass container */}
-      <View style={styles.liquidGlassContainer}>
-        {/* iOS Blur base layer */}
-        {Platform.OS === 'ios' ? (
-          <BlurView intensity={40} tint="dark" style={styles.blurLayer} />
-        ) : (
-          <View style={styles.androidGlassLayer} />
-        )}
-
-        {/* Animated gradient overlay for liquid effect */}
-        <Animated.View
+  const HeaderComponent = () => {
+    const [touchPos, setTouchPos] = useState({ x: screenWidth / 2, y: 100 });
+    
+    const handleHeaderTouch = (e: any) => {
+      const { locationX, locationY } = e.nativeEvent;
+      setTouchPos({ x: locationX, y: locationY });
+      if (Platform.OS !== 'web') {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      // Trigger magnetic pull on orbs
+      magneticOrbs.forEach((orb, i) => {
+        Animated.spring(orb.x, { 
+          toValue: locationX + (i - 1) * 40, 
+          tension: 50, 
+          friction: 8, 
+          useNativeDriver: true 
+        }).start();
+        Animated.spring(orb.y, { 
+          toValue: Math.min(locationY + i * 20, 150), 
+          tension: 50, 
+          friction: 8, 
+          useNativeDriver: true 
+        }).start();
+      });
+      // Reset after delay
+      setTimeout(() => {
+        magneticOrbs.forEach((orb, i) => {
+          Animated.spring(orb.x, { 
+            toValue: screenWidth * (0.2 + i * 0.3), 
+            tension: 30, 
+            friction: 10, 
+            useNativeDriver: true 
+          }).start();
+          Animated.spring(orb.y, { 
+            toValue: 80 + i * 20, 
+            tension: 30, 
+            friction: 10, 
+            useNativeDriver: true 
+          }).start();
+        });
+      }, 1500);
+    };
+    
+    return (
+      <Animated.View
+        style={[
+          styles.headerContainerIsland,
+          {
+            paddingTop: Math.max(insets.top, 12),
+            opacity: headerFadeAnim,
+            transform: [
+              { translateY: headerSlideAnim },
+              { translateY: headerParallaxY },
+              { scale: headerScaleAnim },
+            ],
+            alignItems: 'center',
+            width: '100%',
+            zIndex: 100,
+          }
+        ]}
+        onTouchEnd={handleHeaderTouch}
+      >
+        {/* Aurora Particle System */}
+        {auroraParticles.map((particle, i) => (
+          <Animated.View
+            key={`aurora-${i}`}
+            pointerEvents="none"
+            style={[
+              styles.auroraParticle,
+              {
+                left: particle.x,
+                top: particle.y,
+                opacity: particle.opacity,
+                transform: [{ scale: particle.scale }],
+                shadowColor: `hsl(${particle.hue}, 100%, 60%)`,
+                backgroundColor: `hsl(${particle.hue}, 80%, 70%)`,
+              },
+            ]}
+          />
+        ))}
+        
+        {/* Magnetic Glass Orbs */}
+        {magneticOrbs.map((orb, i) => {
+          const orbColors = [['#e50914', '#ff6b35'], ['#7dd8ff', '#22c55e'], ['#a855f7', '#ec4899']];
+          const [color1, color2] = orbColors[i];
+          return (
+            <Animated.View
+              key={`orb-${i}`}
+              style={[
+                styles.magneticOrb,
+                {
+                  left: orb.x,
+                  top: orb.y,
+                  transform: [
+                    { translateX: orb.x.interpolate({ inputRange: [0, screenWidth], outputRange: [-25, 25] }) },
+                    { translateY: orb.y.interpolate({ inputRange: [0, 200], outputRange: [-25, 25] }) },
+                    { scale: orb.scale },
+                    { rotate: orbRotate.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) },
+                  ],
+                },
+              ]}
+            >
+              <LiquidGlass
+                tintOpacity={0.2}
+                tintColor={color1}
+                cornerRadius={25}
+                borderOpacity={0.4}
+                glowIntensity={orbGlow}
+                glowColor={color1}
+                chromaticAberration={true}
+                interactive={true}
+                style={StyleSheet.absoluteFill}
+              />
+              <LinearGradient
+                colors={[color1, color2]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.magneticOrbGradient}
+              />
+              <Animated.View style={[styles.magneticOrbCore, { opacity: orbGlow }]}>
+                <Ionicons 
+                  name={['sparkles', 'film', 'play'][i] as any} 
+                  size={16} 
+                  color="#fff" 
+                />
+              </Animated.View>
+            </Animated.View>
+          );
+        })}
+        
+        {/* Prismatic Background Shimmer */}
+        <Animated.View 
+          pointerEvents="none"
           style={[
-            styles.liquidShine,
+            styles.prismaticShimmer,
             {
-              opacity: glassShineAnim.interpolate({
-                inputRange: [0, 0.5, 1],
-                outputRange: [0.3, 0.6, 0.3],
-              }),
-              transform: [{
-                translateX: glassShineAnim.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [-200, 200],
-                }),
-              }],
-            }
+              opacity: hologramShimmer.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.1, 0.3, 0.1] }),
+              transform: [
+                { translateX: hologramShimmer.interpolate({ inputRange: [0, 1], outputRange: [-screenWidth, screenWidth] }) },
+              ],
+            },
           ]}
         >
           <LinearGradient
-            colors={['transparent', 'rgba(255,255,255,0.08)', 'transparent']}
-            start={{ x: 0, y: 0.5 }}
-            end={{ x: 1, y: 0.5 }}
-            style={StyleSheet.absoluteFillObject}
+            colors={['transparent', 'rgba(229,9,20,0.15)', 'rgba(125,216,255,0.15)', 'rgba(168,85,247,0.15)', 'transparent']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={StyleSheet.absoluteFill}
           />
         </Animated.View>
 
-        {/* Colored accent glow */}
-        <LinearGradient
-          colors={['rgba(229,9,20,0.12)', 'rgba(125,216,255,0.08)', 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.accentGlow}
-        />
-
-        {/* Glass border highlight */}
-        <View style={styles.glassBorderTop} />
-        <View style={styles.glassBorderBottom} />
-
-        {/* Main content */}
-        <View style={[styles.headerBar, isCompactLayout && styles.headerBarCompact]}>
-          <View style={styles.titleRow}>
-            {/* Liquid accent orb */}
-            <Animated.View
-              style={[
-                styles.accentOrb,
-                { transform: [{ scale: iconPulseAnim }] }
-              ]}
-            >
-              <LinearGradient
-                colors={['#ff4757', '#e50914', '#c0392b']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.accentOrbGradient}
-              />
-              <View style={styles.accentOrbShine} />
-            </Animated.View>
-
-            <View style={styles.titleContent}>
-              <Text style={styles.headerEyebrow} numberOfLines={1}>
-                {activeTab === 'Feed' ? 'SOCIAL' : activeTab.toUpperCase()}
-              </Text>
-              <Text
-                style={[styles.headerText, isCompactLayout && styles.headerTextCompact]}
-                numberOfLines={1}
-              >
-                {activeTab === 'Feed'
-                  ? 'Your Feed'
-                  : activeTab === 'Recommended'
-                    ? 'For You'
-                    : activeTab === 'Live'
-                      ? 'Live Now'
-                      : 'Movie Match'}
-              </Text>
-              <Text style={styles.headerGreeting} numberOfLines={1}>
-                Hey, {activeProfileName} 👋
-              </Text>
-            </View>
-          </View>
-
-          <View style={[styles.headerIcons, isCompactLayout && styles.headerIconsCompact]}>
+        <Animated.View style={[
+          styles.islandWrap,
+          {
+            width: islandWidth,
+            transform: [{ translateY: islandTranslateY }]
+          }
+        ]}>
+          {/* Multi-layer Glass Effect */}
+          <LiquidGlass
+            tintOpacity={islandBlur.interpolate({ inputRange: [0, 0.5], outputRange: [0.15, 0.35] })}
+            tintColor="#000000"
+            cornerRadius={34}
+            borderOpacity={0.35}
+            glowIntensity={0.4}
+            glowColor={accentColor || '#e50914'}
+            chromaticAberration={true}
+            breathingEffect={true}
+            interactive={true}
+            style={StyleSheet.absoluteFill}
+          />
+          
+          {/* Holographic edge glow */}
+          <Animated.View 
+            style={[
+              styles.hologramEdge,
+              {
+                opacity: hologramShimmer.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.3, 0.8, 0.3] }),
+              }
+            ]}
+          >
+            <LinearGradient
+              colors={['transparent', accentColor || '#e50914', 'transparent']}
+              start={{ x: 0, y: 0.5 }}
+              end={{ x: 1, y: 0.5 }}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
+          
+          <View style={styles.islandContent}>
+            {/* Left: Profile with morphing aura */}
             <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => deferNav(() => router.push('/messaging'))}
-              activeOpacity={0.7}
-            >
-              <View style={styles.iconBadgeWrap}>
-                <View style={styles.glassIconBg}>
-                  <Ionicons name="chatbubble" size={18} color="rgba(255,255,255,0.9)" />
-                </View>
-                {unreadBadgeCount > 0 && (
-                  <View style={styles.unreadBadge}>
-                    <Text style={styles.unreadBadgeText}>
-                      {unreadBadgeCount > 99 ? '99+' : String(unreadBadgeCount)}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.iconBtn}
-              onPress={() => deferNav(() => router.push('/search'))}
-              activeOpacity={0.7}
-            >
-              <View style={styles.glassIconBg}>
-                <Ionicons name="search" size={18} color="rgba(255,255,255,0.9)" />
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.iconBtn}
+              activeOpacity={0.9}
               onPress={() => deferNav(() => router.push('/profile'))}
-              activeOpacity={0.7}
+              style={styles.profileSectionIsland}
             >
-              <View style={styles.profileGlassIcon}>
+              <Animated.View style={[
+                styles.avatarAura,
+                {
+                  transform: [{ scale: orbPulse }],
+                  opacity: orbGlow,
+                }
+              ]}>
                 <LinearGradient
-                  colors={['rgba(229,9,20,0.9)', 'rgba(255,107,53,0.9)']}
-                  style={styles.profileIconGradient}
-                >
-                  <FontAwesome name="user" size={16} color="#fff" />
-                </LinearGradient>
-              </View>
+                  colors={[accentColor || '#e50914', '#ff6b35', '#ffd700']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              </Animated.View>
+              <View style={[styles.avatarDot, { backgroundColor: accentColor || '#e50914' }]} />
+              <Animated.View style={{ opacity: textOpacity, marginLeft: 12, overflow: 'hidden', flex: 1 }}>
+                <Animated.Text style={[
+                  styles.eyebrowIsland,
+                  {
+                    opacity: hologramShimmer.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.6, 1, 0.6] }),
+                  }
+                ]}>
+                  SOCIAL
+                </Animated.Text>
+                <Animated.Text style={[
+                  styles.welcomeTextIsland, 
+                  { 
+                    color: accentColor || '#e50914',
+                    textShadowColor: accentColor || '#e50914',
+                  }
+                ]} numberOfLines={1}>
+                  {activeTab}
+                </Animated.Text>
+              </Animated.View>
             </TouchableOpacity>
-          </View>
-        </View>
 
-        {/* Stats row with liquid glass cards */}
-        <Animated.View
-          style={[
-            styles.headerMetaRow,
-            { transform: [{ scale: statsScaleAnim }] }
-          ]}
-        >
-          <View style={styles.glassStatCard}>
-            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(125,216,255,0.15)' }]}>
-              <Ionicons name="documents" size={14} color="#7dd8ff" />
+            {/* Right: Holographic Action Buttons */}
+            <View style={styles.actionSectionIsland}>
+              <TouchableOpacity 
+                style={styles.iconBtnIsland} 
+                onPress={() => deferNav(() => router.push('/search'))}
+                activeOpacity={0.7}
+              >
+                <LiquidGlass
+                  tintOpacity={0.1}
+                  tintColor="#7dd8ff"
+                  cornerRadius={20}
+                  borderOpacity={0.3}
+                  glowIntensity={0.3}
+                  glowColor="#7dd8ff"
+                  interactive={true}
+                  style={StyleSheet.absoluteFill}
+                />
+                <Ionicons name="search" size={20} color="#7dd8ff" />
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.iconBtnIsland} 
+                onPress={() => deferNav(() => router.push('/messaging'))}
+                activeOpacity={0.7}
+              >
+                <LiquidGlass
+                  tintOpacity={0.1}
+                  tintColor="#22c55e"
+                  cornerRadius={20}
+                  borderOpacity={0.3}
+                  glowIntensity={0.3}
+                  glowColor="#22c55e"
+                  interactive={true}
+                  style={StyleSheet.absoluteFill}
+                />
+                <Ionicons name="chatbubble-outline" size={20} color="#22c55e" />
+                {unreadBadgeCount ? (
+                  <Animated.View style={[
+                    styles.badgeIsland,
+                    {
+                      transform: [{ scale: orbPulse }],
+                    }
+                  ]}>
+                    <LinearGradient
+                      colors={['#e50914', '#ff6b35']}
+                      style={StyleSheet.absoluteFill}
+                    />
+                    <Text style={styles.badgeTextIsland}>{unreadBadgeCount > 99 ? '99+' : unreadBadgeCount}</Text>
+                  </Animated.View>
+                ) : null}
+              </TouchableOpacity>
             </View>
-            <Text style={styles.statValue}>{reviews.length}</Text>
-            <Text style={styles.statLabel}>Posts</Text>
-          </View>
-          <View style={styles.glassStatCard}>
-            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(255,107,53,0.15)' }]}>
-              <Ionicons name="flame" size={14} color="#ff6b35" />
-            </View>
-            <Text style={styles.statValue}>{trending.length}</Text>
-            <Text style={styles.statLabel}>Trending</Text>
-          </View>
-          <View style={styles.glassStatCard}>
-            <View style={[styles.statIconWrap, { backgroundColor: 'rgba(229,9,20,0.15)' }]}>
-              <Ionicons name="radio" size={14} color="#e50914" />
-            </View>
-            <Text style={styles.statValue}>{liveStreams.length}</Text>
-            <Text style={styles.statLabel}>Live</Text>
           </View>
         </Animated.View>
-      </View>
-    </Animated.View>
-  );
+
+        {/* Floating prismatic tabs */}
+        <Animated.View style={[
+          styles.tabsDockIsland,
+          {
+            opacity: headerFadeAnim,
+            transform: [
+              { translateY: headerSlideAnim.interpolate({ inputRange: [-50, 0], outputRange: [20, 0] }) },
+            ],
+          }
+        ]}>
+          <FeedTabs
+            active={activeTab}
+            onChangeTab={(tab) => {
+              if (currentPlan === 'free' && (tab === 'Live' || tab === 'Movie Match')) {
+                deferNav(() => router.push('/premium'));
+                return;
+              }
+              setActiveTab(tab);
+              if (Platform.OS !== 'web') {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              }
+            }}
+          />
+        </Animated.View>
+      </Animated.View>
+    );
+  };
 
   useEffect(() => {
     if (activeFilter === 'ForYou') {
@@ -698,135 +962,233 @@ const SocialFeed = () => {
     setRefreshing(false);
   }, [refreshReviews, shuffleReviews]);
 
-  const FeedTimelineHeader = () => (
-    <View>
-      {currentPlan === 'free' && (
-        <View style={styles.upgradeBanner}>
-          <LinearGradient
-            colors={['rgba(229,9,20,0.85)', 'rgba(185,7,16,0.85)']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.upgradeBannerGradient}
-          >
+  const FeedTimelineHeader = () => {
+    // Cinematic entrance animations
+    const contentFadeAnim = useRef(new Animated.Value(0)).current;
+    const contentSlideAnim = useRef(new Animated.Value(30)).current;
+    const upgradePulseAnim = useRef(new Animated.Value(1)).current;
+    const modeSlideAnim = useRef(new Animated.Value(-20)).current;
+    const actionsScaleAnim = useRef(new Animated.Value(0.8)).current;
+    
+    useEffect(() => {
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(contentFadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
+          Animated.spring(contentSlideAnim, { toValue: 0, tension: 50, friction: 8, useNativeDriver: true }),
+        ]),
+        Animated.stagger(100, [
+          Animated.spring(modeSlideAnim, { toValue: 0, tension: 60, friction: 7, useNativeDriver: true }),
+          Animated.spring(actionsScaleAnim, { toValue: 1, tension: 50, friction: 6, useNativeDriver: true }),
+        ]),
+      ]).start();
+      
+      // Premium upgrade pulse
+      if (currentPlan === 'free') {
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(upgradePulseAnim, { toValue: 1.02, duration: 1200, useNativeDriver: true }),
+            Animated.timing(upgradePulseAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+          ])
+        ).start();
+      }
+    }, [currentPlan]);
+    
+    return (
+      <Animated.View style={{ opacity: contentFadeAnim, transform: [{ translateY: contentSlideAnim }] }}>
+        {/* Cinematic Premium Upgrade - Morphing Glass Hologram */}
+        {currentPlan === 'free' && (
+          <Animated.View style={[styles.upgradeBanner, { transform: [{ scale: upgradePulseAnim }] }]}>
+            {/* Multi-layer holographic glass */}
+            <LiquidGlass
+              tintOpacity={0.25}
+              tintColor="#e50914"
+              cornerRadius={24}
+              borderOpacity={0.4}
+              glowIntensity={0.6}
+              glowColor="#e50914"
+              chromaticAberration={true}
+              breathingEffect={true}
+              interactive={true}
+              style={StyleSheet.absoluteFillObject}
+            />
+            
+            {/* Animated gradient overlay */}
+            <Animated.View style={styles.upgradeGradientOverlay}>
+              <LinearGradient
+                colors={['rgba(229,9,20,0.4)', 'rgba(255,107,53,0.3)', 'rgba(255,215,0,0.2)', 'transparent']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={StyleSheet.absoluteFill}
+              />
+            </Animated.View>
+            
+            {/* Particle emitter around upgrade */}
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Animated.View
+                key={`upgrade-particle-${i}`}
+                style={[
+                  styles.upgradeParticle,
+                  {
+                    left: `${15 + i * 15}%`,
+                    top: `${20 + (i % 2) * 60}%`,
+                    opacity: upgradePulseAnim.interpolate({ inputRange: [1, 1.02], outputRange: [0.4, 0.8] }),
+                    transform: [{ scale: upgradePulseAnim }],
+                  }
+                ]}
+              />
+            ))}
+            
             <View style={styles.upgradeBannerContent}>
               <View style={styles.upgradeBannerIcon}>
-                <Ionicons name="diamond" size={22} color="#fff" />
+                <LinearGradient
+                  colors={['#ffd700', '#ff6b35', '#e50914']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.upgradeIconGradient}
+                >
+                  <Ionicons name="diamond" size={24} color="#fff" />
+                </LinearGradient>
               </View>
               <View style={styles.upgradeBannerText}>
-                <Text style={styles.upgradeBannerTitle}>Go Premium</Text>
+                <Text style={styles.upgradeBannerTitle}>Unlock Premium</Text>
                 <Text style={styles.upgradeBannerSubtitle}>
-                  Unlock unlimited posts & features
+                  Unlimited posts, exclusive features & more
                 </Text>
               </View>
               <TouchableOpacity
                 style={styles.upgradeBannerButton}
                 onPress={() => deferNav(() => router.push('/premium?source=social'))}
-                activeOpacity={0.9}
+                activeOpacity={0.85}
               >
+                <LiquidGlass
+                  tintOpacity={0.4}
+                  tintColor="#ffd700"
+                  cornerRadius={16}
+                  borderOpacity={0.5}
+                  glowIntensity={0.7}
+                  glowColor="#ffd700"
+                  interactive={true}
+                  style={StyleSheet.absoluteFill}
+                />
                 <Text style={styles.upgradeBannerButtonText}>Upgrade</Text>
               </TouchableOpacity>
             </View>
-          </LinearGradient>
-        </View>
-      )}
+          </Animated.View>
+        )}
 
-      <View style={styles.feedHeaderContent}>
-        {/* Mode Switcher - Redesigned */}
-        <View style={styles.modeSwitcherWrap}>
-          <View style={styles.modeSwitcher}>
-            {([
-              { key: 'timeline' as const, label: 'Timeline', icon: 'list' as const },
-              { key: 'collage' as const, label: 'Grid', icon: 'grid' as const },
-              { key: 'reels' as const, label: 'Reels', icon: 'play-circle' as const },
-            ]).map((mode) => {
-              const isActive = (feedMode as string) === mode.key && mode.key !== 'reels';
-              return (
-                <TouchableOpacity
-                  key={mode.key}
-                  onPress={() => {
-                    if (mode.key === 'reels') {
-                      openFeedReels();
-                      return;
-                    }
-                    setFeedMode(mode.key);
-                  }}
-                  style={[styles.modeBtn, isActive && styles.modeBtnActive]}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons
-                    name={mode.icon}
-                    size={16}
-                    color={isActive ? '#fff' : 'rgba(255,255,255,0.6)'}
+        <View style={styles.feedHeaderContent}>
+          {/* Morphing Glass Mode Switcher */}
+          <Animated.View style={[styles.modeSwitcherWrap, { transform: [{ translateX: modeSlideAnim }] }]}>
+            <View style={styles.modeSwitcherContainer}>
+              <LiquidGlass
+                tintOpacity={0.12}
+                tintColor="#000000"
+                cornerRadius={18}
+                borderOpacity={0.2}
+                glowIntensity={0.2}
+                glowColor={accentColor || '#e50914'}
+                style={StyleSheet.absoluteFill}
+              />
+              <View style={styles.modeSwitcher}>
+                {([
+                  { key: 'timeline' as const, label: 'Timeline', icon: 'list' as const },
+                  { key: 'collage' as const, label: 'Grid', icon: 'grid' as const },
+                ]).map((mode) => {
+                  const isActive = (feedMode as string) === mode.key;
+                  return (
+                    <TouchableOpacity
+                      key={mode.key}
+                      onPress={() => {
+                        setFeedMode(mode.key);
+                        if (Platform.OS !== 'web') {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        }
+                      }}
+                      style={styles.modeBtn}
+                      activeOpacity={0.8}
+                    >
+                      {isActive && (
+                        <Animated.View style={StyleSheet.absoluteFill}>
+                          <LiquidGlass
+                            tintOpacity={0.35}
+                            tintColor={accentColor || '#e50914'}
+                            cornerRadius={12}
+                            borderOpacity={0.4}
+                            glowIntensity={0.6}
+                            glowColor={accentColor || '#e50914'}
+                            chromaticAberration={true}
+                            interactive={true}
+                            style={StyleSheet.absoluteFill}
+                          />
+                        </Animated.View>
+                      )}
+                      <Ionicons
+                        name={mode.icon}
+                        size={18}
+                        color={isActive ? '#fff' : 'rgba(255,255,255,0.5)'}
+                        style={{ zIndex: 1 }}
+                      />
+                      <Text style={[styles.modeBtnText, isActive && styles.modeBtnTextActive]}>
+                        {mode.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          </Animated.View>
+
+          {/* Stories Row - Cinematic */}
+          <StoriesRow showAddStory={currentPlan !== 'free'} />
+
+          {/* Holographic Quick Actions */}
+          <Animated.View style={[styles.quickActionsRow, { transform: [{ scale: actionsScaleAnim }] }]}>
+            {[
+              { key: 'fresh', icon: 'sparkles' as const, color: '#7dd8ff', glowColor: '#7dd8ff', action: () => {} },
+              { key: 'reels', icon: 'play' as const, color: '#e50914', glowColor: '#ff4b4b', action: openFeedReels },
+              { key: 'live', icon: 'radio' as const, color: '#ff6b35', glowColor: '#ff6b35', action: () => setActiveTab('Live') },
+              { key: 'match', icon: 'heart' as const, color: '#ffd700', glowColor: '#ffd700', action: () => setActiveTab('Movie Match') },
+            ].map((action, index) => (
+              <TouchableOpacity
+                key={action.key}
+                style={styles.quickAction}
+                activeOpacity={0.75}
+                onPress={() => {
+                  if (Platform.OS !== 'web') {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }
+                  action.action();
+                }}
+              >
+                <View style={styles.quickActionIcon}>
+                  <LiquidGlass
+                    tintOpacity={0.18}
+                    tintColor={action.color}
+                    cornerRadius={18}
+                    borderOpacity={0.35}
+                    glowIntensity={0.5}
+                    glowColor={action.glowColor}
+                    chromaticAberration={true}
+                    breathingEffect={true}
+                    interactive={true}
+                    style={StyleSheet.absoluteFillObject}
                   />
-                  <Text style={[styles.modeBtnText, isActive && styles.modeBtnTextActive]}>
-                    {mode.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+                  <Animated.View style={styles.quickActionCore}>
+                    <Ionicons name={action.icon} size={22} color={action.color} />
+                  </Animated.View>
+                </View>
+                <Text style={styles.quickActionText}>
+                  {action.key.charAt(0).toUpperCase() + action.key.slice(1)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </Animated.View>
+
+          {currentPlan !== 'free' && <PostMovieReview />}
         </View>
-
-
-        {/* Stories Row */}
-        <StoriesRow showAddStory={currentPlan !== 'free'} />
-
-        {/* Quick Actions - Redesigned */}
-        <View style={styles.quickActionsRow}>
-          <TouchableOpacity style={styles.quickAction} activeOpacity={0.8}>
-            <LinearGradient
-              colors={['rgba(125,216,255,0.2)', 'rgba(125,216,255,0.05)']}
-              style={styles.quickActionIcon}
-            >
-              <Ionicons name="sparkles" size={18} color="#7dd8ff" />
-            </LinearGradient>
-            <Text style={styles.quickActionText}>Fresh</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.quickAction}
-            activeOpacity={0.8}
-            onPress={() => openFeedReels()}
-          >
-            <LinearGradient
-              colors={['rgba(229,9,20,0.2)', 'rgba(229,9,20,0.05)']}
-              style={styles.quickActionIcon}
-            >
-              <Ionicons name="play" size={18} color="#e50914" />
-            </LinearGradient>
-            <Text style={styles.quickActionText}>Reels</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.quickAction}
-            activeOpacity={0.8}
-            onPress={() => setActiveTab('Live')}
-          >
-            <LinearGradient
-              colors={['rgba(255,107,53,0.2)', 'rgba(255,107,53,0.05)']}
-              style={styles.quickActionIcon}
-            >
-              <Ionicons name="radio" size={18} color="#ff6b35" />
-            </LinearGradient>
-            <Text style={styles.quickActionText}>Live</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.quickAction}
-            activeOpacity={0.8}
-            onPress={() => setActiveTab('Movie Match')}
-          >
-            <LinearGradient
-              colors={['rgba(255,215,0,0.2)', 'rgba(255,215,0,0.05)']}
-              style={styles.quickActionIcon}
-            >
-              <Ionicons name="heart" size={18} color="#ffd700" />
-            </LinearGradient>
-            <Text style={styles.quickActionText}>Match</Text>
-          </TouchableOpacity>
-        </View>
-
-        {currentPlan !== 'free' && <PostMovieReview />}
-      </View>
-    </View>
-  );
+      </Animated.View>
+    );
+  };
 
   // Floating particles animation
   const particles = useRef(
@@ -841,6 +1203,9 @@ const SocialFeed = () => {
   // FAB animation
   const fabScaleAnim = useRef(new Animated.Value(1)).current;
   const fabRotateAnim = useRef(new Animated.Value(0)).current;
+  
+  // Live dot pulse animation
+  const iconPulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     // Animate floating particles
@@ -865,6 +1230,14 @@ const SocialFeed = () => {
 
       setTimeout(animateParticle, i * 800);
     });
+    
+    // Live dot pulse animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(iconPulseAnim, { toValue: 1.05, duration: 500, useNativeDriver: true }),
+        Animated.timing(iconPulseAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+      ])
+    ).start();
 
     // FAB breathing animation
     Animated.loop(
@@ -895,47 +1268,81 @@ const SocialFeed = () => {
       <ScreenWrapper>
         <StatusBar barStyle="light-content" />
 
-        {/* Animated gradient background */}
-        <LinearGradient
-          colors={[accentColor + '40', '#120914', '#05060f']}
-          locations={[0, 0.3, 1]}
-          style={StyleSheet.absoluteFillObject}
-        />
-
-        {/* Floating particles */}
-        {particles.map((particle, i) => (
-          <Animated.View
-            key={i}
-            pointerEvents="none"
-            style={[
-              styles.floatingParticle,
-              {
-                backgroundColor: i % 3 === 0 ? accentColor : i % 3 === 1 ? '#7dd8ff' : '#ffd700',
-                opacity: particle.opacity,
-                transform: [
-                  { translateX: particle.x.interpolate({ inputRange: [0, 100], outputRange: [0, screenWidth] }) },
-                  { translateY: particle.y.interpolate({ inputRange: [0, 100], outputRange: [0, 800] }) },
-                  { scale: particle.scale },
-                ],
-              },
-            ]}
+        {/* Cinematic Aurora Background */}
+        <Animated.View style={StyleSheet.absoluteFillObject}>
+          {/* Deep space gradient */}
+          <LinearGradient
+            colors={[accentColor + '25', '#0a0612', '#05060f', '#030308']}
+            locations={[0, 0.2, 0.6, 1]}
+            style={StyleSheet.absoluteFillObject}
           />
-        ))}
+          
+          {/* Aurora wave layers */}
+          <Animated.View 
+            style={[
+              styles.auroraWave,
+              {
+                transform: [{ translateX: auroraPhase.interpolate({ inputRange: [0, 1], outputRange: [-200, 200] }) }],
+              }
+            ]}
+          >
+            <LinearGradient
+              colors={['transparent', accentColor + '20', 'rgba(125,216,255,0.15)', 'transparent']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
+          
+          {/* Prismatic shimmer overlay */}
+          <Animated.View 
+            style={[
+              styles.prismaticOverlay,
+              {
+                opacity: prismPhase.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.1, 0.2, 0.1] }),
+                transform: [
+                  { rotate: prismPhase.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '5deg'] }) },
+                ],
+              }
+            ]}
+          >
+            <LinearGradient
+              colors={['rgba(229,9,20,0.1)', 'rgba(168,85,247,0.1)', 'rgba(125,216,255,0.1)', 'rgba(255,215,0,0.1)']}
+              locations={[0, 0.33, 0.66, 1]}
+              style={StyleSheet.absoluteFill}
+            />
+          </Animated.View>
+        </Animated.View>
+
+        {/* Enhanced floating particles with glow trails */}
+        {particles.map((particle, i) => {
+          const particleColors = [accentColor, '#7dd8ff', '#ffd700', '#a855f7', '#22c55e'];
+          const particleColor = particleColors[i % particleColors.length];
+          return (
+            <Animated.View
+              key={i}
+              pointerEvents="none"
+              style={[
+                styles.floatingParticle,
+                {
+                  backgroundColor: particleColor,
+                  shadowColor: particleColor,
+                  opacity: particle.opacity,
+                  transform: [
+                    { translateX: particle.x.interpolate({ inputRange: [0, 100], outputRange: [0, screenWidth] }) },
+                    { translateY: particle.y.interpolate({ inputRange: [0, 100], outputRange: [0, 800] }) },
+                    { scale: particle.scale },
+                  ],
+                },
+              ]}
+            >
+              {/* Glow ring */}
+              <View style={[styles.particleGlow, { borderColor: particleColor }]} />
+            </Animated.View>
+          );
+        })}
 
         <HeaderComponent />
-
-        <View style={styles.tabsDock}>
-          <FeedTabs
-            active={activeTab}
-            onChangeTab={(tab) => {
-              if (currentPlan === 'free' && (tab === 'Live' || tab === 'Movie Match')) {
-                deferNav(() => router.push('/premium'));
-                return;
-              }
-              setActiveTab(tab);
-            }}
-          />
-        </View>
 
         <View style={styles.body}>
           {activeTab === 'Recommended' ? (
@@ -987,22 +1394,32 @@ const SocialFeed = () => {
                       activeOpacity={0.9}
                       onPress={() => deferNav(() => router.push(`/social-feed/live/${item.id}`))}
                     >
-                      <LinearGradient
-                        colors={['rgba(229,9,20,0.18)', 'rgba(10,12,24,0.7)']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
+                      <LiquidGlass
+                        tintOpacity={0.15}
+                        tintColor="#e50914"
+                        cornerRadius={18}
+                        borderOpacity={0.25}
+                        glowIntensity={0.4}
+                        glowColor="#e50914"
+                        interactive={true}
                         style={StyleSheet.absoluteFillObject}
                       />
                       <View style={styles.liveCardCopy}>
                         <Text style={styles.liveCardTitle} numberOfLines={1} ellipsizeMode="tail">
                           {item.title || 'Live on MovieFlix'}
                         </Text>
-                        <Text style={styles.liveCardSubtitle} numberOfLines={1} ellipsizeMode="tail">
-                          {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
-                        </Text>
+                        <View style={styles.liveCardMetaRow}>
+                          <Ionicons name="eye-outline" size={13} color="rgba(255,255,255,0.6)" />
+                          <Text style={styles.liveCardSubtitle} numberOfLines={1} ellipsizeMode="tail">
+                            {item.hostName || 'Host'} · {item.viewersCount ?? 0} watching
+                          </Text>
+                        </View>
                       </View>
                       <View style={styles.liveChip}>
-                        <View style={styles.liveDot} />
+                        <Animated.View style={[styles.liveDot, {
+                          opacity: iconPulseAnim.interpolate({ inputRange: [1, 1.05], outputRange: [1, 0.4] }),
+                          transform: [{ scale: iconPulseAnim }],
+                        }]} />
                         <Text style={styles.liveChipText}>LIVE</Text>
                       </View>
                     </TouchableOpacity>
@@ -1012,12 +1429,17 @@ const SocialFeed = () => {
             </View>
           ) : (
             feedMode === 'collage' ? (
-              <FlashList
+              <AnimatedFlashList
                 data={loading ? Array.from({ length: 12 }) : filteredReviews}
                 keyExtractor={(item: any, i: number) => (loading ? `placeholder-${i}` : String((item as any).id))}
                 numColumns={collageColumns}
                 estimatedItemSize={collageTileWidth * 1.1}
                 ListHeaderComponent={FeedTimelineHeader}
+                onScroll={Animated.event(
+                  [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+                  { useNativeDriver: false }
+                )}
+                scrollEventThrottle={16}
                 renderItem={({ item, index }: { item: any, index: number }) => {
                   const col = index % collageColumns;
                   const marginRight = col === collageColumns - 1 ? 0 : collageGap;
@@ -1043,16 +1465,16 @@ const SocialFeed = () => {
                   <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
                 }
                 contentContainerStyle={{
-                  paddingTop: 0,
+                  paddingTop: 100,
                   paddingBottom: listBottomPadding,
-                  paddingHorizontal: collageSidePadding,
+                  paddingHorizontal: 10,
                 }}
                 showsVerticalScrollIndicator={false}
               />
             ) : (
-              <Animated.FlatList<FeedItem | undefined>
-                style={{ flex: 1 }}
+              <FlashList<FeedItem | undefined>
                 data={loading ? Array.from({ length: 3 }) : feedItems}
+                estimatedItemSize={600}
                 keyExtractor={(item: FeedItem | undefined | null, i: number) =>
                   item && typeof item === 'object' && 'id' in item
                     ? String((item as any).id)
@@ -1114,7 +1536,7 @@ const SocialFeed = () => {
                   <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />
                 }
                 contentContainerStyle={{
-                  paddingTop: 0,
+                  paddingTop: 100,
                   paddingBottom: listBottomPadding,
                   paddingHorizontal: 10,
                 }}
@@ -1186,7 +1608,7 @@ const SocialFeed = () => {
           </View>
         </Modal>
 
-        {/* Stunning animated FAB */}
+        {/* Stunning animated FAB - Holographic Morphing Glass */}
         {currentPlan !== 'free' && (
           <Animated.View
             style={[
@@ -1200,22 +1622,58 @@ const SocialFeed = () => {
               },
             ]}
           >
-            {/* Glow effect */}
-            <View style={[styles.fabGlow, { backgroundColor: accentColor }]} />
+            {/* Multi-layer glow effect */}
+            <Animated.View 
+              style={[
+                styles.fabGlow, 
+                { 
+                  backgroundColor: accentColor,
+                  opacity: fabScaleAnim.interpolate({ inputRange: [0.85, 1, 1.08], outputRange: [0.2, 0.3, 0.5] }),
+                  transform: [{ scale: fabScaleAnim }],
+                }
+              ]} 
+            />
+            
+            {/* Outer aura ring */}
+            <Animated.View 
+              style={[
+                styles.fabAuraRing,
+                {
+                  borderColor: accentColor,
+                  opacity: fabScaleAnim.interpolate({ inputRange: [0.85, 1, 1.08], outputRange: [0.2, 0.4, 0.6] }),
+                  transform: [{ scale: fabScaleAnim }],
+                }
+              ]}
+            />
 
             <TouchableOpacity
               style={styles.fab}
               onPress={handleFabPress}
               activeOpacity={1}
             >
+              <LiquidGlass
+                tintOpacity={0.3}
+                tintColor={accentColor}
+                cornerRadius={22}
+                borderOpacity={0.5}
+                glowIntensity={0.8}
+                glowColor={accentColor}
+                chromaticAberration={true}
+                breathingEffect={true}
+                interactive={true}
+                style={StyleSheet.absoluteFillObject}
+              />
+              
+              {/* Prismatic inner glow */}
               <LinearGradient
-                colors={[accentColor, '#ff6b35']}
+                colors={['rgba(255,255,255,0.3)', 'transparent', 'rgba(255,255,255,0.1)']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
-                style={styles.fabGradient}
-              >
-                <Ionicons name="add" size={28} color="#fff" />
-              </LinearGradient>
+                style={[StyleSheet.absoluteFill, { borderRadius: 22 }]}
+              />
+              
+              <Ionicons name="add" size={30} color="#fff" style={{ zIndex: 1 }} />
+              
               {/* Shine effect */}
               <View style={styles.fabShine} />
             </TouchableOpacity>
@@ -1238,9 +1696,29 @@ type PromoCardProps = {
 
 const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
   const cardScale = useRef(new Animated.Value(1)).current;
+  const cardGlowAnim = useRef(new Animated.Value(0)).current;
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Holographic shimmer loop
+    Animated.loop(
+      Animated.timing(shimmerAnim, { toValue: 1, duration: 3000, useNativeDriver: true })
+    ).start();
+    
+    // Pulse glow
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(cardGlowAnim, { toValue: 1, duration: 1500, useNativeDriver: true }),
+        Animated.timing(cardGlowAnim, { toValue: 0, duration: 1500, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
 
   const handlePressIn = () => {
-    Animated.spring(cardScale, { toValue: 0.98, tension: 100, friction: 10, useNativeDriver: true }).start();
+    Animated.spring(cardScale, { toValue: 0.97, tension: 200, friction: 12, useNativeDriver: true }).start();
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
   };
 
   const handlePressOut = () => {
@@ -1256,39 +1734,82 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
       >
-        {/* Glass background */}
+        {/* Multi-layer Holographic Glass Background */}
         <View style={styles.promoGlassWrap}>
-          {Platform.OS === 'ios' ? (
-            <BlurView intensity={20} tint="dark" style={StyleSheet.absoluteFillObject} />
-          ) : (
-            <View style={styles.promoAndroidGlass} />
-          )}
+          <LiquidGlass
+            glowColor="#e50914"
+            tintOpacity={0.2}
+            tintColor="#1a0a12"
+            cornerRadius={24}
+            glowIntensity={cardGlowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] })}
+            borderOpacity={0.4}
+            chromaticAberration={true}
+            breathingEffect={true}
+            interactive={true}
+            style={StyleSheet.absoluteFillObject}
+          />
         </View>
+        
+        {/* Holographic edge glow */}
+        <Animated.View 
+          style={[
+            styles.promoHologramEdge,
+            {
+              opacity: cardGlowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.7] }),
+            }
+          ]}
+        >
+          <LinearGradient
+            colors={['transparent', '#e50914', '#ff6b35', 'transparent']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
 
-        {/* Accent glow */}
+        {/* Cinematic gradient accent */}
         <LinearGradient
-          colors={['rgba(229,9,20,0.2)', 'transparent']}
+          colors={['rgba(229,9,20,0.35)', 'rgba(255,107,53,0.2)', 'transparent']}
           style={styles.promoAccentGlow}
         />
 
-        {/* Image with overlay */}
+        {/* Image with cinematic overlay */}
         <View style={styles.promoImageWrap}>
           <Image source={{ uri: product.imageUrl }} style={styles.promoImage} />
+          
+          {/* Multi-layer gradient overlay */}
           <LinearGradient
-            colors={['transparent', 'rgba(0,0,0,0.8)']}
+            colors={['transparent', 'rgba(0,0,0,0.6)', 'rgba(0,0,0,0.9)']}
+            locations={[0, 0.5, 1]}
             style={styles.promoImageOverlay}
           />
-          {/* Sponsored badge */}
+          
+          {/* Film grain texture */}
+          <Animated.View 
+            style={[
+              styles.promoFilmGrain,
+              {
+                opacity: shimmerAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.02, 0.05, 0.02] }),
+              }
+            ]}
+          />
+          
+          {/* Sponsored badge - Glass morphic */}
           <View style={styles.promoBadgeWrap}>
-            <LinearGradient
-              colors={['rgba(229,9,20,0.9)', 'rgba(255,107,53,0.9)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.promoBadge}
-            >
-              <Ionicons name="megaphone" size={10} color="#fff" />
-              <Text style={styles.promoBadgeText}>AD</Text>
-            </LinearGradient>
+            <LiquidGlass
+              tintOpacity={0.6}
+              tintColor="#e50914"
+              cornerRadius={12}
+              borderOpacity={0.4}
+              glowIntensity={0.5}
+              glowColor="#ff6b35"
+              interactive={true}
+              style={StyleSheet.absoluteFill}
+            />
+            <View style={styles.promoBadgeContent}>
+              <Ionicons name="megaphone" size={11} color="#fff" />
+              <Text style={styles.promoBadgeText}>SPONSORED</Text>
+            </View>
           </View>
         </View>
 
@@ -1303,8 +1824,17 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
 
           {/* Footer */}
           <View style={styles.promoFooter}>
-            {/* Price tag */}
+            {/* Price tag - Glass morphic */}
             <View style={styles.promoPriceTag}>
+              <LiquidGlass
+                tintOpacity={0.4}
+                tintColor="#e50914"
+                cornerRadius={12}
+                borderOpacity={0.3}
+                glowIntensity={0.4}
+                glowColor="#ff6b35"
+                style={StyleSheet.absoluteFill}
+              />
               <Text style={styles.promoPriceCurrency}>$</Text>
               <Text style={styles.promoPrice}>{Number(product.price).toFixed(2)}</Text>
             </View>
@@ -1316,7 +1846,9 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
                   <Image source={{ uri: product.sellerAvatar }} style={styles.promoSellerAvatar} />
                 ) : (
                   <LinearGradient
-                    colors={['#e50914', '#ff6b35']}
+                    colors={['#e50914', '#ff6b35', '#ffd700']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
                     style={styles.promoSellerFallback}
                   >
                     <Text style={styles.promoSellerInitial}>
@@ -1330,16 +1862,29 @@ const PromoAdCard = ({ product, onPress, onMessage }: PromoCardProps) => {
               </Text>
             </View>
 
-            {/* Chat button */}
+            {/* Chat button - Glass morphic */}
             <TouchableOpacity
               style={styles.promoChatBtn}
               onPress={(e: any) => {
                 e?.stopPropagation?.();
                 onMessage();
+                if (Platform.OS !== 'web') {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                }
               }}
               activeOpacity={0.8}
             >
-              <Ionicons name="chatbubble" size={14} color="#fff" />
+              <LiquidGlass
+                tintOpacity={0.3}
+                tintColor="#22c55e"
+                cornerRadius={14}
+                borderOpacity={0.4}
+                glowIntensity={0.5}
+                glowColor="#22c55e"
+                interactive={true}
+                style={StyleSheet.absoluteFill}
+              />
+              <Ionicons name="chatbubble" size={16} color="#22c55e" style={{ zIndex: 1 }} />
             </TouchableOpacity>
           </View>
         </View>
@@ -1378,8 +1923,10 @@ const buildPromoPipeline = (products: MarketplaceProduct[]) => {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#05060f' },
 
-  tabsDock: {
-    paddingBottom: 2,
+  tabsDockIsland: {
+    width: '100%',
+    marginTop: 10,
+    zIndex: 10,
   },
 
   body: {
@@ -1395,23 +1942,217 @@ const styles = StyleSheet.create({
     gap: 12,
   },
 
-  feedHeaderContent: {
-    paddingHorizontal: 14,
-    paddingBottom: 10,
+  /* Header Styles Matching Home */
+  headerContainerIsland: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    alignItems: 'center',
+    width: '100%',
   },
-
+  islandWrap: {
+    height: 56,
+    borderRadius: 28,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  islandContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6,
+  },
+  profileSectionIsland: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 8,
+    flexShrink: 1,
+  },
+  avatarDot: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  eyebrowIsland: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
+    marginBottom: 1,
+    letterSpacing: 1.2,
+    fontWeight: '800',
+  },
+  welcomeTextIsland: {
+    fontSize: 14,
+    color: '#fff',
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  actionSectionIsland: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 22,
+    paddingHorizontal: 4,
+    height: 44,
+  },
+  iconBtnIsland: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  badgeIsland: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    backgroundColor: '#ff3333',
+    minWidth: 14,
+    height: 14,
+    borderRadius: 7,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 2,
+    zIndex: 10,
+  },
+  badgeTextIsland: {
+    color: '#fff',
+    fontSize: 8,
+    fontWeight: 'bold',
+  },
+  headerContainer: {
+    paddingTop: 12,
+  },
+  topRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    marginBottom: 16,
+  },
+  profilePill: {
+    flex: 1,
+    marginRight: 8,
+    borderRadius: 24,
+    overflow: 'hidden',
+    height: 56,
+  },
+  profilePillContent: {
+    flex: 1,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  tonightLabel: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
+    marginBottom: 1,
+    letterSpacing: 0.8,
+    fontWeight: '800',
+  },
+  welcomeText: {
+    fontSize: 15,
+    color: '#fff',
+    fontWeight: '900',
+    letterSpacing: 0.1,
+  },
+  iconRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  iconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  badge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    backgroundColor: '#e50914',
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#05060f',
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 7,
+    fontWeight: 'bold',
+  },
+  genreBox: {
+    marginHorizontal: 12,
+    marginBottom: 16,
+    borderRadius: 28,
+    padding: 14,
+    overflow: 'hidden',
+    minHeight: 100,
+  },
+  sectionLabel: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    marginBottom: 14,
+    marginLeft: 2,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  metaPill: {
+    height: 36,
+    borderRadius: 18,
+    overflow: 'hidden',
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+  },
+  metaPillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   modeSwitcherWrap: {
     marginBottom: 12,
   },
 
   modeSwitcher: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.04)',
     borderRadius: 14,
     padding: 4,
     gap: 4,
   },
-
   modeBtn: {
     flex: 1,
     flexDirection: 'row',
@@ -1420,18 +2161,17 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingVertical: 10,
     borderRadius: 10,
+    overflow: 'hidden',
   },
-
   modeBtnActive: {
-    backgroundColor: 'rgba(229,9,20,0.9)',
+    // Native liquid glass handles active styling now
   },
-
   modeBtnText: {
     color: 'rgba(255,255,255,0.6)',
     fontSize: 13,
     fontWeight: '600',
+    zIndex: 1,
   },
-
   modeBtnTextActive: {
     color: '#fff',
     fontWeight: '700',
@@ -1666,6 +2406,12 @@ const styles = StyleSheet.create({
     minWidth: 0,
     paddingRight: 12,
   },
+  liveCardMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 4,
+  },
   liveCardTitle: {
     color: '#fff',
     fontSize: 15,
@@ -1720,9 +2466,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.03)',
   },
   quickActionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+    width: 48,
+    height: 48,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1730,261 +2476,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.8)',
     fontWeight: '600',
     fontSize: 11,
-  },
-
-  // Header styles - Liquid Glass iOS 26 style
-  headerWrap: {
-    marginHorizontal: 14,
-    marginTop: 10,
-    marginBottom: 8,
-  },
-  liquidGlassContainer: {
-    borderRadius: 24,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  blurLayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  androidGlassLayer: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(20,20,30,0.75)',
-  },
-  liquidShine: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 150,
-    zIndex: 1,
-  },
-  accentGlow: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 0,
-  },
-  glassBorderTop: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 1,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-  },
-  glassBorderBottom: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 1,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  headerBar: {
-    paddingVertical: 18,
-    paddingHorizontal: 18,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    zIndex: 2,
-  },
-  headerBarCompact: {
-    flexDirection: 'column',
-    alignItems: 'stretch',
-    rowGap: 14,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    flex: 1,
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  accentOrb: {
-    width: 46,
-    height: 46,
-    borderRadius: 16,
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  accentOrbGradient: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  accentOrbShine: {
-    position: 'absolute',
-    top: 2,
-    left: 4,
-    width: 18,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: 'rgba(255,255,255,0.35)',
-  },
-  titleContent: {
-    flex: 1,
-    minWidth: 0,
-  },
-  headerEyebrow: {
-    color: 'rgba(255,255,255,0.45)',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-    marginBottom: 2,
-  },
-  headerGreeting: {
-    color: 'rgba(255,255,255,0.55)',
-    fontSize: 12,
-    fontWeight: '500',
-    marginTop: 3,
-  },
-  headerText: {
-    color: '#FFFFFF',
-    fontSize: 24,
-    fontWeight: '800',
-    letterSpacing: -0.5,
-  },
-  headerTextCompact: {
-    fontSize: 20,
-  },
-  headerIcons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flexShrink: 0,
-  },
-  headerIconsCompact: {
-    flexWrap: 'wrap',
-    rowGap: 8,
-    justifyContent: 'flex-start',
-  },
-  iconBtn: {
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  glassIconBg: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  profileGlassIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  profileIconGradient: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  iconBadgeWrap: {
-    position: 'relative',
-  },
-  unreadBadge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 4,
-    borderRadius: 9,
-    backgroundColor: '#e50914',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: 'rgba(20,20,30,0.8)',
-  },
-  unreadBadgeText: {
-    color: '#fff',
-    fontSize: 9,
-    fontWeight: '800',
-  },
-  headerMetaRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 14,
-    paddingBottom: 16,
-    paddingTop: 4,
-    gap: 8,
-    zIndex: 2,
-  },
-  glassStatCard: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.04)',
-  },
-  statIconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statValue: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  statLabel: {
-    color: 'rgba(255,255,255,0.45)',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  upgradeBanner: {
-    marginHorizontal: 14,
-    marginBottom: 14,
-    borderRadius: 18,
-    overflow: 'hidden',
-  },
-  upgradeBannerGradient: {
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  upgradeBannerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  upgradeBannerIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  upgradeBannerText: {
-    flex: 1,
-    minWidth: 0,
-  },
-  upgradeBannerTitle: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  upgradeBannerSubtitle: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  upgradeBannerButton: {
-    backgroundColor: '#fff',
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  upgradeBannerButtonText: {
-    color: '#e50914',
-    fontWeight: '800',
-    fontSize: 13,
   },
 
   /* Promo Ad Card - Glass redesign */
@@ -2127,6 +2618,198 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
+  },
+  
+  // ==========================================
+  // HOLOGRAPHIC & AURORA STYLES - MIND BLOWING
+  // ==========================================
+  
+  // Aurora particle system
+  auroraParticle: {
+    position: 'absolute',
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    shadowOpacity: 0.8,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  
+  // Magnetic glass orbs
+  magneticOrb: {
+    position: 'absolute',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 10,
+  },
+  magneticOrbGradient: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    opacity: 0.6,
+  },
+  magneticOrbCore: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  
+  // Prismatic shimmer overlay
+  prismaticShimmer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 150,
+    overflow: 'hidden',
+  },
+  
+  // Holographic edge glow
+  hologramEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 2,
+    borderRadius: 1,
+    overflow: 'hidden',
+  },
+  
+  // Avatar morphing aura
+  avatarAura: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    shadowOpacity: 0.8,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  
+  // Aurora wave background
+  auroraWave: {
+    position: 'absolute',
+    top: 0,
+    left: -200,
+    right: -200,
+    height: 300,
+    overflow: 'hidden',
+  },
+  
+  // Prismatic background overlay
+  prismaticOverlay: {
+    position: 'absolute',
+    top: -100,
+    left: -50,
+    right: -50,
+    height: 400,
+    overflow: 'hidden',
+    transform: [{ rotate: '-5deg' }],
+  },
+  
+  // Particle glow ring
+  particleGlow: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    left: -3,
+    top: -3,
+  },
+  
+  // FAB aura ring
+  fabAuraRing: {
+    position: 'absolute',
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+  },
+  
+  // Mode switcher container
+  modeSwitcherContainer: {
+    borderRadius: 18,
+    overflow: 'hidden',
+    padding: 4,
+  },
+  
+  // Quick action core
+  quickActionCore: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  
+  // Upgrade banner gradient overlay
+  upgradeGradientOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: '100%',
+    overflow: 'hidden',
+  },
+  
+  // Upgrade particle
+  upgradeParticle: {
+    position: 'absolute',
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#ffd700',
+    shadowColor: '#ffd700',
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  
+  // Upgrade icon gradient
+  upgradeIconGradient: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#ffd700',
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  
+  // Promo holographic edge
+  promoHologramEdge: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 24,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    overflow: 'hidden',
+  },
+  
+  // Promo film grain
+  promoFilmGrain: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+  },
+  
+  // Promo badge content
+  promoBadgeContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
 });
 

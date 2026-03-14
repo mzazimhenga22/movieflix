@@ -18,7 +18,7 @@ import Slider from '@react-native-community/slider';
 import { addDoc, collection, doc, runTransaction, serverTimestamp, updateDoc } from 'firebase/firestore';
 
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { useUser } from '../../hooks/use-user';
 import {
   getProductsBySellerId,

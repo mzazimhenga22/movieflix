@@ -1206,3 +1206,5 @@ export const getSellerPaymentDetails = async (
   const snap = await getDoc(doc(db, SELLER_PAYOUT_COLLECTION, sellerId));
   return snap.exists() ? ({ sellerId: snap.id, ...snap.data() } as SellerPaymentDetails) : null;
 };
+
+export default function DummyTsRoute() { return null; }

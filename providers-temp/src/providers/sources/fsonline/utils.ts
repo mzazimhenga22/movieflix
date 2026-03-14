@@ -30,15 +30,29 @@ export function getMoviePageURL(name: string, season?: number, episode?: number)
 }
 
 export async function fetchIFrame(ctx: ScrapeContext, url: string): Promise<FetcherResponse | undefined> {
-  const response: FetcherResponse = await ctx.proxiedFetcher.full(url, {
-    headers: {
-      Referer: ORIGIN_HOST,
-      Origin: ORIGIN_HOST,
-      'sec-fetch-dest': 'iframe',
-      'sec-fetch-mode': 'navigate',
-      'sec-fetch-site': 'cross-site',
-    },
-  });
-  throwOnResponse(response);
-  return response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response: FetcherResponse = await ctx.proxiedFetcher.full(url, {
+      headers: {
+        Referer: ORIGIN_HOST,
+        Origin: ORIGIN_HOST,
+        'sec-fetch-dest': 'iframe',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'cross-site',
+      },
+      signal: controller.signal,
+    } as any); // cast to any to allow signal in case the type doesn't support it directly
+    throwOnResponse(response);
+    return response;
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      console.warn(`[fetchIFrame] Timeout fetching ${url} after 8000ms`);
+      return undefined;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }

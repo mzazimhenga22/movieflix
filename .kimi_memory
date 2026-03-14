@@ -1,0 +1,12 @@
+No memory found yet.
+- SongList.tsx TypeScript fixes applied:
+1. Removed duplicate animation variable declarations (scaleAnim, glowAnim, pulseAnim, vinylRotate) that were declared twice on lines 65-68 and 69-72
+2. Fixed useMemo syntax error on lines 79-86 - removed duplicate 'const waveData = useMemo(() =>' line and properly formatted the arrow function with correct parentheses and dependency array
+
+The component now has:
+- Single declarations for all animation refs (lines 65-68)
+- Properly formatted useMemo hook with callback function and empty dependency array (lines 75-81)
+- ESLint passes with only 1 unused variable warning (GradientText)
+* `sed` command not recognized, indicating potential environment or path configuration issues.
+* Animation code uses `useNativeDriver: true` for spring and timing animations, which is correct for native performance.
+* Missing or mismatched content in `downloads.tsx` file (lines 103-117), suggesting possible file corruption or version mismatch.

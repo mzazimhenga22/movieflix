@@ -7,8 +7,8 @@ module.exports = function (api) {
         'module-resolver',
         {
           alias: {
-            '@': './',
-            '@p-stream': './providers-temp/src',
+            "@": "./",
+            "@p-stream": "./providers-temp/src"
           },
           extensions: ['.js', '.jsx', '.ts', '.tsx'],
         },

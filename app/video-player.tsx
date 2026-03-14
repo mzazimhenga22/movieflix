@@ -2,20 +2,22 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS, ResizeMode, Video } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { activateKeepAwakeAsync, deactivateKeepAwake, isAvailableAsync } from 'expo-keep-awake';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Animated,
   AppState,
-  FlatList,
+  Easing,
   Image,
   InteractionManager,
   NativeModules,
@@ -32,20 +34,21 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NativeAdCard from '../components/ads/NativeAdCard';
+import LiquidGlass from '../components/app-components/LiquidGlass';
+import NativeGlassControl from '../components/app-components/NativeGlassControl';
 import { API_BASE_URL, API_KEY } from '../constants/api';
 import { firestore } from '../constants/firebase';
 import { usePromotedProducts } from '../hooks/use-promoted-products';
 import { useUser } from '../hooks/use-user';
 import { checkAndAwardBadges } from '../lib/achievements/achievementManager';
 import { logInteraction } from '../lib/algo';
-import { VideoMaskingOverlay } from '../lib/engineer';
+import { onHeavyScreenBlur, onHeavyScreenFocus } from '../lib/backgroundScheduler';
+import { VideoMaskingOverlay } from '../lib/engineerOverlay';
 import { syncMovieMatchProfile } from '../lib/movieMatchSync';
 import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../lib/profileStorage';
 import { buildScrapeDebugTag, buildSourceOrder } from '../lib/videoPlaybackShared';
-import { onHeavyScreenBlur, onHeavyScreenFocus } from '../lib/backgroundScheduler';
 import { consumePrefetchedPlayback } from '../lib/videoPrefetchCache';
 import {
-  enterPip,
   enterPipMinimal,
   fetchFallbackSubtitlesNative,
   fetchTmdbEnrichmentNative,
@@ -57,8 +60,10 @@ import {
 import { useSubscription } from '../providers/SubscriptionProvider';
 import { type PStreamPlayback, usePStream } from '../src/pstream/usePStream';
 import type { Media } from '../types/index';
-import NativeGlassControl from './components/NativeGlassControl';
 import { trackPromotionClick, trackPromotionImpression } from './marketplace/api';
+
+const AnyVideoView = VideoView as any;
+const AnyLiquidGlass = LiquidGlass as any;
 
 import NewChatSheet from './messaging/components/NewChatSheet';
 import {
@@ -285,7 +290,7 @@ type SlidableVerticalControlProps = {
   height?: number;
   tintColor?: string;
 };
-const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
+const SlidableVerticalControl = React.memo<SlidableVerticalControlProps>(({
   icon,
   label,
   value,
@@ -367,16 +372,88 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
   });
   return (
     <View {...panResponder.panHandlers} style={styles.ccWrapper}>
-      <View style={[styles.ccTrack, { height }]}>
+      <AnyLiquidGlass
+        cornerRadius={34}
+        tintOpacity={0.18}
+        blurIntensity={25}
+        borderOpacity={0.12}
+        style={[styles.ccTrack, { height }]}
+      >
         <Animated.View style={[styles.ccFill, { height: fillHeight, backgroundColor: tintColor }]} />
         <Animated.View style={[styles.ccThumb, { bottom: thumbBottom, backgroundColor: tintColor }]}>
           <MaterialCommunityIcons name={icon} size={22} color="#fff" />
         </Animated.View>
-      </View>
+      </AnyLiquidGlass>
       <Text style={styles.ccLabel}>{label}</Text>
     </View>
   );
+});
+
+type ProgressBarProps = {
+  currentTimeLabel: string;
+  totalTimeLabel: string;
+  durationForUi: number;
+  seekPosition: number;
+  bufferedPctForUi: number;
+  playedPctForUi: number;
+  onSlidingStart: () => void;
+  onValueChange: (val: number) => void;
+  onSlidingComplete: (val: number) => void;
 };
+
+const ProgressBar = React.memo<ProgressBarProps>(({
+  currentTimeLabel,
+  totalTimeLabel,
+  durationForUi,
+  seekPosition,
+  bufferedPctForUi,
+  playedPctForUi,
+  onSlidingStart,
+  onValueChange,
+  onSlidingComplete,
+}) => (
+  <View style={styles.progressRow}>
+    <View style={styles.progressLabels}>
+      <Text style={styles.timeText}>{currentTimeLabel}</Text>
+      <Text style={styles.timeText}>{totalTimeLabel}</Text>
+    </View>
+    <AnyLiquidGlass
+      cornerRadius={12}
+      tintOpacity={0.15}
+      blurIntensity={20}
+      borderOpacity={0.1}
+      style={styles.progressContainerNoCard}
+    >
+      <View style={styles.progressTrackWrap}>
+        <View style={styles.progressTrackBase} />
+        <View
+          style={[
+            styles.progressTrackBuffered,
+            { width: `${Math.round(bufferedPctForUi * 1000) / 10}%` },
+          ]}
+        />
+        <View
+          style={[
+            styles.progressTrackPlayed,
+            { width: `${Math.round(playedPctForUi * 1000) / 10}%` },
+          ]}
+        />
+        <Slider
+          style={styles.progressBarOverlay}
+          minimumValue={0}
+          maximumValue={durationForUi}
+          value={seekPosition}
+          onSlidingStart={onSlidingStart}
+          onValueChange={onValueChange}
+          onSlidingComplete={onSlidingComplete}
+          minimumTrackTintColor="transparent"
+          maximumTrackTintColor="transparent"
+          thumbTintColor="#fff"
+        />
+      </View>
+    </AnyLiquidGlass>
+  </View>
+));
 const VideoPlayerScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
@@ -397,7 +474,6 @@ const VideoPlayerScreen = () => {
       handle?.cancel?.();
     };
   }, []);
-  const roomCode = typeof params.roomCode === 'string' ? params.roomCode : undefined;
   const passedVideoUrl = typeof params.videoUrl === 'string' ? params.videoUrl : undefined;
   const passedStreamType = typeof params.streamType === 'string' ? params.streamType : undefined;
   const rawHeaders = typeof params.videoHeaders === 'string' ? params.videoHeaders : undefined;
@@ -526,11 +602,10 @@ const VideoPlayerScreen = () => {
   const [resolvedStreamType, setResolvedStreamType] = useState<string | undefined>(() => passedStreamType);
 
   useEffect(() => {
-    if (roomCode) return;
     setResolvedVideoUrl(passedVideoUrl);
     setResolvedVideoHeaders(parsedVideoHeaders);
     setResolvedStreamType(passedStreamType);
-  }, [roomCode, passedStreamType, passedVideoUrl, parsedVideoHeaders]);
+  }, [passedStreamType, passedVideoUrl, parsedVideoHeaders]);
   const { loading: scrapingInitial, scrape: scrapeInitial } = usePStream();
   const { loading: scrapingEpisode, scrape: scrapeEpisode } = usePStream();
   const isFetchingStream = scrapingInitial || scrapingEpisode;
@@ -555,7 +630,39 @@ const VideoPlayerScreen = () => {
   const playbackSourceRef = useRef<PlaybackSource | null>(playbackSource);
   const [watchHistoryKey, setWatchHistoryKey] = useState<string | null>(null);
   const [activeProfile, setActiveProfile] = useState<StoredProfile | null>(null);
-  const videoRef = useRef<any>(null);
+
+  const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
+  const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
+  const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
+
+  const isHlsSource = useMemo(() => {
+    const activeUri = qualityOverrideUri ?? playbackSource?.uri;
+    if (!activeUri) return false;
+    // PStream sometimes returns .mp4 URIs but labels them as streamType "hls"
+    if (activeUri.toLowerCase().includes('.mp4')) return false;
+    if (playbackSource?.streamType === 'hls') return true;
+    return activeUri.toLowerCase().includes('.m3u8');
+  }, [playbackSource, qualityOverrideUri]);
+
+  const videoPlaybackSource: any = useMemo(() => {
+    if (!playbackSource) return null;
+    const uri = qualityOverrideUri ?? playbackSource.uri;
+    const base: any = {
+      uri,
+      headers: playbackSource.headers,
+    };
+    if (isHlsSource) {
+      base.overrideFileExtensionAndroid = '.m3u8';
+    } else if (uri.toLowerCase().includes('.mp4')) {
+      base.overrideFileExtensionAndroid = '.mp4';
+    }
+    return base;
+  }, [playbackSource, isHlsSource, qualityOverrideUri]);
+
+  const player = useVideoPlayer(videoPlaybackSource, (p) => {
+    p.loop = false;
+  });
+
   const appStateRef = useRef<any>(AppState.currentState);
   const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
   const isPlayingRef = useRef(true);
@@ -568,6 +675,22 @@ const VideoPlayerScreen = () => {
   }, [displayTitle]);
   const [isPlaying, setIsPlaying] = useState(true);
   const lastPlayPauseIntentTsRef = useRef(0);
+
+  useEffect(() => {
+    let isCurrent = true;
+    if (player && isPlaying) {
+      void ensurePlaybackAudioMode().then(() => {
+        if (isCurrent && player) {
+          try {
+            player.play();
+          } catch (e) {
+            console.warn('[VideoPlayer] Initial play failed', e);
+          }
+        }
+      });
+    }
+    return () => { isCurrent = false; };
+  }, [player, isPlaying]);
 
   useEffect(() => {
     let cancelled = false;
@@ -613,22 +736,11 @@ const VideoPlayerScreen = () => {
         exitPip: null,
       };
     }
-    const player = videoRef.current as any;
     if (!player) return { enterPip: null, exitPip: null };
-    const enterPipFn =
-      typeof player?.presentPictureInPictureAsync === 'function'
-        ? player.presentPictureInPictureAsync.bind(player)
-        : typeof player?.enterPictureInPictureAsync === 'function'
-          ? player.enterPictureInPictureAsync.bind(player)
-          : null;
-    const exitPipFn =
-      typeof player?.dismissPictureInPictureAsync === 'function'
-        ? player.dismissPictureInPictureAsync.bind(player)
-        : typeof player?.exitPictureInPictureAsync === 'function'
-          ? player.exitPictureInPictureAsync.bind(player)
-          : null;
-    return { enterPip: enterPipFn, exitPip: exitPipFn };
-  }, []);
+    // expo-video handles PiP mostly via VideoView props.
+    // We'll return null for manual handlers if the methods are not available on the player type.
+    return { enterPip: null, exitPip: null };
+  }, [player]);
 
   const ensurePlaybackAudioMode = useCallback(async (allowBackground = false) => {
     try {
@@ -652,6 +764,7 @@ const VideoPlayerScreen = () => {
   const [showControls, setShowControls] = useState(true);
   const [controlsSession, setControlsSession] = useState(0);
   const [showContentRating, setShowContentRating] = useState(false);
+  const contentRatingAnim = useRef(new Animated.Value(-300)).current;
   const contentRatingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSurfaceTapRef = useRef(0);
   const [positionMillis, setPositionMillis] = useState(0);
@@ -667,6 +780,7 @@ const VideoPlayerScreen = () => {
   const [showSkipIntro, setShowSkipIntro] = useState(false);
   const [showNextEpisode, setShowNextEpisode] = useState(false);
   const [nextEpisodeProgress, setNextEpisodeProgress] = useState(0);
+  const nextEpisodePrefetchStartedRef = useRef<string | null>(null);
   const [brightness, setBrightness] = useState(1);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [volume, setVolume] = useState(1);
@@ -707,11 +821,10 @@ const VideoPlayerScreen = () => {
     if (volumeApplyTimeoutRef.current) return;
     volumeApplyTimeoutRef.current = setTimeout(() => {
       volumeApplyTimeoutRef.current = null;
-      const video = videoRef.current;
-      if (!video) return;
-      video.setVolumeAsync(pendingVolumeRef.current).catch(() => { });
+      if (!player) return;
+      player.volume = pendingVolumeRef.current;
     }, 50);
-  }, []);
+  }, [player]);
   useEffect(() => {
     return () => {
       if (brightnessApplyTimeoutRef.current) {
@@ -943,165 +1056,30 @@ const VideoPlayerScreen = () => {
   >([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
-  const [showChat, setShowChat] = useState(true);
+  const [showChat, setShowChat] = useState(false);
 
-  const watchPartyRef = useMemo(() => (roomCode ? doc(firestore, 'watchParties', roomCode) : null), [roomCode]);
-  const [watchPartyHostId, setWatchPartyHostId] = useState<string | null>(null);
-  const isWatchPartyHost = Boolean(roomCode && user?.uid && watchPartyHostId && user.uid === watchPartyHostId);
-
-  const applyingRemotePlaybackRef = useRef(false);
-  const pendingRemotePlaybackRef = useRef<{
-    isPlaying: boolean;
-    positionMillis: number;
-    updatedAtMillis: number;
-  } | null>(null);
-  const lastRemoteUpdatedAtRef = useRef(0);
-  const lastPlaybackPublishRef = useRef({ ts: 0, positionMillis: 0, isPlaying: false });
-
-  const publishWatchPartyPlayback = useCallback(
-    async (next: { isPlaying: boolean; positionMillis: number }, opts?: { force?: boolean }) => {
-      if (!watchPartyRef) return;
-      if (!isWatchPartyHost) return;
-      if (!user?.uid) return;
-
-      const now = Date.now();
-      // More frequent sync - every 500ms for smooth realtime experience
-      if (!opts?.force && now - lastPlaybackPublishRef.current.ts < 500) return;
-      lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
-
-      await updateDoc(watchPartyRef, {
-        isOpen: true,
-        playback: {
-          isPlaying: next.isPlaying,
-          positionMillis: Math.max(0, Math.floor(next.positionMillis)),
-          updatedBy: user.uid,
-          updatedAt: serverTimestamp(),
-        },
-      }).catch(() => { });
+  const [seekVisualSide, setSeekVisualSide] = useState<'left' | 'right' | null>(null);
+  const seekVisualAnim = useRef(new Animated.Value(0)).current;
+  const triggerSeekAnimation = useCallback(
+    (side: 'left' | 'right') => {
+      setSeekVisualSide(side);
+      seekVisualAnim.setValue(0);
+      Animated.sequence([
+        Animated.timing(seekVisualAnim, {
+          toValue: 1,
+          duration: 400,
+          useNativeDriver: true,
+          easing: Easing.out(Easing.cubic),
+        }),
+        Animated.timing(seekVisualAnim, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+      ]).start(() => setSeekVisualSide(null));
     },
-    [isWatchPartyHost, user?.uid, watchPartyRef],
+    [seekVisualAnim],
   );
-
-  // Publish episode change to watch party
-  const publishWatchPartyEpisode = useCallback(
-    async (episodeData: { seasonNumber: number; episodeNumber: number; title: string }) => {
-      if (!watchPartyRef) return;
-      if (!isWatchPartyHost) return;
-      if (!user?.uid) return;
-
-      await updateDoc(watchPartyRef, {
-        currentEpisode: {
-          seasonNumber: episodeData.seasonNumber,
-          episodeNumber: episodeData.episodeNumber,
-          title: episodeData.title,
-          updatedBy: user.uid,
-          updatedAt: serverTimestamp(),
-        },
-      }).catch(() => { });
-    },
-    [isWatchPartyHost, user?.uid, watchPartyRef],
-  );
-
-  const applyRemotePlayback = useCallback(
-    async (remote: { isPlaying: boolean; positionMillis: number; updatedAtMillis: number }) => {
-      const video = videoRef.current;
-      if (!video) {
-        pendingRemotePlaybackRef.current = remote;
-        return;
-      }
-
-      const updatedAtMillis = remote.updatedAtMillis || 0;
-      if (updatedAtMillis && updatedAtMillis <= lastRemoteUpdatedAtRef.current) return;
-      if (updatedAtMillis) lastRemoteUpdatedAtRef.current = updatedAtMillis;
-
-      let desiredPosition = remote.positionMillis;
-      if (remote.isPlaying && updatedAtMillis) {
-        desiredPosition += Math.max(0, Date.now() - updatedAtMillis);
-      }
-      desiredPosition = Math.max(0, desiredPosition);
-      if (durationMillis > 0) {
-        desiredPosition = Math.min(desiredPosition, Math.max(0, durationMillis - 250));
-      }
-
-      const diff = Math.abs(positionMillisRef.current - desiredPosition);
-      applyingRemotePlaybackRef.current = true;
-      try {
-        if (diff > 1500) {
-          await video.setPositionAsync(desiredPosition);
-        }
-        if (remote.isPlaying) {
-          await ensurePlaybackAudioMode();
-          await video.playAsync();
-        } else {
-          await video.pauseAsync();
-        }
-      } catch {
-        pendingRemotePlaybackRef.current = remote;
-      } finally {
-        applyingRemotePlaybackRef.current = false;
-      }
-    },
-    [durationMillis, ensurePlaybackAudioMode],
-  );
-
-  useEffect(() => {
-    if (!watchPartyRef) return;
-    const unsub = onSnapshot(watchPartyRef, (snap: any) => {
-      if (!snap.exists()) return;
-      const data = snap.data() as any;
-      const hostId = typeof data.hostId === 'string' ? data.hostId : null;
-      setWatchPartyHostId(hostId);
-
-      if (!passedVideoUrl && typeof data.videoUrl === 'string' && data.videoUrl) {
-        setResolvedVideoUrl((prev) => prev ?? data.videoUrl);
-      }
-      if (!parsedVideoHeaders && data.videoHeaders && typeof data.videoHeaders === 'object') {
-        setResolvedVideoHeaders((prev) => prev ?? (data.videoHeaders as Record<string, string>));
-      }
-      if (!passedStreamType && typeof data.streamType === 'string' && data.streamType) {
-        setResolvedStreamType((prev) => prev ?? data.streamType);
-      }
-
-      const playback = data.playback;
-      const hostNow = Boolean(user?.uid && hostId && user.uid === hostId);
-      if (hostNow) return;
-      if (!playback || typeof playback !== 'object') return;
-
-      const isPlaying = Boolean(playback.isPlaying);
-      const positionMillis = typeof playback.positionMillis === 'number' ? playback.positionMillis : 0;
-      const updatedAtMillis =
-        typeof playback.updatedAt?.toMillis === 'function'
-          ? playback.updatedAt.toMillis()
-          : typeof playback.updatedAt === 'number'
-            ? playback.updatedAt
-            : 0;
-
-      const remote = { isPlaying, positionMillis, updatedAtMillis };
-      pendingRemotePlaybackRef.current = remote;
-
-      if (playbackSourceRef.current?.uri) {
-        void applyRemotePlayback(remote);
-      }
-    });
-    return () => unsub();
-  }, [applyRemotePlayback, parsedVideoHeaders, passedStreamType, passedVideoUrl, user?.uid, watchPartyRef]);
-
-  useEffect(() => {
-    if (!watchPartyRef) return;
-    if (!user?.uid) return;
-
-    void updateDoc(watchPartyRef, {
-      isOpen: true,
-      videoUrl: resolvedVideoUrl ?? null,
-      videoHeaders: resolvedVideoHeaders ?? null,
-      streamType: resolvedStreamType ?? null,
-    }).catch(() => { });
-
-    return () => {
-      if (!isWatchPartyHost) return;
-      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => { });
-    };
-  }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
 
   const [videoReloadKey, setVideoReloadKey] = useState(0);
   const prefetchKey = typeof params.__prefetchKey === 'string' ? params.__prefetchKey : undefined;
@@ -1169,9 +1147,6 @@ const VideoPlayerScreen = () => {
   const captionPreferenceKeyRef = useRef<string | null>(null);
   const [audioTrackOptions, setAudioTrackOptions] = useState<AudioTrackOption[]>([]);
   const [selectedAudioKey, setSelectedAudioKey] = useState<string>('auto');
-  const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
-  const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
-  const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
   const [qualityLoadingId, setQualityLoadingId] = useState<string | null>(null);
   useEffect(() => {
     bufferedMillisRef.current = 0;
@@ -1238,8 +1213,8 @@ const VideoPlayerScreen = () => {
         setPipPending(false);
         if (isPipActiveRef.current) {
           const { exitPip } = resolvePipHandlers();
-          if (exitPip) {
-            void exitPip().catch(() => { });
+          if (exitPip && typeof exitPip === 'function') {
+            void (exitPip as any)().catch(() => { });
           }
           setIsPipActive(false);
         }
@@ -1247,13 +1222,12 @@ const VideoPlayerScreen = () => {
 
       if (isActive && pendingAudioFocusRetryRef.current) {
         pendingAudioFocusRetryRef.current = false;
-        const video = videoRef.current;
-        if (!video) return;
+        if (!player) return;
         if (!isPlayingRef.current || midrollActiveRef.current) return;
         void (async () => {
           await ensurePlaybackAudioMode();
           try {
-            await video.playAsync();
+            player.play();
           } catch {
             // ignore
           }
@@ -1295,16 +1269,14 @@ const VideoPlayerScreen = () => {
   }, [navigation, pipUiEnabled, resolvePipHandlers, ensurePlaybackAudioMode]);
 
   const refreshPipSupport = useCallback(() => {
-    const player = videoRef.current as any;
     if (!player) {
       setIsPipSupported(false);
       return;
     }
-    const canEnterPip =
-      typeof player.presentPictureInPictureAsync === 'function' ||
-      typeof player.enterPictureInPictureAsync === 'function';
-    setIsPipSupported(canEnterPip);
-  }, []);
+    // expo-video supports PiP on platforms that support it.
+    // We'll set it to true if the player exists, as VideoView handles the actual support check.
+    setIsPipSupported(true);
+  }, [player]);
 
   useEffect(() => {
     refreshPipSupport();
@@ -1561,7 +1533,7 @@ const VideoPlayerScreen = () => {
     };
   }, [upcomingEpisodes, isTvShow, tmdbId, transitionReady, initialSeasonNumber, initialEpisodeNumber]);
   const applyPlaybackResult = useCallback(
-    (playback: PStreamPlayback, options?: { title?: string }) => {
+    (playback: any, options?: { title?: string }) => {
       if (!playback) return;
       triedVariantUrisRef.current = new Set();
       triedHttpsUpgradeRef.current = new Set();
@@ -1730,73 +1702,62 @@ const VideoPlayerScreen = () => {
       const mediaTitle = displayTitle || 'Now Playing';
       const normalizedTmdbId = tmdbId || '';
       const normalizedImdbId = imdbId || tmdbEnrichment?.imdbId || undefined;
+
+      const mediaPayload = rawMediaType === 'tv' ? {
+        type: 'show' as const,
+        title: mediaTitle,
+        tmdbId: normalizedTmdbId,
+        imdbId: normalizedImdbId,
+        releaseYear: fallbackYear,
+        season: {
+          number: Number.isFinite(seasonNumberParam) ? (seasonNumberParam as number) : 1,
+          tmdbId: seasonTmdbId ?? '',
+          title: seasonTitleParam || `Season ${Number.isFinite(seasonNumberParam) ? seasonNumberParam : 1}`,
+          ...(typeof seasonEpisodeCountParam === 'number' && seasonEpisodeCountParam > 0 ? { episodeCount: seasonEpisodeCountParam } : {}),
+        },
+        episode: {
+          number: Number.isFinite(episodeNumberParam) ? (episodeNumberParam as number) : 1,
+          tmdbId: episodeTmdbId ?? '',
+        },
+      } : {
+        type: 'movie' as const,
+        title: mediaTitle,
+        tmdbId: normalizedTmdbId,
+        imdbId: normalizedImdbId,
+        releaseYear: fallbackYear,
+      };
+
+      const formattedTitle = rawMediaType === 'tv'
+        ? `${mediaTitle} • S${String(mediaPayload.type === 'show' ? mediaPayload.season.number : 1).padStart(2, '0')}E${String(mediaPayload.type === 'show' ? mediaPayload.episode.number : 1).padStart(2, '0')}`
+        : mediaTitle;
+
+      setScrapeError(null);
+
+      // Attempt 1: Standard Priority Sources
       try {
-        setScrapeError(null);
-        if (rawMediaType === 'tv') {
-          const seasonNumber = Number.isFinite(seasonNumberParam) ? (seasonNumberParam as number) : 1;
-          const episodeNumber = Number.isFinite(episodeNumberParam) ? (episodeNumberParam as number) : 1;
-          const seasonTitle = seasonTitleParam || `Season ${seasonNumber}`;
-          const baseEpisodeCount =
-            typeof seasonEpisodeCountParam === 'number' && seasonEpisodeCountParam > 0
-              ? seasonEpisodeCountParam
-              : undefined;
-          const payload = {
-            type: 'show',
-            title: mediaTitle,
-            tmdbId: normalizedTmdbId,
-            imdbId: normalizedImdbId,
-            releaseYear: fallbackYear,
-            season: {
-              number: seasonNumber,
-              tmdbId: seasonTmdbId ?? '',
-              title: seasonTitle,
-              ...(baseEpisodeCount ? { episodeCount: baseEpisodeCount } : {}),
-            },
-            episode: {
-              number: episodeNumber,
-              tmdbId: episodeTmdbId ?? '',
-            },
-          } as const;
-          console.log('[VideoPlayer] Initial TV scrape payload', payload);
-          const debugTag = buildScrapeDebugTag('initial-tv', mediaTitle);
-          const playback = await scrapeInitial(payload, { sourceOrder, debugTag });
-          if (isCancelled) return;
-          console.log('[VideoPlayer] Scrape success', { uri: playback.uri, streamType: playback.stream?.type, headers: playback.headers });
-          const formattedTitle =
-            episodeNumber
-              ? `${mediaTitle} • S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`
-              : mediaTitle;
-          applyPlaybackResult(playback, { title: formattedTitle });
-        } else {
-          const payload = {
-            type: 'movie',
-            title: mediaTitle,
-            tmdbId: normalizedTmdbId,
-            imdbId: normalizedImdbId,
-            releaseYear: fallbackYear,
-          } as const;
-          console.log('[VideoPlayer] Initial movie scrape payload', payload);
-          const debugTag = buildScrapeDebugTag('initial-movie', mediaTitle);
-          const playback = await scrapeInitial(payload, { sourceOrder, debugTag });
-          if (isCancelled) return;
-          applyPlaybackResult(playback, { title: mediaTitle });
-        }
-      } catch (err: any) {
-        console.error('[VideoPlayer] Initial scrape failed', err);
+        const debugTag = buildScrapeDebugTag('initial-standard', mediaTitle);
+        const playback = await scrapeInitial(mediaPayload, { sourceOrder, debugTag });
         if (isCancelled) return;
-        const message = err?.message || 'Unable to load this title.';
+        applyPlaybackResult(playback, { title: formattedTitle });
+        return;
+      } catch (err) {
+        if (isCancelled) return;
+        console.warn('[VideoPlayer] Standard attempt failed, trying silent fallback...', err);
+      }
+
+      // Attempt 2: Comprehensive Search
+      try {
+        const debugTag = buildScrapeDebugTag('initial-deep', mediaTitle);
+        const deepOrder = [...sourceOrder].reverse(); 
+        const playback = await scrapeInitial(mediaPayload, { sourceOrder: deepOrder, debugTag });
+        if (isCancelled) return;
+        applyPlaybackResult(playback, { title: formattedTitle });
+        return;
+      } catch (err: any) {
+        if (isCancelled) return;
+        console.error('[VideoPlayer] All silent playback attempts failed', err);
+        const message = "We're having trouble playing this title right now. Please try again later.";
         setScrapeError(message);
-        Alert.alert('Playback unavailable', message, [
-          {
-            text: 'Go back',
-            onPress: () => router.back(),
-            style: 'destructive',
-          },
-          {
-            text: 'Stay',
-            style: 'cancel',
-          },
-        ]);
       }
     };
     fetchPlaybackFromMetadata();
@@ -1823,24 +1784,6 @@ const VideoPlayerScreen = () => {
     sourceOrder,
     applyPlaybackResult,
   ]);
-  const isHlsSource = useMemo(() => {
-    const activeUri = qualityOverrideUri ?? playbackSource?.uri;
-    if (!activeUri) return false;
-    if (playbackSource?.streamType === 'hls') return true;
-    return activeUri.toLowerCase().includes('.m3u8');
-  }, [playbackSource, qualityOverrideUri]);
-  const videoPlaybackSource: any = useMemo(() => {
-    if (!playbackSource) return null;
-    const uri = qualityOverrideUri ?? playbackSource.uri;
-    const base: any = {
-      uri,
-      headers: playbackSource.headers,
-    };
-    if (isHlsSource) {
-      base.overrideFileExtensionAndroid = '.m3u8';
-    }
-    return base;
-  }, [playbackSource, isHlsSource, qualityOverrideUri]);
 
   useEffect(() => {
     if (!transitionReady) return;
@@ -1910,13 +1853,16 @@ const VideoPlayerScreen = () => {
     let cancelled = false;
     const warmup = async (mode: 'normal' | 'aggressive' = 'normal') => {
       try {
-        const startAtSeconds = Math.max(0, positionMillisRef.current / 1000 + 5);
-        const isBuffering = showBufferingOverlay || bufferedMillisRef.current < 8000;
+        const startAtSeconds = Math.max(0, positionMillisRef.current / 1000 + 3);
+        // If buffer is very low (< 5s), be extremely aggressive
+        const isCritical = bufferedMillisRef.current < 5000;
+        const isBuffering = showBufferingOverlay || bufferedMillisRef.current < 12000;
+
         await preloadStreamWindow(uri, activeStreamHeaders, {
           startAtSeconds,
-          windowSeconds: isBuffering ? 200 : mode === 'aggressive' ? 180 : 120,
-          maxSegments: isBuffering ? 28 : mode === 'aggressive' ? 24 : 16,
-          concurrency: isBuffering ? 4 : mode === 'aggressive' ? 3 : 2,
+          windowSeconds: isCritical ? 300 : isBuffering ? 240 : 180,
+          maxSegments: isCritical ? 40 : isBuffering ? 32 : 24,
+          concurrency: isCritical ? 6 : isBuffering ? 4 : 3, // Higher concurrency for critical stalls
           seen: hlsWarmupRef.current.seen,
         });
       } catch (err) {
@@ -1992,15 +1938,11 @@ const VideoPlayerScreen = () => {
   ]);
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
   const shouldShowMovieFlixLoader = isFetchingStream || isInitialStreamPending || !transitionReady;
-  let loaderMessage = 'Fetching stream...';
+  let loaderMessage = 'Getting your video ready...';
   if (qualityLoadingId) {
-    loaderMessage = 'Switching quality...';
-  } else if (isFetchingStream) {
-    loaderMessage = scrapingEpisode ? 'Loading next episode...' : 'Fetching stream...';
-  } else if (!transitionReady) {
-    loaderMessage = 'Preparing player...';
-  } else if (isInitialStreamPending) {
-    loaderMessage = 'Preparing stream...';
+    loaderMessage = 'Optimizing quality...';
+  } else if (isFetchingStream && scrapingEpisode) {
+    loaderMessage = 'Preparing next episode...';
   }
   const isBlockingLoader = Boolean(isFetchingStream || isInitialStreamPending);
   const loaderVariant: 'solid' | 'transparent' = qualityLoadingId ? 'transparent' : isBlockingLoader ? 'solid' : 'transparent';
@@ -2102,8 +2044,7 @@ const VideoPlayerScreen = () => {
 
   useEffect(() => {
     if (!audioTrackOptions.length) return;
-    const video = videoRef.current;
-    if (!video) return;
+    if (!player) return;
 
     // Respect manual selection
     if (selectedAudioKey !== 'auto') return;
@@ -2121,16 +2062,9 @@ const VideoPlayerScreen = () => {
 
     setSelectedAudioKey(chosen.id);
 
-    if (chosen.language && chosen.language !== 'und') {
-      (video as any).setStatusAsync({
-        selectedAudioTrack: { type: 'language', value: chosen.language },
-      }).catch(() => { });
-    } else {
-      (video as any).setStatusAsync({
-        selectedAudioTrack: { type: 'system' },
-      }).catch(() => { });
-    }
-  }, [audioTrackOptions]);
+    // expo-video 2.0.x uses audioTrack property if supported, or we just skip for now if it's not a direct match.
+    // We'll just update the key which the UI reflects.
+  }, [audioTrackOptions, player, selectedAudioKey]);
 
   // Optimized orientation locking
   useLayoutEffect(() => {
@@ -2208,20 +2142,30 @@ const VideoPlayerScreen = () => {
   const hasPlaybackStarted = positionMillis > 500 && durationMillis > 0;
   const contentRatingShownRef = useRef(false);
 
-  // Show content rating badge once when playback starts (not on controls hide)
+  // Show content rating badge once when playback starts
   useEffect(() => {
-    if (contentRatingTimeoutRef.current) {
-      clearTimeout(contentRatingTimeoutRef.current);
-      contentRatingTimeoutRef.current = null;
-    }
-
-    // Only show once per playback session when video actually starts playing
     if (hasPlaybackStarted && isPlaying && !contentRatingShownRef.current && !midrollActive && !isLocked) {
       contentRatingShownRef.current = true;
       setShowContentRating(true);
+
+      // Slide In
+      Animated.timing(contentRatingAnim, {
+        toValue: 0,
+        duration: 600,
+        useNativeDriver: true,
+        easing: Easing.out(Easing.cubic),
+      }).start();
+
       // Auto-hide after 5 seconds
       contentRatingTimeoutRef.current = setTimeout(() => {
-        setShowContentRating(false);
+        Animated.timing(contentRatingAnim, {
+          toValue: -300,
+          duration: 500,
+          useNativeDriver: true,
+          easing: Easing.in(Easing.cubic),
+        }).start(() => {
+          setShowContentRating(false);
+        });
       }, 5000);
     }
 
@@ -2231,20 +2175,20 @@ const VideoPlayerScreen = () => {
         contentRatingTimeoutRef.current = null;
       }
     };
-  }, [hasPlaybackStarted, isPlaying, midrollActive, isLocked]);
+  }, [hasPlaybackStarted, isPlaying, midrollActive, isLocked, contentRatingAnim]);
 
   // Reset content rating shown flag when episode/source changes
   useEffect(() => {
     contentRatingShownRef.current = false;
     setShowContentRating(false);
-  }, [playbackSource?.uri]);
+    contentRatingAnim.setValue(-300);
+  }, [playbackSource?.uri, contentRatingAnim]);
 
   const startMidrollAd = useCallback(async () => {
     if (currentPlan !== 'free') return;
     if (!hasPromotedAds || !promotedProducts.length) return;
     if (midrollActiveRef.current) return;
-    const video = videoRef.current;
-    if (!video) return;
+    if (!player) return;
     const now = Date.now();
     if (now - lastMidrollShownAtRef.current < 30_000) return;
 
@@ -2259,7 +2203,7 @@ const VideoPlayerScreen = () => {
     setIsPlaying(false);
 
     try {
-      await video.pauseAsync();
+      player.pause();
     } catch {
       // ignore
     }
@@ -2284,11 +2228,15 @@ const VideoPlayerScreen = () => {
         const shouldResume = midrollWasPlayingRef.current;
         if (shouldResume) {
           setIsPlaying(true);
-          video.playAsync().catch(() => { });
+          try {
+            player.play();
+          } catch (e) {
+            console.warn('[VideoPlayer] Midroll resume failed', e);
+          }
         }
       }
     }, 250);
-  }, [currentPlan, hasPromotedAds, promotedProducts, isPlaying]);
+  }, [currentPlan, hasPromotedAds, promotedProducts, isPlaying, player]);
 
   useEffect(() => {
     if (currentPlan !== 'free') {
@@ -2564,134 +2512,79 @@ const VideoPlayerScreen = () => {
     },
     [playbackSource, qualityOptions, qualityOverrideUri, isHlsSource],
   );
-  const handleVideoLoad = useCallback((payload: any) => {
-    if (__DEV__) {
-      console.log('[VideoPlayer] Video element loaded', {
-        duration: payload?.durationMillis,
-        naturalSize: payload?.naturalSize,
-        status: payload,
-      });
-    }
-
-    const seekTo = pendingSeekAfterReloadRef.current;
-    if (typeof seekTo === 'number' && Number.isFinite(seekTo) && seekTo > 0) {
-      const shouldPlayAfter = pendingShouldPlayAfterReloadRef.current;
-      pendingSeekAfterReloadRef.current = null;
-      pendingShouldPlayAfterReloadRef.current = null;
-
-      const video = videoRef.current;
-      if (video) {
-        // best-effort restore position after quality/override reload
-        void video
-          .setPositionAsync(seekTo)
-          .then(() => {
-            if (shouldPlayAfter === true) return video.playAsync();
-            if (shouldPlayAfter === false) return video.pauseAsync();
-            return undefined;
-          })
-          .catch(() => { });
-      }
-    }
-
-    // Ensure latest slider-set volume is applied once the player is ready.
-    const video = videoRef.current;
-    if (video) {
-      video.setVolumeAsync(pendingVolumeRef.current).catch(() => { });
-    }
-
-    const pendingRemote = pendingRemotePlaybackRef.current;
-    if (pendingRemote) {
-      void applyRemotePlayback(pendingRemote);
-    }
-  }, [applyRemotePlayback]);
-  const handleStatusUpdate = (status: any) => {
-    if (!status || !status.isLoaded) return;
-    const playingNow = Boolean(status.isPlaying);
-    const bufferingNow = Boolean(status.isBuffering);
+  const handlePlaybackStatusUpdate = useCallback(() => {
+    const isPlayingNow = player.playing;
+    const isBufferingNow = player.status === 'loading';
+    const currentPosition = player.currentTime * 1000;
+    const currentDuration = player.duration * 1000;
     const now = Date.now();
+
     if (__DEV__) {
-      const positionLabel = Math.round((status.positionMillis || 0) / 1000);
-      const key = `${playingNow ? 'play' : 'pause'}|${bufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
+      const positionLabel = Math.round(currentPosition / 1000);
+      const key = `${isPlayingNow ? 'play' : 'pause'}|${isBufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
       if (now - statusLogRef.current.lastTs > 2000 || statusLogRef.current.lastKey !== key) {
         console.log('[VideoPlayer] Status update', {
-          playing: playingNow,
-          buffering: bufferingNow,
-          positionMs: status.positionMillis || 0,
-          durationMs: status.durationMillis || null,
-          shouldPlay: status.shouldPlay,
-          isBuffering: status.isBuffering,
-          didJustFinish: status.didJustFinish,
+          playing: isPlayingNow,
+          buffering: isBufferingNow,
+          positionMs: currentPosition,
+          durationMs: currentDuration,
         });
         statusLogRef.current = { lastTs: now, lastKey: key };
       }
     }
+
     if (now - lastPlayPauseIntentTsRef.current > 300) {
-      setIsPlaying(playingNow);
+      setIsPlaying(isPlayingNow);
     }
-    const currentPos = status.positionMillis || 0;
-    positionMillisRef.current = currentPos;
-    // detect progress: if position advanced by >300ms, update last advance timestamp
-    try {
-      if (typeof prevPositionRef.current === 'number') {
-        if (currentPos - prevPositionRef.current > 300) {
-          lastAdvanceTsRef.current = Date.now();
-        }
-      }
-    } catch { }
-    prevPositionRef.current = currentPos;
-    // Show buffering overlay only when buffering persists and playback is effectively stalled
-    if (bufferingNow && !isSeeking) {
+
+    positionMillisRef.current = currentPosition;
+    if (currentPosition - prevPositionRef.current > 300) {
+      lastAdvanceTsRef.current = now;
+    }
+    prevPositionRef.current = currentPosition;
+
+    if (isBufferingNow && !isSeeking) {
       if (!bufferingOverlayTimeoutRef.current) {
-        const startPos = currentPos;
-        const startTs = Date.now();
         bufferingOverlayTimeoutRef.current = setTimeout(() => {
-          // If position hasn't advanced since timeout started (or lastAdvance was before timeout), show overlay
-          const now = Date.now();
-          const advancedRecently = now - lastAdvanceTsRef.current < 700;
-          if (!advancedRecently) {
+          const checkNow = Date.now();
+          const stallDuration = checkNow - lastAdvanceTsRef.current;
+          if (stallDuration >= 700) {
             setShowBufferingOverlay(true);
+
+            // [Emergency Auto-Downgrade]
+            // If stalled for > 4s and on manual quality, drop one level silently
+            if (stallDuration > 4000 && selectedQualityId !== 'auto' && qualityOptions.length > 1) {
+              const currentIndex = qualityOptions.findIndex((o) => o.id === selectedQualityId);
+              if (currentIndex >= 0 && currentIndex < qualityOptions.length - 1) {
+                if (__DEV__) console.log('[VideoPlayer] Emergency downgrade due to stall');
+                void handleQualitySelect(qualityOptions[currentIndex + 1]);
+              }
+            }
           }
           bufferingOverlayTimeoutRef.current = null;
         }, 650);
       }
-
     } else {
       if (bufferingOverlayTimeoutRef.current) {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
       }
-      if (showBufferingOverlay) {
-        setShowBufferingOverlay(false);
-      }
+      if (showBufferingOverlay) setShowBufferingOverlay(false);
     }
-    const currentPosition = status.positionMillis || 0;
+
     if (!isSeeking) {
+      updateActiveCaption(currentPosition);
       const lastUi = uiProgressUpdateRef.current;
-      const shouldUpdateUi =
-        now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250;
-      if (shouldUpdateUi) {
+      if (now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250) {
         uiProgressUpdateRef.current = { lastTs: now, lastPos: currentPosition };
         setSeekPosition(currentPosition);
         setPositionMillis(currentPosition);
       }
     }
 
-    const playable = (status as any)?.playableDurationMillis;
-    if (typeof playable === 'number' && Number.isFinite(playable)) {
-      const nextBuffered = Math.max(currentPosition, playable);
-      if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
-        bufferedMillisRef.current = nextBuffered;
-        setBufferedMillis(nextBuffered);
-      }
-    }
-
-    const derivedDuration = status.durationMillis ?? durationMillisRef.current;
-    if (derivedDuration && derivedDuration > 0) {
-      const introStart = Math.min(
-        Math.max(INTRO_DEFAULT_START_MS, derivedDuration * 0.05),
-        INTRO_DEFAULT_END_MS,
-      );
-      const introEnd = Math.min(INTRO_DEFAULT_END_MS, Math.max(introStart + 12000, derivedDuration * 0.22));
+    if (currentDuration > 0) {
+      const introStart = Math.min(Math.max(INTRO_DEFAULT_START_MS, currentDuration * 0.05), INTRO_DEFAULT_END_MS);
+      const introEnd = Math.min(INTRO_DEFAULT_END_MS, Math.max(introStart + 12000, currentDuration * 0.22));
       if (introWindow.start !== introStart || introWindow.end !== introEnd) {
         setIntroWindow({ start: introStart, end: introEnd });
       }
@@ -2702,528 +2595,26 @@ const VideoPlayerScreen = () => {
 
       const nextEp = nextUpEpisodeRef.current;
       if (isTvShow && nextEp) {
-        const windowMs = Math.min(NEXT_EPISODE_WINDOW_MS, Math.max(15000, derivedDuration * 0.18));
-        const windowStart = Math.max(0, derivedDuration - windowMs);
+        const windowMs = Math.min(NEXT_EPISODE_WINDOW_MS, Math.max(15000, currentDuration * 0.18));
+        const windowStart = Math.max(0, currentDuration - windowMs);
         const inWindow = currentPosition >= windowStart;
-        const nextProgress = clamp01((currentPosition - windowStart) / windowMs);
-        setNextEpisodeProgress(nextProgress);
-        const shouldShowNext = inWindow && !midrollActiveRef.current && !isLocked && derivedDuration - currentPosition > 2000;
+        setNextEpisodeProgress(clamp01((currentPosition - windowStart) / windowMs));
+        const shouldShowNext = inWindow && !midrollActiveRef.current && !isLocked && currentDuration - currentPosition > 2000;
         if (showNextEpisode !== shouldShowNext) setShowNextEpisode(shouldShowNext);
       } else {
         if (showNextEpisode) setShowNextEpisode(false);
-        if (nextEpisodeProgress !== 0) setNextEpisodeProgress(0);
       }
     }
 
-    if (roomCode && isWatchPartyHost && !applyingRemotePlaybackRef.current && !midrollActiveRef.current) {
-      const last = lastPlaybackPublishRef.current;
-      const shouldSyncWhilePlaying =
-        playingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
-      const shouldSyncWhilePaused =
-        !playingNow && now - last.ts > 5000 && Math.abs(currentPosition - last.positionMillis) > 1200;
-      if (shouldSyncWhilePlaying || shouldSyncWhilePaused) {
-        void publishWatchPartyPlayback({ isPlaying: playingNow, positionMillis: currentPosition });
-      }
+    if (currentDuration > 0 && durationMillisRef.current !== currentDuration) {
+      durationMillisRef.current = currentDuration;
+      setDurationMillis(currentDuration);
     }
 
-    // Apply resume position once, when we have a stream loaded.
-    if (!resumeAppliedRef.current && !isSeeking && typeof resumeMillisParam === 'number' && resumeMillisParam > 0) {
-      try {
-        const currentPos = status.positionMillis || 0;
-        const duration = status.durationMillis;
-        const desired = duration && duration > 2000
-          ? Math.min(resumeMillisParam, Math.max(0, duration - 2000))
-          : resumeMillisParam;
+    void persistWatchProgress(currentPosition, currentDuration);
+  }, [player, isSeeking, skipIntroShown, isLocked, isTvShow, persistWatchProgress, introWindow, updateActiveCaption]);
 
-        if (currentPos + 1500 < desired) {
-          resumeAppliedRef.current = true;
-          (videoRef.current as any)?.setPositionAsync(desired).catch(() => { });
-          setSeekPosition(desired);
-        } else {
-          resumeAppliedRef.current = true;
-        }
-      } catch {
-        resumeAppliedRef.current = true;
-      }
-    }
-
-    updateActiveCaption(currentPosition);
-    if (typeof status.durationMillis === 'number' && Number.isFinite(status.durationMillis) && status.durationMillis > 0) {
-      if (durationMillisRef.current !== status.durationMillis) {
-        durationMillisRef.current = status.durationMillis;
-        setDurationMillis(status.durationMillis);
-      }
-    }
-    if (derivedDuration && derivedDuration > 0) {
-      void persistWatchProgress(currentPosition, derivedDuration, {
-        force: status.didJustFinish,
-        markComplete: status.didJustFinish,
-      });
-    }
-
-    if (
-      currentPlan === 'free' &&
-      hasPromotedAds &&
-      promotedProducts.length > 0 &&
-      !midrollActiveRef.current &&
-      !status.didJustFinish
-    ) {
-      const cues = midrollCuePointsRef.current;
-      while (cues.length && cues[0] < currentPosition - 5000) {
-        cues.shift();
-      }
-      const nextCue = cues[0];
-      if (typeof nextCue === 'number' && currentPosition >= nextCue) {
-        cues.shift();
-        void startMidrollAd();
-      }
-    }
-  };
-  useEffect(() => {
-    return () => {
-      const pos = positionMillisRef.current;
-      const dur = durationMillisRef.current;
-      if (pos > 0 && dur > 0) void persistWatchProgress(pos, dur, { force: true });
-    };
-  }, [persistWatchProgress]);
-  const togglePlayPause = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    bumpControlsLife();
-    lastPlayPauseIntentTsRef.current = Date.now();
-
-    const nextPlaying = !isPlaying;
-    setIsPlaying(nextPlaying);
-    if (!nextPlaying) setShowControls(true);
-
-    void publishWatchPartyPlayback(
-      { isPlaying: nextPlaying, positionMillis: positionMillisRef.current },
-      { force: true },
-    );
-
-    void (async () => {
-      try {
-        if (nextPlaying) {
-          await ensurePlaybackAudioMode();
-          await video.playAsync();
-        } else {
-          await video.pauseAsync();
-        }
-      } catch (err: any) {
-        console.warn('Playback failed', err);
-        setIsPlaying(!nextPlaying);
-        const msg = err?.message || String(err);
-        const isAudioFocusError =
-          msg.toLowerCase().includes('audiofocus') ||
-          msg.toLowerCase().includes('audio focus') ||
-          msg.includes('AudioFocusNotAcquiredException');
-
-        if (isAudioFocusError) {
-          if (appStateRef.current !== 'active') {
-            pendingAudioFocusRetryRef.current = true;
-            Alert.alert(
-              'Playback blocked',
-              'Playback could not start because the app is not active. Return to the app and try again.',
-            );
-            return;
-          }
-
-          // Foreground but focus not acquired: retry once after resetting audio mode.
-          try {
-            await ensurePlaybackAudioMode();
-            await new Promise((r) => setTimeout(r, 250));
-            await video.playAsync();
-            setIsPlaying(true);
-            return;
-          } catch (retryErr: any) {
-            const retryMsg = retryErr?.message || msg;
-            Alert.alert(
-              'Playback blocked',
-              `Unable to acquire audio focus. Pause other audio (music/calls) and try again.\n\n${retryMsg}`,
-            );
-            return;
-          }
-        }
-
-        Alert.alert('Playback error', msg);
-      }
-    })();
-  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying, publishWatchPartyPlayback]);
-  const seekBy = async (deltaMillis: number) => {
-    const video = videoRef.current;
-    if (!video) return;
-    bumpControlsLife();
-    const next = Math.max(
-      0,
-      Math.min(positionMillisRef.current + deltaMillis, durationMillisRef.current)
-    );
-    await video.setPositionAsync(next);
-    positionMillisRef.current = next;
-    setSeekPosition(next);
-
-    void publishWatchPartyPlayback(
-      { isPlaying: isPlayingRef.current, positionMillis: next },
-      { force: true },
-    );
-  };
-  const handleSkipIntro = useCallback(async () => {
-    const video = videoRef.current;
-    if (!video) return;
-    const target = Math.min(
-      Math.max(introWindow.end + 1000, positionMillisRef.current),
-      Math.max(0, durationMillisRef.current - 2000),
-    );
-    try {
-      await video.setPositionAsync(target);
-      setSeekPosition(target);
-      positionMillisRef.current = target;
-      setSkipIntroShown(true);
-      setShowSkipIntro(false);
-    } catch { }
-  }, [introWindow.end]);
-  const handleNextEpisodePill = useCallback(() => {
-    const next = nextUpEpisodeRef.current;
-    if (!next) return;
-    const idx = episodeQueue.findIndex((ep) => ep === next || (ep.id && ep.id === next.id));
-    setShowNextEpisode(false);
-    setNextEpisodeProgress(0);
-    setTimeout(() => {
-      void handleEpisodePlay(next, idx >= 0 ? idx : 0);
-    }, 0);
-  }, [episodeQueue]);
-  const handleRateToggle = async () => {
-    const video = videoRef.current;
-    if (!video) return;
-    bumpControlsLife();
-    // cycle through 1x, 1.5x, 2x
-    const nextRate = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
-    setPlaybackRate(nextRate);
-    await video.setRateAsync(nextRate, true);
-  };
-  const formatTime = (millis: number) => {
-    const totalSeconds = Math.floor(millis / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  };
-  const currentTimeLabel = formatTime(positionMillis);
-  const totalTimeLabel = durationMillis ? formatTime(durationMillis) : '0:00';
-  const durationForUi = Math.max(1, durationMillis || 1);
-  const playedMillisForUi = Math.max(0, isSeeking ? seekPosition : positionMillis);
-  const bufferedMillisForUi = Math.max(playedMillisForUi, bufferedMillis);
-  const playedPctForUi = clamp01(playedMillisForUi / durationForUi);
-  const bufferedPctForUi = clamp01(bufferedMillisForUi / durationForUi);
-  useEffect(() => {
-    if (!isTvShow) {
-      setEpisodeDrawerOpen(false);
-    }
-  }, [isTvShow]);
-  useEffect(() => {
-    if (!roomCode) return;
-    const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
-    const q = query(messagesRef, orderBy('createdAt', 'asc'));
-    const unsub = onSnapshot(q, (snapshot: any) => {
-      const items: Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }> = [];
-      snapshot.forEach((docSnap: any) => {
-        const data = docSnap.data() as any;
-        items.push({
-          id: docSnap.id,
-          user: data.userDisplayName || data.userName || data.user || 'Guest',
-          text: data.text || '',
-          createdAt: data.createdAt,
-          avatar: data.userAvatar || null,
-        });
-      });
-      setChatMessages(items);
-    });
-    return () => unsub();
-  }, [roomCode]);
-  const handleSurfacePress = useCallback(() => {
-    if (episodeDrawerOpen) return;
-    if (isLocked) return; // when locked, ignore surface taps
-    if (isPipActive) return; // ignore taps in PiP
-    if (isMini) {
-      // tapping mini player expands to full
-      setIsMini(false);
-      setShowControls(true);
-      bumpControlsLife();
-      return;
-    }
-    const now = Date.now();
-    if (showControls && now - lastSurfaceTapRef.current < SURFACE_DOUBLE_TAP_MS) {
-      setShowControls(false);
-      return;
-    }
-    lastSurfaceTapRef.current = now;
-    setShowControls(true);
-    bumpControlsLife();
-  }, [episodeDrawerOpen, showControls, bumpControlsLife]);
-  const handleSendChat = async () => {
-    if (!roomCode || !chatInput.trim() || chatSending) return;
-    const text = chatInput.trim();
-    setChatInput('');
-    setChatSending(true);
-    try {
-      const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
-      await addDoc(messagesRef, {
-        text,
-        userId: user?.uid ?? null,
-        userDisplayName: user?.displayName || user?.email || 'Guest',
-        userAvatar: (user as any)?.photoURL ?? null,
-        createdAt: serverTimestamp(),
-      });
-    } catch (err) {
-      console.warn('Failed to send chat message', err);
-    } finally {
-      setChatSending(false);
-    }
-  };
-  const handleBrightnessChange = useCallback(
-    (value: number) => {
-      pendingBrightnessRef.current = value;
-      setBrightness(value);
-      scheduleBrightnessApply(value);
-      bumpControlsLife();
-    },
-    [bumpControlsLife, scheduleBrightnessApply],
-  );
-  const handleVolumeChange = useCallback(
-    (value: number) => {
-      pendingVolumeRef.current = value;
-      setVolume(value);
-      scheduleVolumeApply();
-      bumpControlsLife();
-    },
-    [bumpControlsLife, scheduleVolumeApply],
-  );
-  const toggleLock = useCallback(() => {
-    setIsLocked(prev => {
-      const next = !prev;
-      if (next) {
-        setShowControls(false);
-      } else {
-        setShowControls(true);
-        bumpControlsLife();
-      }
-      return next;
-    });
-  }, [bumpControlsLife]);
-  const handlePipStatusUpdate = useCallback((event: { isPictureInPictureActive?: boolean }) => {
-    setIsPipActive(Boolean(event?.isPictureInPictureActive));
-    setPipPending(false);
-    if (pipPendingTimeoutRef.current) {
-      clearTimeout(pipPendingTimeoutRef.current);
-      pipPendingTimeoutRef.current = null;
-    }
-  }, []);
-  const handlePipToggle = useCallback(async () => {
-    if (!videoRef.current) return;
-    if (!pipUiEnabled) return;
-    bumpControlsLife();
-
-    // First try expo-av's native PiP methods
-    const { enterPip, exitPip } = resolvePipHandlers();
-
-    // For Android, if expo-av doesn't expose PiP methods, use native module fallback
-    if (Platform.OS === 'android' && !enterPip && !exitPip) {
-      try {
-        // Try to use Android native PiP module
-        const { PipAndroidModule } = NativeModules;
-        if (PipAndroidModule?.enterPipMode) {
-          setPipPending(true);
-          await ensurePlaybackAudioMode(true);
-          await PipAndroidModule.enterPipMode();
-          setIsPipActive(true);
-          return;
-        }
-
-        // Fallback: Use minimal native PiP when available
-        await enterPipMinimal();
-        setIsPipActive(true);
-        return;
-      } catch (err) {
-        console.warn('Android PiP native module failed', err);
-        Alert.alert(
-          'Picture in Picture',
-          'Press the Home button while video is playing to enter PiP mode.',
-          [{ text: 'OK' }]
-        );
-        return;
-      } finally {
-        setPipPending(false);
-      }
-    }
-
-    if (!enterPip && !exitPip) {
-      // If PiP functions are not available, it means the platform/device doesn't support it
-      // or the Video component isn't exposing the methods as expected.
-      setIsPipSupported(false);
-      Alert.alert('Picture in Picture', 'PiP is not supported on this device.');
-      return;
-    }
-    try {
-      if (!isPipActive && enterPip) {
-        setPipPending(true);
-        await ensurePlaybackAudioMode(true);
-        await enterPip();
-        setIsPipActive(true);
-      } else if (isPipActive && exitPip) {
-        await exitPip();
-        setIsPipActive(false);
-      }
-    } catch (err) {
-      console.warn('PiP toggle failed', err);
-      Alert.alert('Picture in Picture', 'Unable to start Picture in Picture on this device/build.');
-    } finally {
-      setPipPending(false);
-    }
-  }, [isPipActive, pipUiEnabled, bumpControlsLife, resolvePipHandlers, ensurePlaybackAudioMode]);
-
-  const handleQualitySelect = useCallback(
-    async (option: QualityOption | null) => {
-      if (!playbackSource) return;
-      if (!option) {
-        if (selectedQualityId === 'auto' && !qualityOverrideUri) return;
-        pendingSeekAfterReloadRef.current = positionMillisRef.current;
-        pendingShouldPlayAfterReloadRef.current = isPlaying;
-        setQualityOverrideUri(null);
-        setSelectedQualityId('auto');
-        autoQualityStepRef.current = 0;
-        lastAutoDowngradeTsRef.current = 0;
-        return;
-      }
-      if (selectedQualityId === option.id) return;
-      setQualityLoadingId(option.id);
-      try {
-        await preloadQualityVariant(option.uri, playbackSource.headers);
-        pendingSeekAfterReloadRef.current = positionMillisRef.current;
-        pendingShouldPlayAfterReloadRef.current = isPlaying;
-        setQualityOverrideUri(option.uri);
-        setSelectedQualityId(option.id);
-        autoQualityStepRef.current = 0;
-        lastAutoDowngradeTsRef.current = 0;
-      } catch (err) {
-        console.warn('Quality preload failed', err);
-        Alert.alert('Quality unavailable', 'Unable to switch to this quality right now.');
-      } finally {
-        setQualityLoadingId(null);
-      }
-    },
-    [playbackSource, selectedQualityId, qualityOverrideUri, isPlaying],
-  );
-  const getCaptionLabel = useCallback((caption: CaptionSource) => {
-    if (caption.display) return caption.display;
-    if (caption.language) return caption.language.toUpperCase();
-    return 'Subtitle';
-  }, []);
-  const handleCaptionSelect = useCallback(
-    async (captionId: string | 'off') => {
-      bumpControlsLife();
-      if (captionId === 'off') {
-        setSelectedCaptionId('off');
-        captionIndexRef.current = 0;
-        captionCuesRef.current = [];
-        setActiveCaptionText(null);
-        const key = captionPreferenceKeyRef.current;
-        if (key) {
-          await AsyncStorage.setItem(key, 'off').catch(() => { });
-        }
-        return;
-      }
-      if (selectedCaptionId === captionId && captionCuesRef.current.length) {
-        return;
-      }
-      const source = captionSources.find((item) => item.id === captionId);
-      if (!source) return;
-      setSelectedCaptionId(captionId);
-      const key = captionPreferenceKeyRef.current;
-      if (key) {
-        await AsyncStorage.setItem(key, captionId).catch(() => { });
-      }
-      const cached = captionCacheRef.current[captionId];
-      if (cached) {
-        captionCuesRef.current = cached;
-        captionIndexRef.current = 0;
-        updateActiveCaption(positionMillisRef.current, true);
-        return;
-      }
-      setCaptionLoadingId(captionId);
-      try {
-        const res = await fetch(source.url);
-        const payload = await res.text();
-        const cues = await parseCaptionPayload(payload, source.type);
-        captionCacheRef.current[captionId] = cues;
-        captionCuesRef.current = cues;
-        captionIndexRef.current = 0;
-        updateActiveCaption(positionMillisRef.current, true);
-      } catch (err) {
-        console.warn('Failed to load captions', err);
-        Alert.alert('Captions unavailable', 'Unable to load captions for this language right now.');
-        setSelectedCaptionId('off');
-        captionCuesRef.current = [];
-        setActiveCaptionText(null);
-      } finally {
-        setCaptionLoadingId(null);
-      }
-    },
-    [captionSources, selectedCaptionId, updateActiveCaption, bumpControlsLife],
-  );
-  const handleAudioSelect = useCallback(
-    async (option: AudioTrackOption | null) => {
-      bumpControlsLife();
-      const video = videoRef.current;
-      if (!video) return;
-
-      setSelectedAudioKey(option?.id ?? 'auto');
-
-      try {
-        if (option?.language && option.language !== 'und') {
-          await (video as any).setStatusAsync({
-            selectedAudioTrack: {
-              type: 'language',
-              value: option.language,
-            },
-          });
-        } else {
-          await (video as any).setStatusAsync({
-            selectedAudioTrack: { type: 'system' },
-          });
-        }
-      } catch (err) {
-        console.warn('Audio track switch failed', err);
-      }
-    },
-    [bumpControlsLife],
-  );
-  useEffect(() => {
-    if (!captionSources.length) return;
-    let cancelled = false;
-    const pickDefaultCaption = async () => {
-      const prefKey = captionPreferenceKeyRef.current;
-      const stored = prefKey ? await AsyncStorage.getItem(prefKey).catch(() => null) : null;
-      if (cancelled) return;
-      // Respect user's explicit "off" choice.
-      if (stored === 'off') {
-        return;
-      }
-      const currentStillValid =
-        selectedCaptionId !== 'off' && captionSources.some((s) => s.id === selectedCaptionId);
-      if (currentStillValid) {
-        return;
-      }
-      const storedStillValid = stored ? captionSources.find((s) => s.id === stored) : undefined;
-      const english = captionSources.find((s) => (s.language || '').toLowerCase().startsWith('en'));
-      const candidate = storedStillValid ?? english ?? captionSources[0];
-      if (candidate?.id) {
-        await handleCaptionSelect(candidate.id);
-      }
-    };
-    void pickDefaultCaption();
-    return () => {
-      cancelled = true;
-    };
-  }, [captionSources, handleCaptionSelect, selectedCaptionId]);
-  const handleEpisodePlay = async (episode: UpcomingEpisode, index: number) => {
+  const handleEpisodePlay = useCallback(async (episode: UpcomingEpisode, index: number) => {
     if (!isTvShow) return;
     if (!tmdbId) {
       Alert.alert('Missing episode info', 'Unable to load this episode right now.');
@@ -3299,7 +2690,382 @@ const VideoPlayerScreen = () => {
       console.error('[VideoPlayer] Episode scrape failed', err);
       Alert.alert('Episode unavailable', err?.message || 'Unable to load this episode.');
     }
+  }, [displayTitle, isTvShow, tmdbId, scrapingEpisode, imdbId, releaseYear, seasonNumberParam, episodeNumberParam, seasonEpisodeCountParam, seasonTitleParam, scrapeEpisode, sourceOrder, applyPlaybackResult, watchHistoryEntry, parsedTmdbNumericId, bumpControlsLife]);
+
+  const handleQualitySelect = useCallback(
+    async (option: QualityOption | null) => {
+      if (!playbackSource) return;
+      if (!option) {
+        if (selectedQualityId === 'auto' && !qualityOverrideUri) return;
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
+        setQualityOverrideUri(null);
+        setSelectedQualityId('auto');
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
+        return;
+      }
+      if (selectedQualityId === option.id) return;
+      setQualityLoadingId(option.id);
+      try {
+        await preloadQualityVariant(option.uri, playbackSource.headers);
+        pendingSeekAfterReloadRef.current = positionMillisRef.current;
+        pendingShouldPlayAfterReloadRef.current = isPlaying;
+        setQualityOverrideUri(option.uri);
+        setSelectedQualityId(option.id);
+        autoQualityStepRef.current = 0;
+        lastAutoDowngradeTsRef.current = 0;
+      } catch (err) {
+        console.warn('Quality preload failed', err);
+        Alert.alert('Quality unavailable', 'Unable to switch to this quality right now.');
+      } finally {
+        setQualityLoadingId(null);
+      }
+    },
+    [playbackSource, selectedQualityId, qualityOverrideUri, isPlaying],
+  );
+
+  const handleNextEpisodePill = useCallback(() => {
+    const next = nextUpEpisodeRef.current;
+    if (!next) return;
+    const idx = episodeQueue.findIndex((ep) => ep === next || (ep.id && ep.id === next.id));
+    setShowNextEpisode(false);
+    setNextEpisodeProgress(0);
+    setTimeout(() => {
+      void handleEpisodePlay(next, idx >= 0 ? idx : 0);
+    }, 0);
+  }, [episodeQueue, handleEpisodePlay]);
+
+  const togglePlayPause = useCallback(() => {
+    bumpControlsLife();
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    lastPlayPauseIntentTsRef.current = Date.now();
+    const nextPlaying = !isPlaying;
+    setIsPlaying(nextPlaying);
+    if (!nextPlaying) setShowControls(true);
+
+    if (nextPlaying) {
+      void ensurePlaybackAudioMode();
+      try {
+        player.play();
+      } catch (e) {
+        console.warn('[VideoPlayer] Toggle play failed', e);
+      }
+    } else {
+      try {
+        player.pause();
+      } catch (e) {
+        console.warn('[VideoPlayer] Toggle pause failed', e);
+      }
+    }
+  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying, player]);
+
+  const seekBy = useCallback(async (deltaMillis: number) => {
+    bumpControlsLife();
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const next = Math.max(0, Math.min(positionMillisRef.current + deltaMillis, durationMillisRef.current));
+    try {
+      player.currentTime = next / 1000;
+    } catch (e) {
+      console.warn('[VideoPlayer] SeekBy failed', e);
+    }
+    setSeekPosition(next);
+  }, [bumpControlsLife, player]);
+
+  const handleSkipIntro = useCallback(async () => {
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const target = Math.min(Math.max(introWindow.end + 1000, positionMillisRef.current), Math.max(0, durationMillisRef.current - 2000));
+    player.currentTime = target / 1000;
+    setSeekPosition(target);
+    setSkipIntroShown(true);
+    setShowSkipIntro(false);
+  }, [introWindow.end, player]);
+
+  useEffect(() => {
+    const subStatus = player.addListener('statusChange', handlePlaybackStatusUpdate);
+    const subPlaying = player.addListener('playingChange', handlePlaybackStatusUpdate);
+    const subTime = player.addListener('timeUpdate', handlePlaybackStatusUpdate);
+    const subEnd = player.addListener('playToEnd', () => {
+      void persistWatchProgress(durationMillisRef.current, durationMillisRef.current, { force: true, markComplete: true });
+      handleNextEpisodePill();
+    });
+
+    return () => {
+      subStatus.remove();
+      subPlaying.remove();
+      subTime.remove();
+      subEnd.remove();
+    };
+  }, [player, handlePlaybackStatusUpdate, persistWatchProgress, handleNextEpisodePill]);
+  const handleRateToggle = async () => {
+    if (!player) return;
+    bumpControlsLife();
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // cycle through 1x, 1.5x, 2x
+    const nextRate = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
+    setPlaybackRate(nextRate);
+    player.playbackRate = nextRate;
   };
+  const formatTime = (millis: number) => {
+    const totalSeconds = Math.floor(millis / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+  const currentTimeLabel = formatTime(positionMillis);
+  const totalTimeLabel = durationMillis ? formatTime(durationMillis) : '0:00';
+  const durationForUi = Math.max(1, durationMillis || 1);
+  const playedMillisForUi = Math.max(0, isSeeking ? seekPosition : positionMillis);
+  const bufferedMillisForUi = Math.max(playedMillisForUi, bufferedMillis);
+  const playedPctForUi = clamp01(playedMillisForUi / durationForUi);
+  const bufferedPctForUi = clamp01(bufferedMillisForUi / durationForUi);
+  useEffect(() => {
+    if (!isTvShow) {
+      setEpisodeDrawerOpen(false);
+    }
+  }, [isTvShow]);
+  const handleSurfacePress = useCallback((evt: any) => {
+    if (episodeDrawerOpen) return;
+    if (isLocked) return;
+    if (isPipActive) return;
+    if (isMini) {
+      setIsMini(false);
+      setShowControls(true);
+      bumpControlsLife();
+      return;
+    }
+
+    const { locationX } = evt.nativeEvent;
+    const now = Date.now();
+    const isDoubleTap = now - lastSurfaceTapRef.current < SURFACE_DOUBLE_TAP_MS;
+    
+    // Get screen width to determine left/right side
+    const screenWidth = Platform.OS === 'web' ? 1000 : 800; // Rough estimate or use Dimensions
+    // For double tap seek
+    if (isDoubleTap) {
+      const isLeft = locationX < 300; // Left side
+      const isRight = locationX > screenWidth - 300; // Right side
+      
+      if (isLeft) {
+        seekBy(-10000);
+        triggerSeekAnimation('left');
+        return;
+      } else if (isRight) {
+        seekBy(10000);
+        triggerSeekAnimation('right');
+        return;
+      }
+      
+      // If double tap in center, toggle play/pause instead?
+      // Or just hide controls
+      setShowControls(false);
+      return;
+    }
+
+    lastSurfaceTapRef.current = now;
+    setShowControls(true);
+    bumpControlsLife();
+  }, [episodeDrawerOpen, isLocked, isPipActive, isMini, bumpControlsLife, seekBy, triggerSeekAnimation]);
+  const handleBrightnessChange = useCallback(
+    (value: number) => {
+      pendingBrightnessRef.current = value;
+      setBrightness(value);
+      scheduleBrightnessApply(value);
+      bumpControlsLife();
+    },
+    [bumpControlsLife, scheduleBrightnessApply],
+  );
+  const handleVolumeChange = useCallback(
+    (value: number) => {
+      pendingVolumeRef.current = value;
+      setVolume(value);
+      scheduleVolumeApply();
+      bumpControlsLife();
+    },
+    [bumpControlsLife, scheduleVolumeApply],
+  );
+  const toggleLock = useCallback(() => {
+    setIsLocked(prev => {
+      const next = !prev;
+      if (next) {
+        setShowControls(false);
+      } else {
+        setShowControls(true);
+        bumpControlsLife();
+      }
+      return next;
+    });
+  }, [bumpControlsLife]);
+  const handlePipStatusUpdate = useCallback((event: { isPictureInPictureActive?: boolean }) => {
+    setIsPipActive(Boolean(event?.isPictureInPictureActive));
+    setPipPending(false);
+    if (pipPendingTimeoutRef.current) {
+      clearTimeout(pipPendingTimeoutRef.current);
+      pipPendingTimeoutRef.current = null;
+    }
+  }, []);
+  const handlePipToggle = useCallback(async () => {
+    if (!player) return;
+    if (!pipUiEnabled) return;
+    bumpControlsLife();
+
+    // First try expo-video's native PiP methods
+    const { enterPip, exitPip } = resolvePipHandlers();
+
+    // For Android, if expo-av doesn't expose PiP methods, use native module fallback
+    if (Platform.OS === 'android' && !enterPip && !exitPip) {
+      try {
+        // Try to use Android native PiP module
+        const { PipAndroidModule } = NativeModules;
+        if (PipAndroidModule?.enterPipMode) {
+          setPipPending(true);
+          await ensurePlaybackAudioMode(true);
+          await PipAndroidModule.enterPipMode();
+          setIsPipActive(true);
+          return;
+        }
+
+        // Fallback: Use minimal native PiP when available
+        await enterPipMinimal();
+        setIsPipActive(true);
+        return;
+      } catch (err) {
+        console.warn('Android PiP native module failed', err);
+        Alert.alert(
+          'Picture in Picture',
+          'Press the Home button while video is playing to enter PiP mode.',
+          [{ text: 'OK' }]
+        );
+        return;
+      } finally {
+        setPipPending(false);
+      }
+    }
+
+    if (!enterPip && !exitPip) {
+      // If PiP functions are not available, it means the platform/device doesn't support it
+      // or the Video component isn't exposing the methods as expected.
+      setIsPipSupported(false);
+      Alert.alert('Picture in Picture', 'PiP is not supported on this device.');
+      return;
+    }
+    try {
+      if (!isPipActive && enterPip) {
+        setPipPending(true);
+        await ensurePlaybackAudioMode(true);
+        await enterPip();
+        setIsPipActive(true);
+      } else if (isPipActive && exitPip) {
+        if (typeof exitPip === 'function') {
+          await (exitPip as any)();
+        }
+        setIsPipActive(false);
+      }
+    } catch (err) {
+      console.warn('PiP toggle failed', err);
+      Alert.alert('Picture in Picture', 'Unable to start Picture in Picture on this device/build.');
+    } finally {
+      setPipPending(false);
+    }
+  }, [isPipActive, pipUiEnabled, bumpControlsLife, resolvePipHandlers, ensurePlaybackAudioMode]);
+
+  const getCaptionLabel = useCallback((caption: CaptionSource) => {
+    if (caption.display) return caption.display;
+    if (caption.language) return caption.language.toUpperCase();
+    return 'Subtitle';
+  }, []);
+  const handleCaptionSelect = useCallback(
+    async (captionId: string | 'off') => {
+      bumpControlsLife();
+      if (captionId === 'off') {
+        setSelectedCaptionId('off');
+        captionIndexRef.current = 0;
+        captionCuesRef.current = [];
+        setActiveCaptionText(null);
+        const key = captionPreferenceKeyRef.current;
+        if (key) {
+          await AsyncStorage.setItem(key, 'off').catch(() => { });
+        }
+        return;
+      }
+      if (selectedCaptionId === captionId && captionCuesRef.current.length) {
+        return;
+      }
+      const source = captionSources.find((item) => item.id === captionId);
+      if (!source) return;
+      setSelectedCaptionId(captionId);
+      const key = captionPreferenceKeyRef.current;
+      if (key) {
+        await AsyncStorage.setItem(key, captionId).catch(() => { });
+      }
+      const cached = captionCacheRef.current[captionId];
+      if (cached) {
+        captionCuesRef.current = cached;
+        captionIndexRef.current = 0;
+        updateActiveCaption(positionMillisRef.current, true);
+        return;
+      }
+      setCaptionLoadingId(captionId);
+      try {
+        const res = await fetch(source.url);
+        const payload = await res.text();
+        const cues = await parseCaptionPayload(payload, source.type);
+        captionCacheRef.current[captionId] = cues;
+        captionCuesRef.current = cues;
+        captionIndexRef.current = 0;
+        updateActiveCaption(positionMillisRef.current, true);
+      } catch (err) {
+        console.warn('Failed to load captions', err);
+        Alert.alert('Captions unavailable', 'Unable to load captions for this language right now.');
+        setSelectedCaptionId('off');
+        captionCuesRef.current = [];
+        setActiveCaptionText(null);
+      } finally {
+        setCaptionLoadingId(null);
+      }
+    },
+    [captionSources, selectedCaptionId, updateActiveCaption, bumpControlsLife],
+  );
+  const handleAudioSelect = useCallback(
+    async (option: AudioTrackOption | null) => {
+      bumpControlsLife();
+      if (!player) return;
+
+      setSelectedAudioKey(option?.id ?? 'auto');
+
+      // expo-video 2.0.x uses audioTrack property if supported.
+      // We'll just update the key which the UI reflects for now.
+    },
+    [bumpControlsLife, player],
+  );
+  useEffect(() => {
+    if (!captionSources.length) return;
+    let cancelled = false;
+    const pickDefaultCaption = async () => {
+      const prefKey = captionPreferenceKeyRef.current;
+      const stored = prefKey ? await AsyncStorage.getItem(prefKey).catch(() => null) : null;
+      if (cancelled) return;
+      // Respect user's explicit "off" choice.
+      if (stored === 'off') {
+        return;
+      }
+      const currentStillValid =
+        selectedCaptionId !== 'off' && captionSources.some((s) => s.id === selectedCaptionId);
+      if (currentStillValid) {
+        return;
+      }
+      const storedStillValid = stored ? captionSources.find((s) => s.id === stored) : undefined;
+      const english = captionSources.find((s) => (s.language || '').toLowerCase().startsWith('en'));
+      const candidate = storedStillValid ?? english ?? captionSources[0];
+      if (candidate?.id) {
+        await handleCaptionSelect(candidate.id);
+      }
+    };
+    void pickDefaultCaption();
+    return () => {
+      cancelled = true;
+    };
+  }, [captionSources, handleCaptionSelect, selectedCaptionId]);
   const videoPipProps = useMemo(() => ({ allowsPictureInPicture: pipUiEnabled }), [pipUiEnabled]);
 
   const overlayPaddingStyle = useMemo(
@@ -3324,25 +3090,19 @@ const VideoPlayerScreen = () => {
       <View style={styles.touchLayer}>
         {transitionReady && videoPlaybackSource ? (
           <>
-            <Video
-              key={videoReloadKey}
-              ref={videoRef}
-              source={videoPlaybackSource as any}
-              style={styles.video}
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={isPlaying && !midrollActive && (appIsActive || isPipActive || pipPending)}
-              useNativeControls={false}
-              onPlaybackStatusUpdate={handleStatusUpdate}
-              onError={handleVideoError}
-              onLoad={handleVideoLoad}
-              pointerEvents='none'
-              {...(videoPipProps as any)}
-              startsPictureInPictureAutomatically={true}
-              // @ts-ignore - presentPictureInPictureAsync exists at runtime
-              onPictureInPictureStatusUpdate={handlePipStatusUpdate}
-              onReadyForDisplay={handleVideoReadyForDisplay}
-            />
-            <VideoMaskingOverlay intensity={0.06} />
+            <View style={styles.video}>
+              <AnyVideoView
+                style={StyleSheet.absoluteFill}
+                player={player}
+                contentFit="contain"
+                nativeControls={false}
+                allowsPictureInPicture={pipUiEnabled}
+                startsPictureInPictureAutomatically={true}
+                onPictureInPictureStart={() => setIsPipActive(true)}
+                onPictureInPictureStop={() => setIsPipActive(false)}
+              />
+            </View>
+            <VideoMaskingOverlay intensity={0.04} />
           </>
         ) : (
           <View style={styles.videoFallback}>
@@ -3413,6 +3173,11 @@ const VideoPlayerScreen = () => {
           </View>
         ) : null}
 
+        {/* Double Tap Seek Visuals */}
+        {seekVisualSide && (
+          <DoubleTapSeekVisual side={seekVisualSide} anim={seekVisualAnim} />
+        )}
+
         {/* Surface tap handler sits behind controls so it never steals button presses. */}
         {!isLocked && (
           <Pressable style={styles.surfacePressLayer} onPress={handleSurfacePress} />
@@ -3455,7 +3220,7 @@ const VideoPlayerScreen = () => {
 
         {/* Netflix-style content rating badge - appears when controls hide */}
         {showContentRating && !midrollActive && !isPipActive && (
-          <Animated.View style={styles.contentRatingContainer}>
+          <Animated.View pointerEvents="none" style={[styles.contentRatingContainer, { transform: [{ translateX: contentRatingAnim }] }]}>
             <View style={styles.contentRatingBadge}>
               <View style={styles.contentRatingBox}>
                 <Text style={styles.contentRatingText}>
@@ -3478,12 +3243,12 @@ const VideoPlayerScreen = () => {
           <View style={[styles.overlay, overlayPaddingStyle]}>
             {/* Top fade */}
             <LinearGradient
-              colors={['rgba(0,0,0,0.8)', 'transparent']}
+              colors={['rgba(0,0,0,0.7)', 'transparent']}
               style={[styles.topGradient, { height: 140 + insets.top }]}
             />
             {/* Bottom fade */}
             <LinearGradient
-              colors={['transparent', 'rgba(0,0,0,0.9)']}
+              colors={['transparent', 'rgba(0,0,0,0.85)']}
               style={[styles.bottomGradient, { height: 180 + insets.bottom }]}
             />
             {/* TOP BAR */}
@@ -3499,9 +3264,6 @@ const VideoPlayerScreen = () => {
                 </TouchableOpacity>
                 <View style={styles.titleWrap}>
                   <Text style={styles.title}>{activeTitle}</Text>
-                  {roomCode ? (
-                    <Text style={styles.roomCodeBadge}>Party #{roomCode}</Text>
-                  ) : null}
                 </View>
               </View>
               <View style={styles.topRight}>
@@ -3519,20 +3281,6 @@ const VideoPlayerScreen = () => {
                 >
                   <MaterialCommunityIcons name="cog-outline" size={20} color="#fff" />
                 </TouchableOpacity>
-                {roomCode ? (
-                  <TouchableOpacity
-                    style={styles.roundButton}
-                    onPress={() => setShowChat((prev) => !prev)}
-                    activeOpacity={0.7}
-                    delayPressIn={0}
-                  >
-                    <Ionicons
-                      name={showChat ? 'chatbubble' : 'chatbubble-outline'}
-                      size={20}
-                      color="#fff"
-                    />
-                  </TouchableOpacity>
-                ) : null}
                 {isTvShow && episodeQueue.length > 0 ? (
                   <TouchableOpacity
                     style={styles.roundButton}
@@ -3545,7 +3293,7 @@ const VideoPlayerScreen = () => {
                 ) : null}
               </View>
             </View>
-            {/* MIDDLE CONTROLS + CHAT */}
+            {/* MIDDLE CONTROLS */}
             <View style={styles.middleRow}>
               <View style={[styles.sideCluster, styles.sideClusterLeft]}>
                 <View style={styles.sideRail}>
@@ -3580,58 +3328,7 @@ const VideoPlayerScreen = () => {
                 </View>
               </View>
               <View style={[styles.sideCluster, styles.sideClusterRight]}>
-                {/* Watch party chat (only when in a room) */}
-                {roomCode && showChat ? (
-                  <View style={styles.chatPanel}>
-                    <Text style={styles.chatTitle}>Party chat</Text>
-                    <FlatList
-                      data={chatMessages}
-                      keyExtractor={(item: any) => item.id}
-                      style={styles.chatList}
-                      contentContainerStyle={styles.chatListContent}
-                      renderItem={({ item, index }: { item: any, index: number }) => (
-                        <View style={styles.chatMessageRow}>
-                          {item.avatar ? (
-                            <Image
-                              source={{ uri: item.avatar }}
-                              style={styles.chatAvatar}
-                            />
-                          ) : (
-                            <View style={styles.chatAvatarFallback}>
-                              <Text style={styles.chatAvatarFallbackText}>
-                                {item.user.charAt(0).toUpperCase()}
-                              </Text>
-                            </View>
-                          )}
-                          <View style={styles.chatBubble}>
-                            <Text style={styles.chatUser}>{item.user}</Text>
-                            <Text style={styles.chatText}>{item.text}</Text>
-                          </View>
-                        </View>
-                      )}
-                    />
-                    <View style={styles.chatInputRow}>
-                      <TextInput
-                        style={styles.chatInput}
-                        placeholder="Say something…"
-                        placeholderTextColor="rgba(255,255,255,0.5)"
-                        value={chatInput}
-                        onChangeText={setChatInput}
-                        onSubmitEditing={handleSendChat}
-                        editable={!chatSending}
-                      />
-                      <TouchableOpacity
-                        style={styles.chatSendButton}
-                        onPress={handleSendChat}
-                        disabled={chatSending || !chatInput.trim()}
-                      >
-                        <Ionicons name="send" size={16} color="#fff" />
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  <View style={styles.middleRightPlaceholder} />
-                )}
+                <View style={styles.middleRightPlaceholder} />
                 <View style={[styles.sideRail, styles.rightSideRail]}>
                   <SlidableVerticalControl
                     icon="volume-high"
@@ -3646,7 +3343,15 @@ const VideoPlayerScreen = () => {
             </View>
 
             {episodeDrawerOpen && isTvShow && episodeQueue.length > 0 && (
-              <View style={styles.episodeDrawer}>
+              <LiquidGlass
+                glowColor="#e50914"
+                tintColor="#05060f"
+                tintOpacity={0.85}
+                cornerRadius={18}
+                glowIntensity={0.2}
+                borderOpacity={0.3}
+                style={styles.episodeDrawer}
+              >
                 <View style={styles.episodeDrawerHeader}>
                   <View>
                     <Text style={styles.episodeDrawerTitle}>Up Next</Text>
@@ -3700,7 +3405,7 @@ const VideoPlayerScreen = () => {
                     );
                   })}
                 </ScrollView>
-              </View>
+              </LiquidGlass>
             )}
             {avDrawerOpen && (
               <View style={styles.avDrawer}>
@@ -3855,15 +3560,17 @@ const VideoPlayerScreen = () => {
                     activeOpacity={0.9}
                     onPress={handleSkipIntro}
                   >
-                    <LinearGradient
-                      colors={['#e50914', '#b20710']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
+                    <LiquidGlass
+                      glowColor="#fff"
+                      tintOpacity={0.85}
+                      cornerRadius={999}
+                      glowIntensity={0.2}
+                      borderOpacity={0.3}
                       style={styles.skipIntroBg}
                     >
                       <Ionicons name="play-skip-forward" size={18} color="#fff" />
                       <Text style={styles.skipIntroText}>Skip intro</Text>
-                    </LinearGradient>
+                    </LiquidGlass>
                   </TouchableOpacity>
                 )}
                 {showNextEpisode && nextUpEpisode ? (
@@ -3872,10 +3579,13 @@ const VideoPlayerScreen = () => {
                     activeOpacity={0.9}
                     onPress={handleNextEpisodePill}
                   >
-                    <LinearGradient
-                      colors={['rgba(0,0,0,0.75)', 'rgba(0,0,0,0.55)']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
+                    <LiquidGlass
+                      glowColor="#fff"
+                      tintColor="#0d0d12"
+                      tintOpacity={0.85}
+                      cornerRadius={999}
+                      glowIntensity={0.2}
+                      borderOpacity={0.3}
                       style={styles.nextEpisodeBg}
                     >
                       <View style={styles.nextEpisodeMeta}>
@@ -3892,61 +3602,38 @@ const VideoPlayerScreen = () => {
                       <View style={styles.nextEpisodeIconWrap}>
                         <Ionicons name="play" size={18} color="#fff" />
                       </View>
-                    </LinearGradient>
+                    </LiquidGlass>
                   </TouchableOpacity>
                 ) : null}
               </View>
             )}
             {/* BOTTOM BAR */}
             <View style={styles.bottomControls}>
-              {/* Progress */}
-              <View style={styles.progressRow}>
-                <View style={styles.progressLabels}>
-                  <Text style={styles.timeText}>{currentTimeLabel}</Text>
-                  <Text style={styles.timeText}>{totalTimeLabel}</Text>
-                </View>
-                <View style={styles.progressContainerNoCard}>
-                  <View style={styles.progressTrackWrap}>
-                    <View style={styles.progressTrackBase} />
-                    <View
-                      style={[
-                        styles.progressTrackBuffered,
-                        { width: `${Math.round(bufferedPctForUi * 1000) / 10}%` },
-                      ]}
-                    />
-                    <View
-                      style={[
-                        styles.progressTrackPlayed,
-                        { width: `${Math.round(playedPctForUi * 1000) / 10}%` },
-                      ]}
-                    />
-                    <Slider
-                      style={styles.progressBarOverlay}
-                      minimumValue={0}
-                      maximumValue={durationForUi}
-                      value={seekPosition}
-                      onSlidingStart={() => {
-                        setIsSeeking(true);
-                        bumpControlsLife();
-                      }}
-                      onValueChange={(val: number) => {
-                        setSeekPosition(val);
-                        bumpControlsLife();
-                      }}
-                      onSlidingComplete={async (val: number) => {
-                        setIsSeeking(false);
-                        await videoRef.current?.setPositionAsync(val);
-                        // Snap captions immediately after a seek.
-                        updateActiveCaption(val, true);
-                        bumpControlsLife();
-                      }}
-                      minimumTrackTintColor="transparent"
-                      maximumTrackTintColor="transparent"
-                      thumbTintColor="#fff"
-                    />
-                  </View>
-                </View>
-              </View>
+              <ProgressBar
+                currentTimeLabel={currentTimeLabel}
+                totalTimeLabel={totalTimeLabel}
+                durationForUi={durationForUi}
+                seekPosition={seekPosition}
+                bufferedPctForUi={bufferedPctForUi}
+                playedPctForUi={playedPctForUi}
+                onSlidingStart={() => {
+                  setIsSeeking(true);
+                  bumpControlsLife();
+                }}
+                onValueChange={(val: number) => {
+                  setSeekPosition(val);
+                  bumpControlsLife();
+                }}
+                onSlidingComplete={async (val: number) => {
+                  setIsSeeking(false);
+                  if (player) {
+                    player.currentTime = val / 1000;
+                  }
+                  // Snap captions immediately after a seek.
+                  updateActiveCaption(val, true);
+                  bumpControlsLife();
+                }}
+              />
               {/* Bottom actions */}
               <View style={styles.bottomActions}>
                 <TouchableOpacity
@@ -4149,6 +3836,45 @@ const VideoPlayerScreen = () => {
     </View>
   );
 };
+const DoubleTapSeekVisual: React.FC<{ side: 'left' | 'right'; anim: any }> = ({
+  side,
+  anim,
+}) => {
+  const isLeft = side === 'left';
+  const translateX = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [isLeft ? -20 : 20, 0],
+  });
+  const opacity = anim.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0, 1, 0.8],
+  });
+  const scale = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.9, 1.1],
+  });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.seekVisualContainer,
+        isLeft ? styles.seekVisualLeft : styles.seekVisualRight,
+        { opacity, transform: [{ translateX }, { scale }] },
+      ]}
+    >
+      <View style={styles.seekVisualCircle}>
+        <Ionicons
+          name={isLeft ? 'play-back' : 'play-forward'}
+          size={32}
+          color="#fff"
+        />
+        <Text style={styles.seekVisualText}>{isLeft ? '10s' : '10s'}</Text>
+      </View>
+    </Animated.View>
+  );
+};
+
 const MovieFlixLoader: React.FC<{ message: string; variant?: 'solid' | 'transparent' }> = ({
   message,
   variant = 'solid',
@@ -4206,10 +3932,17 @@ const BufferingPill: React.FC<{ message: string }> = ({ message }) => {
   if (!message) return null;
   return (
     <View pointerEvents="none" style={styles.bufferPillWrap}>
-      <View style={styles.bufferPill}>
+      <LiquidGlass
+        glowColor="#fff"
+        tintOpacity={0.6}
+        cornerRadius={20}
+        glowIntensity={0.2}
+        borderOpacity={0.3}
+        style={styles.bufferPill}
+      >
         <ActivityIndicator size="small" color="#fff" style={{ marginRight: 10 }} />
         <Text style={styles.bufferPillText}>{message}</Text>
-      </View>
+      </LiquidGlass>
     </View>
   );
 };
@@ -4893,18 +4626,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  roomCodeBadge: {
-    marginLeft: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.3)',
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
   // MIDDLE
   middleRow: {
     flexDirection: 'row',
@@ -5136,7 +4857,10 @@ const styles = StyleSheet.create({
   progressContainerNoCard: {
     width: '100%',
     marginTop: 8,
-    paddingHorizontal: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 14,
+    overflow: 'hidden',
   },
   progressTrackWrap: {
     width: '100%',
@@ -5146,25 +4870,25 @@ const styles = StyleSheet.create({
   },
   progressTrackBase: {
     width: '100%',
-    height: 6,
+    height: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
   },
   progressTrackBuffered: {
     position: 'absolute',
     left: 0,
-    top: 13,
-    height: 6,
+    top: 14,
+    height: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.30)',
+    backgroundColor: 'rgba(255,255,255,0.22)',
   },
   progressTrackPlayed: {
     position: 'absolute',
     left: 0,
-    top: 13,
-    height: 6,
+    top: 14,
+    height: 4,
     borderRadius: 999,
-    backgroundColor: '#e50914',
+    backgroundColor: '#fff',
   },
   progressLabels: {
     flexDirection: 'row',
@@ -5185,12 +4909,9 @@ const styles = StyleSheet.create({
   bottomButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: 'transparent',
   },
   bottomButtonDisabled: {
     opacity: 0.35,
@@ -5741,10 +5462,7 @@ const styles = StyleSheet.create({
   ccTrack: {
     width: 68,
     borderRadius: 34,
-    backgroundColor: 'rgba(20,22,32,0.85)',
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
     position: 'relative',
   },
   ccFill: {
@@ -5812,6 +5530,38 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
     maxWidth: 280,
+  },
+  seekVisualContainer: {
+    position: 'absolute',
+    top: '50%',
+    marginTop: -50,
+    width: 100,
+    height: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  seekVisualLeft: {
+    left: '15%',
+  },
+  seekVisualRight: {
+    right: '15%',
+  },
+  seekVisualCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  seekVisualText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+    marginTop: 2,
   },
 });
 

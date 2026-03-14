@@ -1,8 +1,10 @@
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import '@react-native-anywhere/polyfill-base64';
 import * as Linking from 'expo-linking';
-import { Stack, router } from 'expo-router';
-import { onAuthStateChanged, type User } from 'firebase/auth';
+import { router, Stack } from 'expo-router';
+import { onAuthStateChanged, User } from 'firebase/auth';
+export { ErrorBoundary } from 'expo-router';
+
 import React, { useEffect } from 'react';
 import { Text, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -11,31 +13,34 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import 'react-native-url-polyfill/auto';
 // URL.parse polyfill for p-stream providers
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { authPromise, firestore } from '../constants/firebase';
+import { AccentProvider } from '../components/app-components/AccentContext';
+import FlixySettingsProvider from '../components/app-components/FlixySettingsProvider';
+import { FlixyVoiceProvider } from '../components/app-components/FlixyVoice';
+import GlobalCommsOverlay from '../components/app-components/GlobalCommsOverlay';
+import GlobalMusicPlayerProvider from '../components/app-components/GlobalMusicPlayer';
+import GlobalRealtimeNotifications from '../components/app-components/GlobalRealtimeNotifications';
+import StartupVideoSplash from '../components/app-components/StartupVideoSplash';
+import UpdateGate from '../components/app-components/UpdateGate';
+import { authPromise, firestore, isFirestoreQuotaError } from '../constants/firebase';
 import { supabase } from '../constants/supabase';
-import { CustomThemeProvider } from '../hooks/use-theme';
+import CustomThemeProvider from '../hooks/use-theme';
 import { registerDownloadBackgroundTasks } from '../lib/downloadBackgroundTasks';
 import { initializeDownloadManager } from '../lib/downloadManager';
 import { getStoredActiveProfile } from '../lib/profileStorage';
 import { installPushNavigationHandlers, prepareNotificationsAsync, registerForPushNotificationsAsync } from '../lib/pushNotifications';
 import '../lib/trackPlayerShim';
+import '../lib/trackPlayerInit';
+import '../polyfills/localstorage';
 import '../polyfills/node-globals';
 import '../polyfills/reanimated-worklet-callback';
 import '../polyfills/url';
 import { SubscriptionProvider } from '../providers/SubscriptionProvider';
-import { AccentProvider } from './components/AccentContext';
-import { FlixySettingsProvider } from './components/FlixySettingsProvider';
-import { FlixyVoiceProvider } from './components/FlixyVoice';
-import GlobalCommsOverlay from './components/GlobalCommsOverlay';
-import GlobalMusicPlayerProvider from './components/GlobalMusicPlayer';
-import GlobalRealtimeNotifications from './components/GlobalRealtimeNotifications';
-import StartupVideoSplash from './components/StartupVideoSplash';
-import UpdateGate from './components/UpdateGate';
-import { isFirestoreQuotaError } from '../constants/firebase';
+
 
 export default function RootLayout() {
   const [showStartupVideo, setShowStartupVideo] = React.useState(true);
   const [quotaExceeded, setQuotaExceeded] = React.useState(false);
+
 
   useEffect(() => {
     // Ensure notification permissions/channels are ready before download manager emits download notifications.
@@ -157,28 +162,32 @@ export default function RootLayout() {
 
   useEffect(() => {
     const handleDeepLink = async (event: { url: string }) => {
-      const redirectUrl = Linking.createURL('/post-review');
-      // Supabase types sometimes miss getSessionFromUrl in certain versions; cast to any for now.
-      const { data, error } = await (supabase.auth as any).getSessionFromUrl(event.url, {
-        redirectTo: redirectUrl,
-      });
-
-      if (error) {
-        console.warn('Deep link handling failed:', error);
+      // Only handle Supabase auth links
+      if (!event.url.includes('access_token=') && !event.url.includes('refresh_token=')) {
         return;
       }
 
-      if (data.session) {
-        router.replace('/post-review');
+      try {
+        const redirectUrl = Linking.createURL('/post-review');
+        const auth: any = supabase.auth;
+        
+        if (typeof auth.getSessionFromUrl === 'function') {
+          const { data, error } = await auth.getSessionFromUrl(event.url, {
+            redirectTo: redirectUrl,
+          });
+          if (error) throw error;
+          if (data.session) router.replace('/post-review');
+        } else {
+          // Fallback for newer Supabase versions where session is handled via exchangeCodeForSession or automatically
+          console.log('[Supabase] getSessionFromUrl not found, relying on auto-detection or manual parse');
+        }
+      } catch (error) {
+        console.warn('Deep link handling failed:', error);
       }
     };
 
     const subscription = Linking.addEventListener('url', handleDeepLink);
-
-    // Clean up the subscription when the component unmounts
-    return () => {
-      subscription.remove();
-    };
+    return () => subscription.remove();
   }, []);
 
   return (
@@ -201,8 +210,30 @@ export default function RootLayout() {
                         <Stack.Screen name="(tabs)" />
                         <Stack.Screen name="messaging" />
                         <Stack.Screen name="post-review" />
+                        <Stack.Screen name="details" />
+                        <Stack.Screen name="my-list" />
+                        <Stack.Screen name="see-all" />
+                        <Stack.Screen name="settings" />
+                        <Stack.Screen name="premium" />
+                        <Stack.Screen name="profile" />
+                        <Stack.Screen name="ad-interstitial" />
+                        <Stack.Screen name="admin" />
+                        <Stack.Screen name="feed" />
+                        <Stack.Screen name="followers" />
+                        <Stack.Screen name="following" />
+                        <Stack.Screen name="marketplace" />
+                        <Stack.Screen name="modal" />
+                        <Stack.Screen name="paywall" />
+                        <Stack.Screen name="reels" />
+                        <Stack.Screen name="social-feed" />
+                        <Stack.Screen name="story" />
+                        <Stack.Screen name="story-upload" />
+                        <Stack.Screen name="story-viewer" />
+                        <Stack.Screen name="streaks" />
+                        <Stack.Screen name="tv-login" />
+                        <Stack.Screen name="watchparty" />
                         <Stack.Screen
-                          name="calls/[id]"
+                          name="calls"
                           options={{
                             headerShown: false,
                             presentation: 'fullScreenModal',

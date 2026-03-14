@@ -5,7 +5,7 @@ import { MovieScrapeContext, ShowScrapeContext } from '@/utils/context';
 import { NotFoundError } from '@/utils/errors';
 import { fetchTMDBName } from '@/utils/tmdb';
 
-const baseUrl = 'https://www.cuevana3.eu';
+const baseUrl = 'https://cuevana3.re';
 
 interface Video {
   result: string;
@@ -322,7 +322,7 @@ export const cuevana3Scraper = makeSourcerer({
   id: 'cuevana3',
   name: 'Cuevana3',
   rank: 160,
-  disabled: true,
+  disabled: false,
   flags: [],
   scrapeMovie: comboScraper,
   scrapeShow: comboScraper,

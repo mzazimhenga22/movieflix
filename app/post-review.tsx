@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, StyleSheet, View } from 'react-native';
-import MediaPicker from './components/post-review/MediaPicker';
+import LiquidGlass from '../components/app-components/LiquidGlass';
+import MediaPicker from '../components/app-components/post-review/MediaPicker';
 // eslint-disable-next-line import/namespace, import/no-named-as-default, import/no-named-as-default-member
+import MediaPreview from '../components/app-components/post-review/MediaPreview';
 import { supabase, supabaseConfigured } from '../constants/supabase';
-import MediaPreview from './components/post-review/MediaPreview';
 
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
@@ -167,6 +168,8 @@ export default function PostReviewScreen() {
           movieReleaseYear: reviewData.movieReleaseYear ?? null,
           mediaUrl: publicUrl.publicUrl,
           type: media.type,
+          // Music data
+          musicTrack: reviewData.musicTrack ?? null,
           videoUrl: media.type === 'video' ? publicUrl.publicUrl : null,
           createdAt: serverTimestamp(),
           likes: 0,
@@ -223,7 +226,7 @@ export default function PostReviewScreen() {
 
   return (
     <ScreenWrapper style={styles.wrapper}>
-      <View style={styles.container}>
+      <LiquidGlass tintOpacity={0.08} borderOpacity={0.05} blurRadius={100} style={styles.container}>
         {!media ? (
           <MediaPicker
             onMediaPicked={handleMediaPick}
@@ -243,7 +246,7 @@ export default function PostReviewScreen() {
             initialReviewData={draftData?.reviewData}
           />
         )}
-      </View>
+      </LiquidGlass>
     </ScreenWrapper>
   );
 }

@@ -1,11 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import {
     ActivityIndicator,
+    Dimensions,
     FlatList,
     Image,
+    Platform,
     StyleSheet,
     Text,
     TextInput,
@@ -14,6 +17,33 @@ import {
 } from 'react-native';
 
 import { usePStream } from '../../src/pstream/usePStream';
+import LiquidGlass from '../app-components/LiquidGlass';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+const AnyVideoView = VideoView as any;
+
+// Preview Video component
+const MusicPreviewVideo = memo(({ uri, shouldPlay }: { uri: string; shouldPlay: boolean }) => {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.muted = true;
+  });
+
+  useEffect(() => {
+    if (shouldPlay) player.play();
+    else player.pause();
+  }, [shouldPlay, player]);
+
+  return (
+    <AnyVideoView
+      player={player}
+      style={StyleSheet.absoluteFill}
+      contentFit="cover"
+      showsPlaybackControls={false}
+    />
+  );
+});
 
 export type MusicTrack = {
     videoId: string;
@@ -25,11 +55,21 @@ export type MusicTrack = {
 
 type Props = {
     accent?: string;
+    previewUri?: string | null;
+    previewType?: 'image' | 'video' | null;
+    previewOverlayText?: string;
     onSelect: (track: MusicTrack, startTime: number) => void;
     onSkip: () => void;
 };
 
-export default function StoryMusicPicker({ accent = '#e50914', onSelect, onSkip }: Props) {
+export default function StoryMusicPicker({ 
+    accent = '#e50914', 
+    previewUri, 
+    previewType, 
+    previewOverlayText,
+    onSelect, 
+    onSkip 
+}: Props) {
     const { searchMusic, getMusicStream, loading } = usePStream();
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<MusicTrack[]>([]);
@@ -164,8 +204,65 @@ export default function StoryMusicPicker({ accent = '#e50914', onSelect, onSkip 
 
     return (
         <View style={styles.container}>
+            {/* Instagram-like Story Preview */}
+            {previewUri && (
+                <View style={styles.previewSection}>
+                    <View style={styles.previewContainer}>
+                        {previewType === 'video' ? (
+                            <MusicPreviewVideo uri={previewUri} shouldPlay={isPlaying} />
+                        ) : (
+                            <Image source={{ uri: previewUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                        )}
+                        
+                        {/* Gradient overlay */}
+                        <LinearGradient
+                            colors={['rgba(0,0,0,0.3)', 'transparent', 'rgba(0,0,0,0.7)']}
+                            style={StyleSheet.absoluteFill}
+                        />
+                        
+                        {/* Overlay Text */}
+                        {previewOverlayText && (
+                            <LiquidGlass
+                                cornerRadius={12}
+                                blurRadius={50}
+                                tintOpacity={0.5}
+                                borderOpacity={0.2}
+                                style={styles.overlayTextChip}
+                            >
+                                <Text style={styles.overlayTextPreview} numberOfLines={2}>
+                                    {previewOverlayText}
+                                </Text>
+                            </LiquidGlass>
+                        )}
+                        
+                        {/* Now Playing Badge */}
+                        {selectedTrack && (
+                            <View style={styles.nowPlayingBadge}>
+                                <View style={styles.musicVisualizer}>
+                                    {[0, 1, 2, 3].map((i) => (
+                                        <View 
+                                            key={i} 
+                                            style={[
+                                                styles.visualizerBar, 
+                                                { 
+                                                    backgroundColor: accent,
+                                                    height: isPlaying ? 8 + Math.random() * 8 : 4,
+                                                }
+                                            ]} 
+                                        />
+                                    ))}
+                                </View>
+                                <Text style={styles.nowPlayingText} numberOfLines={1}>
+                                    {isPlaying ? '♫ ' : ''}{selectedTrack.title}
+                                </Text>
+                            </View>
+                        )}
+                    </View>
+                </View>
+            )}
+
             {/* Search Bar */}
-            <View style={styles.searchContainer}>
+            <View style={[styles.searchContainer, previewUri && styles.searchWithPreview]}>
                 <Ionicons name="search" size={18} color="rgba(255,255,255,0.6)" />
                 <TextInput
                     style={styles.searchInput}
@@ -362,5 +459,62 @@ const styles = StyleSheet.create({
         color: '#fff',
         fontSize: 15,
         fontWeight: '700',
+    },
+    // Instagram-like preview styles
+    previewSection: {
+        paddingHorizontal: 16,
+        marginBottom: 12,
+    },
+    previewContainer: {
+        width: '100%',
+        aspectRatio: 9 / 16,
+        borderRadius: 16,
+        overflow: 'hidden',
+        backgroundColor: 'rgba(0,0,0,0.3)',
+    },
+    overlayTextChip: {
+        position: 'absolute',
+        bottom: 20,
+        left: 16,
+        right: 16,
+        paddingVertical: 10,
+        paddingHorizontal: 14,
+    },
+    overlayTextPreview: {
+        color: '#fff',
+        fontSize: 16,
+        fontWeight: '700',
+        textAlign: 'center',
+    },
+    nowPlayingBadge: {
+        position: 'absolute',
+        top: 16,
+        left: 16,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        borderRadius: 20,
+        backgroundColor: 'rgba(0,0,0,0.6)',
+    },
+    nowPlayingText: {
+        color: '#fff',
+        fontSize: 13,
+        fontWeight: '600',
+        maxWidth: 140,
+    },
+    musicVisualizer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 2,
+        width: 20,
+    },
+    visualizerBar: {
+        width: 3,
+        borderRadius: 1.5,
+    },
+    searchWithPreview: {
+        marginTop: 0,
     },
 });

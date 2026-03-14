@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { Image as ExpoImage } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import LiquidGlass from '../../../components/app-components/LiquidGlass';
 import { IMAGE_BASE_URL } from '../../../constants/api';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -161,7 +162,7 @@ export default function BehindTheScenes({ movie, cast, onCastPress, accentColor 
                     colors={['transparent', 'rgba(0,0,0,0.9)']}
                     style={styles.castGradient}
                   />
-                  
+
                   {/* Role badge */}
                   <View style={[styles.roleBadge, { backgroundColor: accentColor }]}>
                     <Text style={styles.roleText}>
@@ -169,7 +170,7 @@ export default function BehindTheScenes({ movie, cast, onCastPress, accentColor 
                     </Text>
                   </View>
                 </View>
-                
+
                 <View style={styles.castInfo}>
                   <Text style={styles.castName} numberOfLines={1}>{member.name}</Text>
                   <Text style={styles.castCharacter} numberOfLines={1}>{member.character}</Text>
@@ -192,9 +193,16 @@ export default function BehindTheScenes({ movie, cast, onCastPress, accentColor 
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.triviaScroll}>
           {trivia.map((item, index) => (
             <View key={index} style={styles.triviaCard}>
-              <LinearGradient
-                colors={['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.02)']}
-                style={styles.triviaGradient}
+              <LiquidGlass
+                glowColor={accentColor}
+                tintColor="#0a0c18"
+                tintOpacity={0.4}
+                cornerRadius={14}
+                glowIntensity={0.2}
+                borderWidth={1}
+                chromaticAberration={true}
+                refractionAmount={0.3}
+                style={StyleSheet.absoluteFillObject}
               />
               <View style={[styles.triviaIcon, { backgroundColor: `${accentColor}20` }]}>
                 <Ionicons name={item.icon as any} size={18} color={accentColor} />
@@ -207,18 +215,23 @@ export default function BehindTheScenes({ movie, cast, onCastPress, accentColor 
 
       {/* Director spotlight */}
       <View style={styles.directorCard}>
-        <LinearGradient
-          colors={[`${accentColor}15`, 'transparent']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0a0c18"
+          tintOpacity={0.5}
+          cornerRadius={20}
+          glowIntensity={0.5}
+          borderWidth={1.5}
+          chromaticAberration={true}
+          refractionAmount={0.4}
           style={styles.directorGradient}
         />
-        
+
         <View style={styles.directorBadge}>
           <Ionicons name="megaphone" size={16} color={accentColor} />
           <Text style={styles.directorBadgeText}>Director</Text>
         </View>
-        
+
         <View style={styles.directorContent}>
           <View style={styles.directorAvatar}>
             <Ionicons name="person" size={32} color="rgba(255,255,255,0.5)" />

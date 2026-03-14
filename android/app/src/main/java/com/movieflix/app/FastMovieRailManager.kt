@@ -1,4 +1,4 @@
-package com.movieflix.app
+package com.movieflix.app.app
 
 import com.facebook.react.common.MapBuilder
 import com.facebook.react.uimanager.SimpleViewManager

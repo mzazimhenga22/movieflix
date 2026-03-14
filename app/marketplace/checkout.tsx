@@ -20,7 +20,7 @@ import ScreenWrapper from '../../components/ScreenWrapper';
 import { useMarketplaceCart } from '../../hooks/use-marketplace-cart';
 import { useActiveProfile } from '../../hooks/use-active-profile';
 import { useUser } from '../../hooks/use-user';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { findOrCreateConversation, getProfileById, sendMessage, type Profile } from '../messaging/controller';
 import { formatKsh } from '../../lib/money';
 import {

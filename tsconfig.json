@@ -4,7 +4,10 @@
   "compilerOptions": {
     "strict": true,
     "jsx": "react-native",
+    "baseUrl": ".",
+    "moduleResolution": "bundler",
     "paths": {
+      "~/*": ["./*"],
       "@/*": ["./*"],
       "@p-stream/*": ["./providers-temp/src/*"]
     },
@@ -13,6 +16,7 @@
     "noEmit": true,
     "allowJs": true,
     "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "forceConsistentCasingInFileNames": true

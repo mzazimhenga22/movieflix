@@ -1,7 +1,7 @@
 import { Stack, usePathname } from 'expo-router';
 import React, { useMemo } from 'react';
 import { View } from 'react-native';
-import BottomNav from '../components/social-feed/BottomNav';
+import BottomNav from '../../components/app-components/social-feed/BottomNav';
 
 export default function SocialFeedLayout() {
   const pathname = usePathname();
@@ -14,13 +14,13 @@ export default function SocialFeedLayout() {
           headerShown: false,
         }}
       >
-        <Stack.Screen 
+        <Stack.Screen
           name="index"
           options={{
             title: 'Feed'
           }}
         />
-        <Stack.Screen 
+        <Stack.Screen
           name="stories"
           options={{
             title: 'Stories'
@@ -32,7 +32,7 @@ export default function SocialFeedLayout() {
             title: 'Movie Match'
           }}
         />
-        <Stack.Screen 
+        <Stack.Screen
           name="notifications"
           options={{
             title: 'Notifications'

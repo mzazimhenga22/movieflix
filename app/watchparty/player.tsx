@@ -1,35 +1,34 @@
-﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+﻿import { useAccent } from '@/components/app-components/AccentContext';
+import { joinWatchPartyAsParticipant, leaveWatchPartyAsParticipant, updateWatchPartyEpisode, updateWatchPartyPlayback, type WatchPartyEpisode } from '@/lib/watchparty/controller';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
 import { decode as base64Decode } from 'base-64';
 import {
   Audio,
-  AVPlaybackSource,
-  AVPlaybackStatusSuccess,
   InterruptionModeAndroid,
   InterruptionModeIOS,
-  ResizeMode,
-  Video,
 } from 'expo-av';
 import * as Brightness from 'expo-brightness';
 import { activateKeepAwakeAsync, deactivateKeepAwake, isAvailableAsync } from 'expo-keep-awake';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, limit } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { addDoc, collection, doc, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  AppState,
   Animated,
+  AppState,
   Easing,
   FlatList,
   Image,
   PanResponder,
   Pressable,
-  Share,
   ScrollView,
+  Share,
   StatusBar,
   StyleSheet,
   Text,
@@ -38,7 +37,16 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { RTCView, mediaDevices, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from 'react-native-webrtc';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { mediaDevices, RTCPeerConnection, RTCView } from 'react-native-webrtc';
+import { firestore } from '../../constants/firebase';
+import { useUser } from '../../hooks/use-user';
+import { logInteraction } from '../../lib/algo';
+import { syncMovieMatchProfile } from '../../lib/movieMatchSync';
+import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../../lib/profileStorage';
+import type { PStreamMediaPayload, QualitiesMap } from '../../src/pstream/pstream-types';
+import { usePStream } from '../../src/pstream/usePStream';
+import type { Media } from '../../types';
 
 // Animated section wrapper
 const AnimatedSection = memo(function AnimatedSection({ children, delay = 0, style }: { children: React.ReactNode; delay?: number; style?: any }) {
@@ -70,17 +78,6 @@ const AnimatedSection = memo(function AnimatedSection({ children, delay = 0, sty
     </Animated.View>
   );
 });
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { firestore } from '../../constants/firebase';
-import { useUser } from '../../hooks/use-user';
-import { useAccent } from '../components/AccentContext';
-import { logInteraction } from '../../lib/algo';
-import { joinWatchPartyAsParticipant, leaveWatchPartyAsParticipant, updateWatchPartyEpisode, updateWatchPartyPlayback, type WatchPartyEpisode } from '@/lib/watchparty/controller';
-import { syncMovieMatchProfile } from '../../lib/movieMatchSync';
-import { buildProfileScopedKey, getStoredActiveProfile, type StoredProfile } from '../../lib/profileStorage';
-import { usePStream } from '../../src/pstream/usePStream';
-import type { PStreamMediaPayload, QualitiesMap } from '../../src/pstream/pstream-types';
-import type { Media } from '../../types';
 
 const FALLBACK_EPISODE_IMAGE = 'https://via.placeholder.com/160x90?text=Episode';
 
@@ -810,7 +807,7 @@ const SlidableVerticalControl: React.FC<SlidableVerticalControlProps> = ({
 // Main Video Player Component
 // ============================================================================
 
-const FloatingEmoji = memo(({ emoji, x }: { emoji: string; x: number }) => {
+const FloatingEmoji = memo(({ key, emoji, x }: { key?: string | number; emoji: string; x: number }) => {
   const anim = useRef(new Animated.Value(0)).current;
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
@@ -848,12 +845,12 @@ const FloatingEmoji = memo(({ emoji, x }: { emoji: string; x: number }) => {
       style={{
         position: 'absolute',
         left: x * windowWidth,
-        transform: [{ translateY }, { translateX }, { scale }],
         opacity,
         zIndex: 9999,
       }}
       pointerEvents="none"
     >
+
       <Text style={{ fontSize: 32 }}>{emoji}</Text>
     </Animated.View>
   );
@@ -861,7 +858,7 @@ const FloatingEmoji = memo(({ emoji, x }: { emoji: string; x: number }) => {
 
 FloatingEmoji.displayName = 'FloatingEmoji';
 
-const FaceCam = memo(({ stream, label, isLocal }: { stream: any; label: string; isLocal?: boolean }) => {
+const FaceCam = memo(({ key, stream, label, isLocal }: { key?: string | number; stream: any; label: string; isLocal?: boolean }) => {
   if (!stream) return null;
   return (
     <View style={styles.faceCamContainer}>
@@ -1026,10 +1023,10 @@ const WatchPartyPlayerScreen = () => {
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource | null>(() =>
     resolvedVideoUrl
       ? createPlaybackSource({
-          uri: resolvedVideoUrl,
-          headers: resolvedVideoHeaders,
-          streamType: resolvedStreamType,
-        })
+        uri: resolvedVideoUrl,
+        headers: resolvedVideoHeaders,
+        streamType: resolvedStreamType,
+      })
       : null,
   );
 
@@ -1045,7 +1042,24 @@ const WatchPartyPlayerScreen = () => {
   const [movieSettings, setMovieSettings] = useState<MovieSettings>(DEFAULT_MOVIE_SETTINGS);
   const autoRecoveryRef = useRef<{ lastAttemptAt: number }>({ lastAttemptAt: 0 });
 
-  const videoRef = useRef<Video | null>(null);
+  const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
+  const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
+  const [qualityLoadingId, setQualityLoadingId] = useState<string | null>(null);
+
+  const videoPlaybackSource: any = useMemo(() => {
+    if (!playbackSource) return null;
+    const uri = qualityOverrideUri ?? playbackSource.uri;
+    const headers: Record<string, string> = {
+      'User-Agent': DEFAULT_STREAM_UA,
+      ...(playbackSource.headers || {}),
+    };
+    return { uri, headers };
+  }, [playbackSource, qualityOverrideUri]);
+
+  const player = useVideoPlayer(videoPlaybackSource, (p) => {
+    p.loop = false;
+  });
+
   const [activeTitle, setActiveTitle] = useState(displayTitle);
 
   useEffect(() => {
@@ -1095,7 +1109,7 @@ const WatchPartyPlayerScreen = () => {
     const tag = 'MovieFlixWatchPartyPlayer';
     return () => {
       keepAwakeActiveRef.current = false;
-      void deactivateKeepAwake(tag).catch(() => {});
+      void deactivateKeepAwake(tag).catch(() => { });
     };
   }, []);
 
@@ -1117,20 +1131,19 @@ const WatchPartyPlayerScreen = () => {
   }, []);
 
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState) => {
+    const sub = AppState.addEventListener('change', (nextState: any) => {
       appStateRef.current = nextState;
       const isActive = nextState === 'active';
       setAppIsActive(isActive);
 
       if (isActive && pendingAudioFocusRetryRef.current) {
         pendingAudioFocusRetryRef.current = false;
-        const video = videoRef.current;
-        if (!video) return;
+        if (!player) return;
         if (!isPlayingRef.current) return;
         void (async () => {
           await ensurePlaybackAudioMode();
           try {
-            await video.playAsync();
+            player.play();
           } catch {
             // ignore
           }
@@ -1157,14 +1170,14 @@ const WatchPartyPlayerScreen = () => {
     if (!shouldKeepAwake) {
       if (keepAwakeActiveRef.current) {
         keepAwakeActiveRef.current = false;
-        void deactivateKeepAwake(tag).catch(() => {});
+        void deactivateKeepAwake(tag).catch(() => { });
       }
       return;
     }
 
     if (!keepAwakeActiveRef.current) {
       keepAwakeActiveRef.current = true;
-      void activateKeepAwakeAsync(tag).catch(() => {});
+      void activateKeepAwakeAsync(tag).catch(() => { });
     }
   }, [appIsActive, isPlaying]);
 
@@ -1233,7 +1246,7 @@ const WatchPartyPlayerScreen = () => {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
 
-    (pc as any).onicecandidate = (event: any) => {
+    (pc as any).onicecandidate = (event: RTCPeerConnectionIceEvent) => {
       if (event.candidate && roomCode && user?.uid) {
         const ref = doc(firestore, 'watchParties', roomCode, 'camSignaling', user.uid, 'ice', Math.random().toString(36).slice(2));
         void setDoc(ref, {
@@ -1244,7 +1257,7 @@ const WatchPartyPlayerScreen = () => {
       }
     };
 
-    (pc as any).ontrack = (event: any) => {
+    (pc as any).ontrack = (event: RTCTrackEvent) => {
       if (event.streams[0]) {
         setRemoteCamStreams(prev => ({ ...prev, [targetUid]: event.streams[0] }));
       }
@@ -1270,7 +1283,7 @@ const WatchPartyPlayerScreen = () => {
 
     // 2. Listen for Others
     const signalingCol = collection(firestore, 'watchParties', roomCode, 'camSignaling');
-    const unsub = onSnapshot(signalingCol, async (snap) => {
+    const unsub = onSnapshot(signalingCol, async (snap: any) => {
       for (const change of snap.docChanges()) {
         const otherId = change.doc.id;
         if (otherId === user.uid) continue;
@@ -1297,10 +1310,10 @@ const WatchPartyPlayerScreen = () => {
     // 3. Listen for Offers/Answers
     const offersRef = collection(firestore, 'watchParties', roomCode, 'camSignaling', 'OFFERS_HUB', 'items'); // Simplified hub or per-user
     // Actually, per-user is better: camSignaling/{targetId}/offers/{senderId}
-    
+
     return () => {
       unsub();
-      void updateDoc(mySignalingRef, { active: false }).catch(() => {});
+      void updateDoc(mySignalingRef, { active: false }).catch(() => { });
     };
   }, [faceCamEnabled, roomCode, user?.uid, localCamStream, getOrCreatePC]);
 
@@ -1321,7 +1334,7 @@ const WatchPartyPlayerScreen = () => {
     if (!roomCode) return;
     const pollsRef = collection(firestore, 'watchParties', roomCode, 'polls');
     const q = query(pollsRef, orderBy('createdAt', 'desc'), limit(1));
-    const unsub = onSnapshot(q, (snap) => {
+    const unsub = onSnapshot(q, (snap: any) => {
       if (!snap.empty) {
         const poll = { id: snap.docs[0].id, ...snap.docs[0].data() as any };
         const age = Date.now() - (poll.createdAt?.toMillis?.() ?? Date.now());
@@ -1353,9 +1366,9 @@ const WatchPartyPlayerScreen = () => {
     if (!roomCode) return;
     const reactionsRef = collection(firestore, 'watchParties', roomCode, 'reactions');
     const q = query(reactionsRef, orderBy('createdAt', 'asc'));
-    
-    const unsub = onSnapshot(q, (snap) => {
-      snap.docChanges().forEach((change) => {
+
+    const unsub = onSnapshot(q, (snapshot: any) => {
+      snapshot.docChanges().forEach((change: any) => {
         if (change.type === 'added') {
           const data = change.doc.data();
           const id = change.doc.id;
@@ -1395,7 +1408,7 @@ const WatchPartyPlayerScreen = () => {
     const q = query(participantsRef, orderBy('joinedAt', 'desc'));
     const unsub = onSnapshot(
       q,
-      (snap) => {
+      (snap: any) => {
         if (cancelled) return;
         setWatchPartyParticipantsCount(snap.size);
       },
@@ -1440,7 +1453,7 @@ const WatchPartyPlayerScreen = () => {
     return () => {
       cancelled = true;
       unsub();
-      void leaveWatchPartyAsParticipant({ code: roomCode, userId: user.uid }).catch(() => {});
+      void leaveWatchPartyAsParticipant({ code: roomCode, userId: user.uid }).catch(() => { });
     };
   }, [roomCode, router, user]);
 
@@ -1472,7 +1485,7 @@ const WatchPartyPlayerScreen = () => {
       if (!opts?.force && now - lastPlaybackPublishRef.current.ts < SYNC_INTERVAL_MS) return;
       lastPlaybackPublishRef.current = { ts: now, positionMillis: next.positionMillis, isPlaying: next.isPlaying };
 
-      await updateWatchPartyPlayback(roomCode, next, user.uid).catch(() => {});
+      await updateWatchPartyPlayback(roomCode, next, user.uid).catch(() => { });
     },
     [isWatchPartyHost, user?.uid, roomCode],
   );
@@ -1483,15 +1496,14 @@ const WatchPartyPlayerScreen = () => {
       if (!roomCode) return;
       if (!isWatchPartyHost) return;
 
-      await updateWatchPartyEpisode(roomCode, episode).catch(() => {});
+      await updateWatchPartyEpisode(roomCode, episode).catch(() => { });
     },
     [isWatchPartyHost, roomCode],
   );
 
   const applyRemotePlayback = useCallback(
     async (remote: { isPlaying: boolean; positionMillis: number; updatedAtMillis: number }) => {
-      const video = videoRef.current;
-      if (!video) {
+      if (!player) {
         pendingRemotePlaybackRef.current = remote;
         return;
       }
@@ -1513,12 +1525,12 @@ const WatchPartyPlayerScreen = () => {
       applyingRemotePlaybackRef.current = true;
       try {
         if (diff > 1500) {
-          await video.setPositionAsync(desiredPosition);
+          player.currentTime = desiredPosition / 1000;
         }
         if (remote.isPlaying) {
-          await video.playAsync();
+          player.play();
         } else {
-          await video.pauseAsync();
+          player.pause();
         }
       } catch {
         pendingRemotePlaybackRef.current = remote;
@@ -1534,7 +1546,7 @@ const WatchPartyPlayerScreen = () => {
 
   useEffect(() => {
     if (!watchPartyRef) return;
-    const unsub = onSnapshot(watchPartyRef, (snap) => {
+    const unsub = onSnapshot(watchPartyRef, (snap: any) => {
       if (!snap.exists()) return;
       const data = snap.data() as any;
       const hostId = typeof data.hostId === 'string' ? data.hostId : null;
@@ -1686,11 +1698,11 @@ const WatchPartyPlayerScreen = () => {
       videoUrl: resolvedVideoUrl ?? null,
       videoHeaders: resolvedVideoHeaders ?? null,
       streamType: resolvedStreamType ?? null,
-    }).catch(() => {});
+    }).catch(() => { });
 
     return () => {
       if (!isWatchPartyHost) return;
-      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => {});
+      void updateDoc(watchPartyRef, { isOpen: false }).catch(() => { });
     };
   }, [isWatchPartyHost, resolvedStreamType, resolvedVideoHeaders, resolvedVideoUrl, user?.uid, watchPartyRef]);
 
@@ -1785,9 +1797,7 @@ const WatchPartyPlayerScreen = () => {
   const [selectedAudioKey, setSelectedAudioKey] = useState<string>('auto');
   const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
   const qualityOptionsRef = useRef<QualityOption[]>([]);
-  const [selectedQualityId, setSelectedQualityId] = useState<string>('auto');
-  const [qualityOverrideUri, setQualityOverrideUri] = useState<string | null>(null);
-  const [qualityLoadingId, setQualityLoadingId] = useState<string | null>(null);
+
   const autoQualityStepRef = useRef(0);
   const lastAutoDowngradeTsRef = useRef(0);
 
@@ -1893,10 +1903,10 @@ const WatchPartyPlayerScreen = () => {
     setPlaybackSource(
       resolvedVideoUrl
         ? createPlaybackSource({
-            uri: resolvedVideoUrl,
-            headers: resolvedVideoHeaders,
-            streamType: resolvedStreamType,
-          })
+          uri: resolvedVideoUrl,
+          headers: resolvedVideoHeaders,
+          streamType: resolvedStreamType,
+        })
         : null,
     );
     setScrapeError(null);
@@ -2160,56 +2170,6 @@ const WatchPartyPlayerScreen = () => {
     return activeUri.toLowerCase().includes('.m3u8');
   }, [playbackSource, qualityOverrideUri]);
 
-  // Video playback source
-  const videoPlaybackSource: AVPlaybackSource | null = useMemo(() => {
-    if (!playbackSource) return null;
-    const uri = qualityOverrideUri ?? playbackSource.uri;
-
-    const shouldForceHls = isHlsSource || playbackSource.streamType === 'hls';
-    const shouldForceMp4 = !shouldForceHls && playbackSource.streamType === 'file';
-
-    // Build headers with proper referers for known hosts
-    const headers: Record<string, string> = {
-      'User-Agent': DEFAULT_STREAM_UA,
-      ...(playbackSource.headers || {}),
-    };
-
-    const applyKnownHostHeaders = (type: string) => {
-      if (type === 'streamtape') {
-        headers['Referer'] = headers['Referer'] || 'https://streamtape.com/';
-        headers['Origin'] = headers['Origin'] || 'https://streamtape.com';
-        return;
-      }
-      if (type === 'mixdrop') {
-        headers['Referer'] = headers['Referer'] || 'https://mixdrop.co/';
-        headers['Origin'] = headers['Origin'] || 'https://mixdrop.co';
-        return;
-      }
-      if (type === 'filemoon') {
-        headers['Referer'] = headers['Referer'] || 'https://filemoon.sx/';
-      }
-    };
-
-    // Primary detection from the active URI.
-    const hostType = getVideoHostHandler(uri);
-    applyKnownHostHeaders(hostType);
-
-    // Optional fallback: if the URI is a proxy (generic host), use embedId hint for hotlink headers.
-    if (useHotlinkHeaderFallback && hostType === 'generic') {
-      const hint = playbackSource.embedId;
-      if (hint === 'streamtape' || hint === 'mixdrop' || hint === 'filemoon') {
-        applyKnownHostHeaders(hint);
-      }
-    }
-
-    return {
-      uri,
-      headers,
-      ...(shouldForceHls ? { overrideFileExtensionAndroid: 'm3u8' } : null),
-      ...(shouldForceMp4 ? { overrideFileExtensionAndroid: 'mp4' } : null),
-    };
-  }, [playbackSource, qualityOverrideUri, isHlsSource, useHotlinkHeaderFallback]);
-
   const activeStreamUri = videoPlaybackSource?.uri;
   const activeStreamHeaders = useMemo<Record<string, string>>(() => {
     const fromPlaybackSource = (playbackSource?.headers as Record<string, string> | undefined) ?? {};
@@ -2298,16 +2258,15 @@ const WatchPartyPlayerScreen = () => {
       pendingSeekAfterReloadRef.current = null;
       pendingShouldPlayAfterReloadRef.current = null;
 
-      const video = videoRef.current;
-      if (video) {
-        void video
-          .setPositionAsync(seekTo)
-          .then(() => {
-            if (shouldPlayAfter === true) return video.playAsync();
-            if (shouldPlayAfter === false) return video.pauseAsync();
-            return undefined;
-          })
-          .catch(() => {});
+      if (player) {
+        try {
+          player.currentTime = seekTo / 1000;
+          if (shouldPlayAfter === true) {
+            player.play();
+          } else if (shouldPlayAfter === false) {
+            player.pause();
+          }
+        } catch { }
       }
     }
 
@@ -2475,7 +2434,7 @@ const WatchPartyPlayerScreen = () => {
   // Loader state
   const isInitialStreamPending = !playbackSource && !!tmdbId && !!rawMediaType && !scrapeError;
   const isResolvingPendingPlayback = !!pendingPlaybackSource;
-  
+
   // Only show MovieFlixLoader for blocking operations (not buffering)
   const shouldShowMovieFlixLoader =
     !!qualityLoadingId ||
@@ -2743,11 +2702,9 @@ const WatchPartyPlayerScreen = () => {
     setQualityOptions(buildFileQualityOptions(playbackSource.qualities));
   }, [isHlsSource, playbackSource?.qualities]);
 
-  // Auto-select audio track
   useEffect(() => {
     if (!audioTrackOptions.length) return;
-    const video = videoRef.current;
-    if (!video) return;
+    if (!player) return;
 
     // Respect manual selection
     if (selectedAudioKey !== 'auto') return;
@@ -2769,11 +2726,11 @@ const WatchPartyPlayerScreen = () => {
     setSelectedAudioKey(chosen.id);
 
     if (chosen.language && chosen.language !== 'und') {
-      (video as any).setStatusAsync({
+      (player as any).setStatusAsync({
         selectedAudioTrack: { type: 'language', value: chosen.language },
       }).catch(() => { });
     } else {
-      (video as any).setStatusAsync({
+      (player as any).setStatusAsync({
         selectedAudioTrack: { type: 'system' },
       }).catch(() => { });
     }
@@ -2806,11 +2763,9 @@ const WatchPartyPlayerScreen = () => {
     Brightness.setBrightnessAsync(brightness).catch(() => { });
   }, [brightness]);
 
-  // Apply volume
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.setVolumeAsync(volume).catch(() => { });
+    if (!player) return;
+    (player as any).setVolumeAsync(volume).catch(() => { });
   }, [volume]);
 
   // Auto-hide controls when playing
@@ -2885,7 +2840,7 @@ const WatchPartyPlayerScreen = () => {
                 updatedAt: serverTimestamp(),
               },
               { merge: true },
-            ).catch(() => {});
+            ).catch(() => { });
           }
           return;
         }
@@ -2933,7 +2888,7 @@ const WatchPartyPlayerScreen = () => {
               updatedAt: serverTimestamp(),
             },
             { merge: true },
-          ).catch(() => {});
+          ).catch(() => { });
         }
 
         if (progressValue >= 0.7 && user?.uid) {
@@ -2975,258 +2930,146 @@ const WatchPartyPlayerScreen = () => {
     [watchHistoryKey, user?.uid, user?.displayName, user?.email, activeProfile?.id, activeProfile?.name, activeProfile?.avatarColor, activeProfile?.photoURL],
   );
 
-  // Handle playback status update
-  const handleStatusUpdate = useCallback((status: AVPlaybackStatusSuccess | any) => {
-    if (!status || !status.isLoaded) {
-      if (status?.error) {
-        console.log('[VideoPlayer] Playback error:', status.error);
-      }
-      return;
-    }
-
-    // Apply resume position once, when we have a stream loaded.
-    if (!resumeAppliedRef.current && !isSeeking && typeof resumeMillisParam === 'number' && resumeMillisParam > 0) {
-      try {
-        const currentPos = status.positionMillis || 0;
-        const duration = status.durationMillis;
-        const desired = duration && duration > 2000
-          ? Math.min(resumeMillisParam, Math.max(0, duration - 2000))
-          : resumeMillisParam;
-
-        if (currentPos + 1500 < desired) {
-          resumeAppliedRef.current = true;
-          (videoRef.current as any)?.setPositionAsync(desired).catch(() => {});
-          setSeekPosition(desired);
-        } else {
-          resumeAppliedRef.current = true;
-        }
-      } catch {
-        resumeAppliedRef.current = true;
-      }
-    }
-
-    const playingNow = Boolean(status.isPlaying);
-    const bufferingNow = Boolean(status.isBuffering);
+  const handlePlaybackStatusUpdate = useCallback(() => {
+    const isPlayingNow = player.playing;
+    const isBufferingNow = player.status === ('buffering' as any);
+    let currentPosition = player.currentTime * 1000;
+    let currentDuration = durationMillis || player.duration * 1000;
     const now = Date.now();
 
     if (__DEV__) {
-      const positionLabel = Math.round((status.positionMillis || 0) / 1000);
-      const key = `${playingNow ? 'play' : 'pause'}|${bufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
+      const positionLabel = Math.round(currentPosition / 1000);
+      const key = `${isPlayingNow ? 'play' : 'pause'}|${isBufferingNow ? 'buffer' : 'clear'}|${positionLabel}`;
       if (now - statusLogRef.current.lastTs > 2000 || statusLogRef.current.lastKey !== key) {
         console.log('[WatchParty] Status update', {
-          playing: playingNow,
-          buffering: bufferingNow,
-          positionMs: status.positionMillis || 0,
-          durationMs: status.durationMillis || null,
+          playing: isPlayingNow,
+          buffering: isBufferingNow,
+          positionMs: currentPosition,
+          durationMs: currentDuration,
         });
         statusLogRef.current = { lastTs: now, lastKey: key };
       }
     }
 
-    // Prevent UI flicker by ignoring status updates right after user intent
     if (now - lastPlayPauseIntentTsRef.current > 300) {
-      setIsPlaying(playingNow);
+      setIsPlaying(isPlayingNow);
     }
 
-    const currentPos = status.positionMillis || 0;
+    positionMillisRef.current = currentPosition;
+    if (currentPosition - prevPositionRef.current > 300) {
+      lastAdvanceTsRef.current = now;
+    }
+    prevPositionRef.current = currentPosition;
 
-    // Detect progress: if position advanced by >300ms, update last advance timestamp
-    try {
-      if (typeof prevPositionRef.current === 'number') {
-        if (currentPos - prevPositionRef.current > 300) {
-          lastAdvanceTsRef.current = Date.now();
-        }
-      }
-    } catch { }
-
-    prevPositionRef.current = currentPos;
-
-    // Show buffering overlay only when buffering persists and playback is effectively stalled
-    if (bufferingNow && !isSeeking) {
+    if (isBufferingNow && !isSeeking) {
       if (!bufferingOverlayTimeoutRef.current) {
         bufferingOverlayTimeoutRef.current = setTimeout(() => {
-          const now = Date.now();
-          const advancedRecently = now - lastAdvanceTsRef.current < 700;
-          if (!advancedRecently) {
+          const checkNow = Date.now();
+          if (checkNow - lastAdvanceTsRef.current >= 700) {
             setShowBufferingOverlay(true);
           }
           bufferingOverlayTimeoutRef.current = null;
         }, 650);
-      }
-
-      if (
-        movieSettings.autoLowerQualityOnBuffer &&
-        selectedQualityId === 'auto' &&
-        !autoDowngradeTimeoutRef.current
-      ) {
-        autoDowngradeTimeoutRef.current = setTimeout(() => {
-          autoDowngradeTimeoutRef.current = null;
-          void maybeAutoDowngradeQuality('stall');
-        }, 2500);
       }
     } else {
       if (bufferingOverlayTimeoutRef.current) {
         clearTimeout(bufferingOverlayTimeoutRef.current);
         bufferingOverlayTimeoutRef.current = null;
       }
-      if (autoDowngradeTimeoutRef.current) {
-        clearTimeout(autoDowngradeTimeoutRef.current);
-        autoDowngradeTimeoutRef.current = null;
-      }
-      if (showBufferingOverlay) {
-        setShowBufferingOverlay(false);
-      }
+      if (showBufferingOverlay) setShowBufferingOverlay(false);
     }
 
-    const currentPosition = status.positionMillis || 0;
     if (!isSeeking) {
       const lastUi = uiProgressUpdateRef.current;
-      const shouldUpdateUi =
-        now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250;
-      if (shouldUpdateUi) {
+      if (now - lastUi.lastTs >= 250 || Math.abs(currentPosition - lastUi.lastPos) >= 1250) {
         uiProgressUpdateRef.current = { lastTs: now, lastPos: currentPosition };
         setSeekPosition(currentPosition);
         setPositionMillis(currentPosition);
       }
     }
 
-    const playable = (status as any)?.playableDurationMillis;
-    if (typeof playable === 'number' && Number.isFinite(playable)) {
-      const nextBuffered = Math.max(currentPosition, playable);
-      if (Math.abs(nextBuffered - bufferedMillisRef.current) > 1500) {
-        bufferedMillisRef.current = nextBuffered;
-        setBufferedMillis(nextBuffered);
-      }
-    }
-
     if (roomCode && isWatchPartyHost && !applyingRemotePlaybackRef.current) {
       const last = lastPlaybackPublishRef.current;
       const shouldSyncWhilePlaying =
-        playingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
+        isPlayingNow && now - last.ts > 2000 && Math.abs(currentPosition - last.positionMillis) > 900;
       const shouldSyncWhilePaused =
-        !playingNow && now - last.ts > 5000 && Math.abs(currentPosition - last.positionMillis) > 1200;
+        !isPlayingNow && now - last.ts > 5000 && Math.abs(currentPosition - last.positionMillis) > 1200;
       if (shouldSyncWhilePlaying || shouldSyncWhilePaused) {
-        void publishWatchPartyPlayback({ isPlaying: playingNow, positionMillis: currentPosition });
+        void publishWatchPartyPlayback({ isPlaying: isPlayingNow, positionMillis: currentPosition });
       }
     }
     updateActiveCaption(currentPosition);
 
-    if (status.durationMillis) {
-      setDurationMillis(status.durationMillis);
+    if (currentDuration > 0 && durationMillis !== currentDuration) {
+      setDurationMillis(currentDuration);
     }
 
-    const derivedDuration = status.durationMillis ?? durationMillis;
-    if (derivedDuration && derivedDuration > 0) {
-      void persistWatchProgress(currentPosition, derivedDuration, {
-        force: status.didJustFinish,
-        markComplete: status.didJustFinish,
-      });
-    }
+    void persistWatchProgress(currentPosition, currentDuration);
+  }, [player, isSeeking, roomCode, isWatchPartyHost, publishWatchPartyPlayback, updateActiveCaption, persistWatchProgress, durationMillis]);
 
-    if (
-      status.didJustFinish &&
-      roomCode &&
-      isWatchPartyHost &&
-      watchPartyRef &&
-      user?.uid &&
-      !didClosePartyOnFinishRef.current
-    ) {
-      didClosePartyOnFinishRef.current = true;
-      void updateDoc(watchPartyRef, {
-        isOpen: false,
-        endedAt: serverTimestamp(),
-        playback: {
-          isPlaying: false,
-          positionMillis: Math.max(0, Math.floor(currentPosition)),
-          updatedBy: user.uid,
-          updatedAt: serverTimestamp(),
-        },
-      }).catch(() => {});
-    }
-  }, [
-    durationMillis,
-    isSeeking,
-    maybeAutoDowngradeQuality,
-    movieSettings.autoLowerQualityOnBuffer,
-    isWatchPartyHost,
-    persistWatchProgress,
-    publishWatchPartyPlayback,
-    resumeMillisParam,
-    user?.uid,
-    roomCode,
-    watchPartyRef,
-    selectedQualityId,
-    showBufferingOverlay,
-    updateActiveCaption,
-  ]);
-
-  // Persist progress on unmount
   useEffect(() => {
-    return () => {
-      if (positionMillis > 0 && durationMillis > 0) {
-        void persistWatchProgress(positionMillis, durationMillis, { force: true });
+    const subStatus = player.addListener('statusChange', handlePlaybackStatusUpdate);
+    const subPlaying = player.addListener('playingChange', handlePlaybackStatusUpdate);
+    const subTime = player.addListener('timeUpdate', handlePlaybackStatusUpdate);
+    const subEnd = player.addListener('playToEnd', () => {
+      void persistWatchProgress(durationMillis, durationMillis, { force: true, markComplete: true });
+      if (roomCode && isWatchPartyHost && watchPartyRef && user?.uid && !didClosePartyOnFinishRef.current) {
+        didClosePartyOnFinishRef.current = true;
+        void updateDoc(watchPartyRef, {
+          isOpen: false,
+          endedAt: serverTimestamp(),
+          playback: {
+            isPlaying: false,
+            positionMillis: Math.max(0, Math.floor(durationMillis)),
+            updatedBy: user.uid,
+            updatedAt: serverTimestamp(),
+          },
+        }).catch(() => { });
       }
-    };
-  }, [positionMillis, durationMillis, persistWatchProgress]);
+    });
 
-  // Toggle play/pause
-  const togglePlayPause = async () => {
-    const video = videoRef.current;
-    if (!video) return;
+    return () => {
+      subStatus.remove();
+      subPlaying.remove();
+      subTime.remove();
+      subEnd.remove();
+    };
+  }, [player, handlePlaybackStatusUpdate, persistWatchProgress, roomCode, isWatchPartyHost, watchPartyRef, user?.uid, durationMillis]);
+
+  const togglePlayPause = useCallback(() => {
     bumpControlsLife();
     lastPlayPauseIntentTsRef.current = Date.now();
-
     const nextPlaying = !isPlaying;
-    setIsPlaying(nextPlaying); // Optimistic update to prevent UI flicker
+    setIsPlaying(nextPlaying);
+    if (!nextPlaying) setShowControls(true);
+
     void publishWatchPartyPlayback(
       { isPlaying: nextPlaying, positionMillis: positionMillisRef.current },
       { force: true },
     );
 
-    try {
-      if (isPlaying) {
-        await video.pauseAsync();
-        setShowControls(true);
-      } else {
-        await ensurePlaybackAudioMode();
-        await video.playAsync();
-      }
-    } catch (err: any) {
-      console.warn('Playback failed', err);
-      const msg = err?.message || String(err);
-      if (msg.toLowerCase().includes('audiofocus') || msg.toLowerCase().includes('audio focus') || msg.includes('AudioFocusNotAcquiredException')) {
-        pendingAudioFocusRetryRef.current = true;
-        Alert.alert('Playback blocked', 'This app is currently in the background, so audio focus could not be acquired. Please bring the app to the foreground and try again.');
-      } else {
-        Alert.alert('Playback error', msg);
-      }
+    if (nextPlaying) {
+      void ensurePlaybackAudioMode();
+      player.play();
+    } else {
+      player.pause();
     }
-  };
+  }, [bumpControlsLife, ensurePlaybackAudioMode, isPlaying, player, publishWatchPartyPlayback]);
 
-  // Seek by delta
   const seekBy = async (deltaMillis: number) => {
-    const video = videoRef.current;
-    if (!video) return;
     bumpControlsLife();
-    const next = Math.max(
-      0,
-      Math.min(positionMillis + deltaMillis, durationMillis)
-    );
-    await video.setPositionAsync(next);
+    const next = Math.max(0, Math.min(positionMillisRef.current + deltaMillis, durationMillis));
+    player.currentTime = next / 1000;
     setSeekPosition(next);
-
     void publishWatchPartyPlayback({ isPlaying, positionMillis: next }, { force: true });
   };
 
-  // Toggle playback rate
-  const handleRateToggle = async () => {
-    const video = videoRef.current;
-    if (!video) return;
+  const handleRateToggle = useCallback(() => {
     bumpControlsLife();
     const nextRate = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
     setPlaybackRate(nextRate);
-    await video.setRateAsync(nextRate, true);
-  };
+    player.playbackRate = nextRate;
+  }, [bumpControlsLife, playbackRate, player]);
 
   // Format time
   const formatTime = (millis: number) => {
@@ -3260,7 +3103,7 @@ const WatchPartyPlayerScreen = () => {
 
   useEffect(() => {
     if (!isWatchPartyHost || !roomCode) return;
-    
+
     const facts = [
       "Did you know? The director improvised this scene!",
       "Trivia: This movie took 3 years to animate.",
@@ -3288,9 +3131,9 @@ const WatchPartyPlayerScreen = () => {
     if (!roomCode) return;
     const messagesRef = collection(firestore, 'watchParties', roomCode, 'messages');
     const q = query(messagesRef, orderBy('createdAt', 'asc'));
-    const unsub = onSnapshot(q, (snapshot) => {
+    const unsub = onSnapshot(q, (snapshot: any) => {
       const items: Array<{ id: string; user: string; text: string; createdAt?: any; avatar?: string | null }> = [];
-      snapshot.forEach((docSnap) => {
+      snapshot.forEach((docSnap: any) => {
         const data = docSnap.data() as any;
         items.push({
           id: docSnap.id,
@@ -3508,28 +3351,27 @@ const WatchPartyPlayerScreen = () => {
         setCaptionLoadingId(null);
       }
     },
-    [captionSources, positionMillis, selectedCaptionId, updateActiveCaption, bumpControlsLife],
+    [captionSources, positionMillis, selectedCaptionId, updateActiveCaption, bumpControlsLife, playbackSource?.headers],
   );
 
   // Handle audio select
   const handleAudioSelect = useCallback(
     async (option: AudioTrackOption | null) => {
       bumpControlsLife();
-      const video = videoRef.current;
-      if (!video) return;
+      if (!player) return;
 
       setSelectedAudioKey(option?.id ?? 'auto');
 
       try {
         if (option?.language && option.language !== 'und') {
-          await (video as any).setStatusAsync({
+          await (player as any).setStatusAsync({
             selectedAudioTrack: {
               type: 'language',
               value: option.language,
             },
           });
         } else {
-          await (video as any).setStatusAsync({
+          await (player as any).setStatusAsync({
             selectedAudioTrack: { type: 'system' },
           });
         }
@@ -3853,17 +3695,11 @@ const WatchPartyPlayerScreen = () => {
 
         {videoPlaybackSource ? (
           <>
-            <Video
-              key={videoReloadKey}
-              ref={videoRef}
-              source={videoPlaybackSource}
-              style={styles.video}
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={isPlaying}
-              useNativeControls={false}
-              onPlaybackStatusUpdate={handleStatusUpdate}
-              onError={handleVideoError}
-              onLoad={handleVideoLoad}
+            <VideoView
+              player={player}
+              // @ts-ignore - expo-video typings for VideoView conflict with React Native ViewProps
+              style={styles.video as any}
+              contentFit="contain"
             />
 
             {/* Surface tap handler sits behind controls so it never steals button presses. */}
@@ -3992,7 +3828,7 @@ const WatchPartyPlayerScreen = () => {
                     if (!roomCode) return;
                     void Share.share({
                       message: `Join my MovieFlix Watch Party. Code: ${roomCode}`,
-                    }).catch(() => {});
+                    }).catch(() => { });
                   }}
                   disabled={!roomCode}
                 >
@@ -4090,7 +3926,7 @@ const WatchPartyPlayerScreen = () => {
                     <Text style={styles.chatTitle}>Party chat</Text>
                     <FlatList
                       data={chatMessages}
-                      keyExtractor={(item) => item.id}
+                      keyExtractor={(item: any) => item.id}
                       style={styles.chatList}
                       contentContainerStyle={styles.chatListContent}
                       renderItem={({ item }: { item: any }) => (
@@ -4221,7 +4057,7 @@ const WatchPartyPlayerScreen = () => {
               </View>
             )}
             {/* AV drawer */}
-            
+
             {avDrawerOpen && (
               <View style={styles.avDrawer}>
                 <View style={styles.avDrawerHeader}>
@@ -4399,13 +4235,15 @@ const WatchPartyPlayerScreen = () => {
                         setIsSeeking(true);
                         bumpControlsLife();
                       }}
-                      onValueChange={(val) => {
+                      onValueChange={(val: number) => {
                         setSeekPosition(val);
                         bumpControlsLife();
                       }}
-                      onSlidingComplete={async (val) => {
+                      onSlidingComplete={async (val: number) => {
                         setIsSeeking(false);
-                        await videoRef.current?.setPositionAsync(val);
+                        try {
+                          player.currentTime = val / 1000;
+                        } catch { }
                         // Snap captions immediately after a seek.
                         updateActiveCaption(val, true);
                         bumpControlsLife();
@@ -5629,33 +5467,33 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   ccWrapper: {
-  alignItems: 'center',
-},
-ccTrack: {
-  width: 64,
-  borderRadius: 32,
-  backgroundColor: 'rgba(20,22,32,0.85)', // matches glass parent
-  overflow: 'hidden',
-  justifyContent: 'flex-end',
-  borderWidth: 1,
-  borderColor: 'rgba(255,255,255,0.12)',
-},
-ccFill: {
-  width: '100%',
-},
-ccIconWrap: {
-  position: 'absolute',
-  top: '45%',
-  left: 0,
-  right: 0,
-  alignItems: 'center',
-},
+    alignItems: 'center',
+  },
+  ccTrack: {
+    width: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(20,22,32,0.85)', // matches glass parent
+    overflow: 'hidden',
+    justifyContent: 'flex-end',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  ccFill: {
+    width: '100%',
+  },
+  ccIconWrap: {
+    position: 'absolute',
+    top: '45%',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
   ccLabel: {
-  marginTop: 10,
-  fontSize: 12,
-  fontWeight: '600',
-  color: 'rgba(255,255,255,0.9)',
-},
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+  },
   manualOverrideContainer: {
     marginTop: 20,
     width: '100%',

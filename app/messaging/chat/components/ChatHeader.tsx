@@ -1,10 +1,12 @@
+import LiquidGlass from '@/components/app-components/LiquidGlass';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React from 'react';
-import { Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import * as Haptics from 'expo-haptics';
+import React, { useRef, useEffect } from 'react';
+import { Animated, Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Conversation, Profile } from '../../controller';
-import LiquidGlass from '@/app/components/LiquidGlass';
 
 interface ChatHeaderProps {
   recipient: Profile | null;
@@ -32,6 +34,28 @@ const ChatHeader = ({
   callDisabled,
 }: ChatHeaderProps) => {
   const router = useRouter();
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
+  
+  const shimmerAnim = useRef(new Animated.Value(0)).current;
+  const typingDotAnim = useRef(new Animated.Value(0)).current;
+  
+  useEffect(() => {
+    // Holographic shimmer
+    Animated.loop(
+      Animated.timing(shimmerAnim, { toValue: 1, duration: 2500, useNativeDriver: true })
+    ).start();
+    
+    // Typing dots animation
+    if (isTyping) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(typingDotAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(typingDotAnim, { toValue: 0, duration: 400, useNativeDriver: true }),
+        ])
+      ).start();
+    }
+  }, [isTyping]);
 
   const formatLastSeen = (date: Date) => {
     const now = new Date();
@@ -48,6 +72,9 @@ const ChatHeader = ({
   };
 
   const handleProfilePress = () => {
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
     if (conversation?.isGroup) {
       if (conversation.id) {
         router.push(`/messaging/group-details?conversationId=${conversation.id}`);
@@ -69,20 +96,56 @@ const ChatHeader = ({
 
   return (
     <View style={styles.headerWrap}>
-      <LinearGradient
-        colors={['rgba(229,9,20,0.22)', 'rgba(10,12,24,0.9)']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
+      <LiquidGlass
+        glowColor={accent}
+        tintOpacity={0.85}
+        cornerRadius={22}
+        glowIntensity={0.3}
+        borderOpacity={0.35}
+        chromaticAberration
+        breathingEffect
         style={styles.headerGradient}
       >
+        {/* Holographic shimmer overlay */}
+        <Animated.View 
+          style={[
+            styles.hologramShimmer,
+            {
+              opacity: shimmerAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.1, 0.2, 0.1] }),
+              transform: [{ translateX: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-100, 100] }) }],
+            }
+          ]}
+        >
+          <LinearGradient
+            colors={['transparent', 'rgba(255,255,255,0.1)', 'transparent']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+        
         <View style={styles.headerInner}>
           <TouchableOpacity onPress={() => router.back()} style={styles.backButton} accessibilityLabel="Back">
-            <Ionicons name="chevron-back" size={22} color="white" />
+            <LiquidGlass
+              cornerRadius={14}
+              tintOpacity={0.2}
+              interactive
+              style={styles.backButtonGlass}
+            >
+              <Ionicons name="chevron-back" size={22} color="white" />
+            </LiquidGlass>
           </TouchableOpacity>
 
           {conversation?.isGroup ? (
             <TouchableOpacity onPress={handleProfilePress}>
-              <View style={styles.groupAvatar}>
+              <LiquidGlass 
+                cornerRadius={14}
+                tintOpacity={0.2}
+                tintColor={accent}
+                glowColor={accent}
+                glowIntensity={0.3}
+                style={styles.groupAvatar}
+              >
                 <Text style={styles.groupAvatarText}>
                   {(conversation.name || 'G')
                     .split(' ')
@@ -91,16 +154,21 @@ const ChatHeader = ({
                     .slice(0, 2)
                     .toUpperCase()}
                 </Text>
-              </View>
+              </LiquidGlass>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity onPress={handleProfilePress}>
               {recipient?.photoURL ? (
                 <Image source={{ uri: recipient.photoURL }} style={styles.avatar} />
               ) : (
-                <View style={styles.avatarFallback}>
+                <LinearGradient
+                  colors={[accent, '#ff6b35']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.avatarFallback}
+                >
                   <Text style={styles.avatarFallbackText}>{avatarInitials}</Text>
-                </View>
+                </LinearGradient>
               )}
             </TouchableOpacity>
           )}
@@ -129,17 +197,19 @@ const ChatHeader = ({
               <TouchableOpacity
                 style={styles.actionBtn}
                 accessibilityLabel="Search messages"
-                onPress={onSearch}
+                onPress={() => {
+                  if (Platform.OS !== 'web') {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }
+                  onSearch();
+                }}
               >
                 <LiquidGlass
-                  glowColor="#ffffff"
-                  tintColor="#1A1A2E"
-                  tintOpacity={0.4}
-                  cornerRadius={10}
-                  glowIntensity={0.5}
-                  borderWidth={1}
+                  tintOpacity={0.3}
+                  cornerRadius={12}
+                  borderOpacity={0.3}
+                  interactive
                   style={styles.actionGlass}
-                  animated={false}
                 >
                   <Ionicons name="search" size={18} color="white" />
                 </LiquidGlass>
@@ -149,17 +219,19 @@ const ChatHeader = ({
               <TouchableOpacity
                 style={styles.actionBtn}
                 accessibilityLabel="Group options"
-                onPress={onEditGroup}
+                onPress={() => {
+                  if (Platform.OS !== 'web') {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  }
+                  onEditGroup?.();
+                }}
               >
                 <LiquidGlass
-                  glowColor="#ffffff"
-                  tintColor="#1A1A2E"
-                  tintOpacity={0.4}
-                  cornerRadius={10}
-                  glowIntensity={0.5}
-                  borderWidth={1}
+                  tintOpacity={0.3}
+                  cornerRadius={12}
+                  borderOpacity={0.3}
+                  interactive
                   style={styles.actionGlass}
-                  animated={false}
                 >
                   <Ionicons name="settings-outline" size={18} color="white" />
                 </LiquidGlass>
@@ -168,44 +240,54 @@ const ChatHeader = ({
             <TouchableOpacity
               style={[styles.actionBtn, callDisabled && styles.actionBtnDisabled]}
               accessibilityLabel="Call"
-              onPress={onStartVoiceCall}
+              onPress={() => {
+                if (Platform.OS !== 'web') {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                }
+                onStartVoiceCall?.();
+              }}
               disabled={callDisabled}
             >
               <LiquidGlass
-                glowColor={callDisabled ? 'rgba(255,255,255,0.3)' : '#22c55e'}
-                tintColor="#1A1A2E"
-                tintOpacity={callDisabled ? 0.2 : 0.4}
-                cornerRadius={10}
-                glowIntensity={callDisabled ? 0.2 : 0.5}
-                borderWidth={1}
+                tintOpacity={callDisabled ? 0.15 : 0.3}
+                tintColor="#22c55e"
+                cornerRadius={12}
+                borderOpacity={callDisabled ? 0.15 : 0.35}
+                glowColor="#22c55e"
+                glowIntensity={callDisabled ? 0 : 0.3}
+                interactive={!callDisabled}
                 style={styles.actionGlass}
-                animated={false}
               >
-                <Ionicons name="call" size={18} color={callDisabled ? 'rgba(255,255,255,0.4)' : 'white'} />
+                <Ionicons name="call" size={18} color={callDisabled ? 'rgba(255,255,255,0.4)' : '#22c55e'} />
               </LiquidGlass>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.actionBtn, callDisabled && styles.actionBtnDisabled]}
               accessibilityLabel="Video call"
-              onPress={onStartVideoCall}
+              onPress={() => {
+                if (Platform.OS !== 'web') {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                }
+                onStartVideoCall?.();
+              }}
               disabled={callDisabled}
             >
               <LiquidGlass
-                glowColor={callDisabled ? 'rgba(255,255,255,0.3)' : '#3b82f6'}
-                tintColor="#1A1A2E"
-                tintOpacity={callDisabled ? 0.2 : 0.4}
-                cornerRadius={10}
-                glowIntensity={callDisabled ? 0.2 : 0.5}
-                borderWidth={1}
+                tintOpacity={callDisabled ? 0.15 : 0.3}
+                tintColor="#22c55e"
+                cornerRadius={12}
+                borderOpacity={callDisabled ? 0.15 : 0.35}
+                glowColor="#22c55e"
+                glowIntensity={callDisabled ? 0 : 0.3}
+                interactive={!callDisabled}
                 style={styles.actionGlass}
-                animated={false}
               >
-                <Ionicons name="videocam" size={20} color={callDisabled ? 'rgba(255,255,255,0.4)' : 'white'} />
+                <Ionicons name="videocam" size={20} color={callDisabled ? 'rgba(255,255,255,0.4)' : '#22c55e'} />
               </LiquidGlass>
             </TouchableOpacity>
           </View>
         </View>
-      </LinearGradient>
+      </LiquidGlass>
     </View>
   );
 };
@@ -218,45 +300,64 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === 'ios' ? 6 : 4,
   },
   headerGradient: {
-    borderRadius: 18,
-    padding: 1,
-    shadowColor: 'transparent',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0,
-    shadowRadius: 0,
-    elevation: 0,
+    borderRadius: 22,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  hologramShimmer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
   headerInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderRadius: 17,
     paddingVertical: 8,
-    paddingHorizontal: 10,
-    backgroundColor: 'transparent',
-    borderWidth: 0,
-    borderColor: 'transparent',
+    paddingHorizontal: 8,
   },
   backButton: {
-    marginRight: 10,
-    padding: 6,
+    marginRight: 8,
+  },
+  backButtonGlass: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
   },
   avatar: {
     width: 42,
     height: 42,
-    borderRadius: 12,
+    borderRadius: 14,
     marginRight: 10,
     backgroundColor: 'rgba(255,255,255,0.04)',
   },
-  groupAvatar: {
+  avatarFallback: {
     width: 42,
     height: 42,
     borderRadius: 14,
     marginRight: 10,
-    backgroundColor: 'rgba(229,9,20,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  avatarFallbackText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 15,
+    letterSpacing: 0.5,
+  },
+  groupAvatar: {
+    width: 42,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
   },
   groupAvatarText: {
     color: '#fff',
@@ -283,37 +384,20 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   actionBtn: {
-    marginLeft: 10,
-    borderRadius: 10,
+    marginLeft: 8,
+    borderRadius: 12,
     overflow: 'hidden',
   },
   actionBtnDisabled: {
-    opacity: 0.5,
+    opacity: 0.6,
   },
   actionGlass: {
     width: 36,
     height: 36,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-  },
-  avatarFallback: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-    marginRight: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarFallbackText: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: 14,
-    letterSpacing: 0.4,
   },
 });
 

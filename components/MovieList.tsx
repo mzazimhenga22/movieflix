@@ -1,15 +1,15 @@
-import { useAccent } from '@/app/components/AccentContext';
-import LiquidGlass from '@/app/components/LiquidGlass';
-import { SongCard } from '@/app/components/SongItem';
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
+import { SongCard } from '@/components/app-components/SongItem';
 import { IMAGE_BASE_URL } from '@/constants/api';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 import { getResponsiveCardDimensions } from '@/hooks/useResponsive';
 import { getProfileScopedKey } from '@/lib/profileStorage';
+import { useMyList } from '@/src/store/myListStore';
 import { Media } from '@/types';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
-import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -17,7 +17,6 @@ import { useRouter } from 'expo-router';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
-  Platform,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -63,8 +62,6 @@ interface MovieListProps {
   carousel?: boolean;
   onItemPress?: (item: Media) => void;
   showProgress?: boolean;
-  myListIds?: number[];
-  onToggleMyList?: (item: Media) => void;
   variant?: 'default' | 'large' | 'compact' | 'spotlight';
 }
 
@@ -75,10 +72,8 @@ const MovieCard = memo(function MovieCard({
   scrollX,
   variant,
   showProgress,
-  isInList,
   accent,
   onPress,
-  onToggleList,
   cardWidth,
   cardHeight,
   cardGap,
@@ -90,16 +85,15 @@ const MovieCard = memo(function MovieCard({
   scrollX: any;
   variant: string;
   showProgress: boolean;
-  isInList: boolean;
   accent: string;
   onPress: () => void;
-  onToggleList: () => void;
   cardWidth: number;
   cardHeight: number;
   cardGap: number;
   borderRadius: number;
   isSmallScreen: boolean;
 }) {
+  const { isInList, toggle } = useMyList(item.id);
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const shineAnim = useRef(new Animated.Value(0)).current;
 
@@ -180,11 +174,11 @@ const MovieCard = memo(function MovieCard({
       >
         <LiquidGlass
           glowColor={accent}
-          tintColor="#1A0A14"
-          tintOpacity={0.55}
+          tintOpacity={0.22}
+          tintColor={accent}
           cornerRadius={borderRadius}
-          glowIntensity={0.6}
-          borderWidth={1}
+          glowIntensity={0.5}
+          fastMode={true}
           style={[styles.cardInner, { height: cardHeight }]}
         >
           {/* Poster image */}
@@ -211,37 +205,36 @@ const MovieCard = memo(function MovieCard({
 
           {/* Rating badge */}
           <View style={styles.ratingBadgeWrap}>
-            {Platform.OS === 'ios' ? (
-              <BlurView intensity={40} tint="dark" style={[styles.ratingBadge, isHighRated && styles.ratingBadgeHigh]}>
-                <Text style={[styles.ratingText, isHighRated && styles.ratingTextHigh]}>
-                  {matchPercent}% Match
-                </Text>
-              </BlurView>
-            ) : (
-              <View style={[styles.ratingBadge, styles.ratingBadgeAndroid, isHighRated && styles.ratingBadgeHigh]}>
-                <Text style={[styles.ratingText, isHighRated && styles.ratingTextHigh]}>
-                  {matchPercent}% Match
-                </Text>
-              </View>
-            )}
+            <LiquidGlass
+              tintOpacity={0.15}
+              cornerRadius={12}
+              borderOpacity={isHighRated ? 0.5 : 0.2}
+              glowIntensity={isHighRated ? 0.4 : 0.15}
+              glowColor={isHighRated ? '#ffd700' : accent}
+              fastMode={true}
+              style={[styles.ratingBadge, isHighRated && styles.ratingBadgeHigh]}
+            >
+              <Text style={[styles.ratingText, isHighRated && styles.ratingTextHigh]}>
+                {matchPercent}% Match
+              </Text>
+            </LiquidGlass>
           </View>
 
           {/* My List button */}
           <TouchableOpacity
             style={styles.myListBtn}
-            onPress={onToggleList}
+            onPress={() => toggle(item)}
             activeOpacity={0.7}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <LiquidGlass
               glowColor={accent}
-              tintColor="rgba(0,0,0,0.55)"
-              tintOpacity={isInList ? 0.8 : 0.5}
+              tintOpacity={isInList ? 0.8 : 0.15}
               cornerRadius={16}
-              glowIntensity={0.5}
-              borderWidth={1.5}
+              glowIntensity={isInList ? 0.6 : 0.2}
+              borderOpacity={0.4}
+              fastMode={true}
               style={styles.myListBtnLiquid}
-              animated={false}
             >
               <Ionicons name={isInList ? 'checkmark' : 'add'} size={17} color="#fff" />
             </LiquidGlass>
@@ -362,20 +355,17 @@ const MovieCard = memo(function MovieCard({
 const SpotlightCard = memo(function SpotlightCard({
   item,
   index,
-  isInList,
   accent,
   onPress,
-  onToggleList,
   screenWidth,
 }: {
   item: Media;
   index: number;
-  isInList: boolean;
   accent: string;
   onPress: () => void;
-  onToggleList: () => void;
   screenWidth: number;
 }) {
+  const { isInList, toggle } = useMyList(item.id);
   const rating = (item.vote_average || 0).toFixed(1);
 
   return (
@@ -411,7 +401,7 @@ const SpotlightCard = memo(function SpotlightCard({
           </View>
           <TouchableOpacity
             style={[styles.spotlightListBtn, isInList && { backgroundColor: accent }]}
-            onPress={onToggleList}
+            onPress={() => toggle(item)}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
             <Ionicons name={isInList ? 'checkmark' : 'add'} size={18} color="#fff" />
@@ -496,35 +486,28 @@ const SeeAllCard = memo(function SeeAllCard({
       <TouchableOpacity
         onPress={onPress}
         activeOpacity={0.85}
-        style={[styles.seeAllCard, { width: cardWidth, height: cardHeight, borderRadius, borderColor: `${accent}40` }]}
+        style={[styles.seeAllCard, { width: cardWidth, height: cardHeight, borderRadius }]}
       >
-        {Platform.OS === 'ios' ? (
-          <BlurView intensity={30} tint="dark" style={StyleSheet.absoluteFill}>
-            <LinearGradient
-              colors={[`${accent}35`, 'rgba(0,0,0,0.85)']}
-              style={StyleSheet.absoluteFill}
-            />
-            <View style={styles.seeAllCardContent}>
-              <View style={[styles.seeAllIconCircle, { backgroundColor: accent }]}>
-                <Ionicons name="arrow-forward" size={26} color="#fff" />
-              </View>
-              <Text style={styles.seeAllCardText}>View All</Text>
+        <LiquidGlass
+          glowColor={accent}
+          tintOpacity={0.15}
+          cornerRadius={borderRadius}
+          glowIntensity={0.6}
+          borderOpacity={0.4}
+          fastMode={true}
+          style={StyleSheet.absoluteFill}
+        >
+          <LinearGradient
+            colors={[`${accent}15`, 'rgba(0,0,0,0.85)']}
+            style={StyleSheet.absoluteFill}
+          />
+          <View style={styles.seeAllCardContent}>
+            <View style={[styles.seeAllIconCircle, { backgroundColor: accent }]}>
+              <Ionicons name="arrow-forward" size={26} color="#fff" />
             </View>
-          </BlurView>
-        ) : (
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(20,20,25,0.95)' }]}>
-            <LinearGradient
-              colors={[`${accent}25`, 'rgba(0,0,0,0.85)']}
-              style={StyleSheet.absoluteFill}
-            />
-            <View style={styles.seeAllCardContent}>
-              <View style={[styles.seeAllIconCircle, { backgroundColor: accent }]}>
-                <Ionicons name="arrow-forward" size={26} color="#fff" />
-              </View>
-              <Text style={styles.seeAllCardText}>View All</Text>
-            </View>
+            <Text style={styles.seeAllCardText}>View All</Text>
           </View>
-        )}
+        </LiquidGlass>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -536,8 +519,6 @@ const MovieList: React.FC<MovieListProps> = ({
   carousel = true,
   onItemPress,
   showProgress = false,
-  myListIds: externalMyListIds,
-  onToggleMyList,
   variant = 'default',
 }) => {
   const router = useRouter();
@@ -560,8 +541,6 @@ const MovieList: React.FC<MovieListProps> = ({
       : responsive.cardHeight;
   const { cardGap, horizontalPadding, borderRadius, isSmallScreen } = responsive;
 
-  const [myListIds, setMyListIds] = useState<number[]>([]);
-  const effectiveMyListIds = externalMyListIds ?? myListIds;
   const scrollX = useRef(new Animated.Value(0)).current;
   const lastCardIndex = useRef(-1);
   const itemWidth = cardWidth + cardGap;
@@ -577,43 +556,6 @@ const MovieList: React.FC<MovieListProps> = ({
     });
     return () => scrollX.removeListener(listenerId);
   }, [scrollX, itemWidth]);
-
-  useEffect(() => {
-    if (externalMyListIds) return;
-    const loadMyList = async () => {
-      try {
-        const key = await getProfileScopedKey('myList');
-        const stored = await AsyncStorage.getItem(key);
-        const parsed: Media[] = stored ? JSON.parse(stored) : [];
-        setMyListIds(parsed.map((m) => m.id));
-      } catch {
-        setMyListIds([]);
-      }
-    };
-    loadMyList();
-  }, [externalMyListIds]);
-
-  const toggleMyList = useCallback(async (item: Media) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (onToggleMyList) {
-      onToggleMyList(item);
-      return;
-    }
-    try {
-      const key = await getProfileScopedKey('myList');
-      const stored = await AsyncStorage.getItem(key);
-      const existing: Media[] = stored ? JSON.parse(stored) : [];
-      const exists = existing.find((m) => m.id === item.id);
-      let updated: Media[];
-      if (exists) {
-        updated = existing.filter((m) => m.id !== item.id);
-      } else {
-        updated = [...existing, item];
-      }
-      setMyListIds(updated.map((m) => m.id));
-      await AsyncStorage.setItem(key, JSON.stringify(updated));
-    } catch { }
-  }, [onToggleMyList]);
 
   const handlePress = useCallback((item: Media) => {
     const movieId = item.id;
@@ -664,17 +606,13 @@ const MovieList: React.FC<MovieListProps> = ({
       );
     }
 
-    const isInList = effectiveMyListIds.includes(item.id);
-
     if (variant === 'spotlight') {
       return (
         <SpotlightCard
           item={item}
           index={index}
-          isInList={isInList}
           accent={accent}
           onPress={() => onItemPress ? deferNav(() => onItemPress(item)) : handlePress(item)}
-          onToggleList={() => toggleMyList(item)}
           screenWidth={screenWidth}
         />
       );
@@ -698,10 +636,8 @@ const MovieList: React.FC<MovieListProps> = ({
         scrollX={scrollX}
         variant={variant}
         showProgress={showProgress}
-        isInList={isInList}
         accent={accent}
         onPress={() => onItemPress ? deferNav(() => onItemPress(item)) : handlePress(item)}
-        onToggleList={() => toggleMyList(item)}
         cardWidth={cardWidth}
         cardHeight={cardHeight}
         cardGap={cardGap}
@@ -709,7 +645,7 @@ const MovieList: React.FC<MovieListProps> = ({
         isSmallScreen={isSmallScreen}
       />
     );
-  }, [variant, effectiveMyListIds, showProgress, accent, scrollX, onItemPress, deferNav, handlePress, toggleMyList, cardWidth, cardHeight, cardGap, borderRadius, isSmallScreen, screenWidth, itemWidth, handleSeeAll]);
+  }, [variant, showProgress, accent, scrollX, onItemPress, deferNav, handlePress, cardWidth, cardHeight, cardGap, borderRadius, isSmallScreen, screenWidth, itemWidth, handleSeeAll]);
 
   const keyExtractor = useCallback((item: Media, index: number) => {
     if ((item as any).isSeeAll) return `see-all-${title}`;
@@ -762,9 +698,9 @@ const MovieList: React.FC<MovieListProps> = ({
           snapToInterval={variant === 'large' ? cardWidth + cardGap : undefined}
           decelerationRate={0.992}
           removeClippedSubviews={false}
-          initialNumToRender={4}
-          maxToRenderPerBatch={4}
-          windowSize={7}
+          initialNumToRender={5}
+          maxToRenderPerBatch={6}
+          windowSize={9}
           updateCellsBatchingPeriod={16}
           getItemLayout={getItemLayout}
         />
@@ -894,11 +830,14 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 16,
-    // position: 'relative', // Removed duplicate
     overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   myListBtnLiquid: {
     ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   qualityBadgeRow: {
     position: 'absolute',

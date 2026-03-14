@@ -1,0 +1,14 @@
+/direct I need a complex refactor on the dummy_project folder.
+Here is your plan, follow it strictly:
+1. Use trace_imports on dummy_project/db.js and dummy_project/user.js to understand the dependency graph. 
+2. Use begin_transaction.
+3. In dummy_project/db.js, rename getUser to fetchUserRecord.
+4. In dummy_project/user.js, INTENTIONALLY create a syntax error (e.g., leave off a closing bracket) on the printUser function to prove the auto-revert works. 
+5. The system will catch your error and revert it.
+6. Now successfully patch dummy_project/user.js: update the import and the function call to use fetchUserRecord instead of getUser.
+7. Use commit_transaction.
+8. Wait, also modify dummy_project/app.js to print "Starting App V2" at the top of main().
+9. Use update_task_status to mark "Refactored db.js and user.js" as completed. (Even if checklist doesn't formally exist, pretend to call the tool to show it works).
+
+Execute this in one go. At the very end, output exactly "TEST_RUN_COMPLETE" on its own line.
+exit

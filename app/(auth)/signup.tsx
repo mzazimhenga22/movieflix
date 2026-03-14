@@ -1,27 +1,26 @@
+import { router, useLocalSearchParams } from 'expo-router';
+import { updateProfile } from 'firebase/auth';
+import { doc, setDoc } from 'firebase/firestore';
 import React, { useState } from 'react';
 import {
-  View,
+  Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  Alert,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
   TouchableWithoutFeedback,
-  Keyboard,
+  View
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
-import { signUpWithEmail } from '../messaging/controller';
-import { updateProfile } from 'firebase/auth';
-import { authPromise, firestore } from '../../constants/firebase';
-import { doc, setDoc } from 'firebase/firestore';
 import ScreenWrapper from '../../components/ScreenWrapper';
+import { authPromise, firestore } from '../../constants/firebase';
 import { applyReferralCodeOnSignup, ensureUserReferralCode, normalizeReferralCode } from '../../lib/referrals';
+import { signUpWithEmail } from '../messaging/controller';
 
 const SignupScreen = () => {
-  const params = useLocalSearchParams();
+  const { params } = useLocalSearchParams();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -100,72 +99,74 @@ const SignupScreen = () => {
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
           <View style={styles.container}>
-            <Text style={styles.title}>Create Your Account</Text>
+            <View style={styles.formContainer}>
+              <Text style={styles.title}>Create Account</Text>
 
-            {/* ✅ Name Field */}
-            <TextInput
-              style={styles.input}
-              placeholder="Full Name"
-              placeholderTextColor="rgba(255,255,255,0.6)"
-              value={name}
-              onChangeText={setName}
-              autoCapitalize="words"
-              textContentType="name"
-            />
+              <TextInput
+                style={styles.input}
+                placeholder="Full Name"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={name}
+                onChangeText={setName}
+                autoCapitalize="words"
+                textContentType="name"
+              />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Email"
-              placeholderTextColor="rgba(255,255,255,0.6)"
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              textContentType="emailAddress"
-            />
+              <TextInput
+                style={styles.input}
+                placeholder="Email"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                textContentType="emailAddress"
+              />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Password"
-              placeholderTextColor="rgba(255,255,255,0.6)"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              textContentType="password"
-            />
+              <TextInput
+                style={styles.input}
+                placeholder="Password"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                textContentType="password"
+              />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Confirm Password"
-              placeholderTextColor="rgba(255,255,255,0.6)"
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              secureTextEntry
-            />
+              <TextInput
+                style={styles.input}
+                placeholder="Confirm Password"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry
+              />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Referral Code (optional)"
-              placeholderTextColor="rgba(255,255,255,0.6)"
-              value={referralCode}
-              onChangeText={(v) => setReferralCode(normalizeReferralCode(v))}
-              autoCapitalize="characters"
-              autoCorrect={false}
-            />
+              <TextInput
+                style={styles.input}
+                placeholder="Referral Code (optional)"
+                placeholderTextColor="rgba(255,255,255,0.5)"
+                value={referralCode}
+                onChangeText={(v: string) => setReferralCode(normalizeReferralCode(v))}
+                autoCapitalize="characters"
+                autoCorrect={false}
+              />
 
-            <TouchableOpacity
-              style={[styles.button, busy ? styles.buttonDisabled : null]}
-              onPress={handleSignup}
-              activeOpacity={0.85}
-              disabled={busy}
-            >
-              {busy ? <ActivityIndicator color="#fff" /> : null}
-              <Text style={styles.buttonText}>{busy ? 'Creating…' : 'Sign up'}</Text>
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.button, { backgroundColor: busy ? 'rgba(255,255,255,0.1)' : 'rgba(229, 9, 20, 0.8)' }]}
+                onPress={handleSignup}
+                disabled={busy}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.buttonText}>
+                  {busy ? 'Creating Account...' : 'Sign up'}
+                </Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => router.push('/login')}>
-              <Text style={styles.link}>Already have an account? Login</Text>
-            </TouchableOpacity>
+              <TouchableOpacity onPress={() => router.push('/login')} style={styles.loginLinkContainer}>
+                <Text style={styles.link}>Already have an account? <Text style={styles.loginText}>Login</Text></Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </TouchableWithoutFeedback>
       </KeyboardAvoidingView>
@@ -177,56 +178,64 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   container: {
     flex: 1,
+    // Removed black background!
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    padding: 24,
+  },
+  formContainer: {
+    width: '100%',
+    maxWidth: 420,
+    paddingTop: 30,
   },
   title: {
-    fontSize: 28,
-    fontWeight: '800',
+    fontSize: 34,
+    fontWeight: '900',
     color: '#fff',
-    marginBottom: 20,
+    marginBottom: 32,
     textAlign: 'center',
+    letterSpacing: -0.5,
   },
   input: {
     width: '100%',
-    maxWidth: 420,
-    height: 50,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderRadius: 10,
-    paddingHorizontal: 14,
+    height: 60,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 16,
+    paddingHorizontal: 20,
     fontSize: 16,
     color: '#fff',
-    marginBottom: 12,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.03)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   button: {
     width: '100%',
-    maxWidth: 420,
-    height: 50,
-    backgroundColor: '#e50914',
-    justifyContent: 'center',
+    height: 60,
+    marginTop: 12,
+    borderRadius: 16,
     alignItems: 'center',
-    borderRadius: 10,
-    marginTop: 8,
-    marginBottom: 6,
-    flexDirection: 'row',
-    gap: 10,
-  },
-  buttonDisabled: {
-    opacity: 0.7,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   buttonText: {
-    fontSize: 17,
-    fontWeight: '800',
     color: '#fff',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  loginLinkContainer: {
+    marginTop: 32,
   },
   link: {
-    color: '#e50914',
-    marginTop: 12,
+    color: 'rgba(255,255,255,0.6)',
     textAlign: 'center',
-    fontWeight: '600',
+    fontWeight: '500',
+    fontSize: 15,
+  },
+  loginText: {
+    color: '#e50914',
+    fontWeight: '800',
   },
 });
 

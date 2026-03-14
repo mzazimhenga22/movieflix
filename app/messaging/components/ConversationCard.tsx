@@ -1,10 +1,10 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
+import { lightenColor, withAlpha } from '@/lib/colorUtils';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useAccent } from '../../components/AccentContext';
-import { lightenColor, withAlpha } from '@/lib/colorUtils';
-import LiquidGlass from '@/app/components/LiquidGlass';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface ConversationCardProps {
   id: string;
@@ -102,13 +102,9 @@ export default function ConversationCard({
         style={styles.touchable}
       >
         <LiquidGlass
-          glowColor={accent}
-          tintColor="#1A1A2E"
           tintOpacity={unread > 0 ? 0.12 : 0.06}
           cornerRadius={18}
-          glowIntensity={unread > 0 ? 0.7 : 0.4}
-          borderWidth={1}
-          animated={true}
+          borderOpacity={unread > 0 ? 0.35 : 0.25}
           style={styles.glassCard}
         >
           {/* Left glow for unread */}
@@ -128,14 +124,14 @@ export default function ConversationCard({
                 <Text style={styles.avatarInitials}>{initials}</Text>
               </LinearGradient>
             )}
-            
+
             {/* Online indicator */}
             {isOnline && (
               <View style={styles.onlineIndicator}>
                 <View style={styles.onlineDot} />
               </View>
             )}
-            
+
             {/* Group indicator */}
             {isGroup && (
               <View style={styles.groupBadge}>
@@ -189,10 +185,10 @@ export default function ConversationCard({
           </View>
 
           {/* Chevron */}
-          <Ionicons 
-            name="chevron-forward" 
-            size={18} 
-            color={unread > 0 ? lightenColor(accent, 0.2) : 'rgba(255,255,255,0.3)'} 
+          <Ionicons
+            name="chevron-forward"
+            size={18}
+            color={unread > 0 ? lightenColor(accent, 0.2) : 'rgba(255,255,255,0.3)'}
           />
         </LiquidGlass>
       </TouchableOpacity>

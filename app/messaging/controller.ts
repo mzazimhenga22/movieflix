@@ -1770,4 +1770,6 @@ export const sendMentionMessage = async (
   return await sendMessage(conversationId, message)
 }
 
-export default {}
+// expo-router picks up every file in app/ as a route.
+// This DummyTsRoute satisfies that requirement without rendering anything.
+export default function DummyTsRoute() { return null; }

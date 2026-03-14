@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { listenToLiveStream, listenToLiveViewers } from '@/lib/live/liveService';
 import type { LiveStream, LiveStreamViewer } from '@/lib/live/types';
 

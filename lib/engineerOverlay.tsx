@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Easing, StyleSheet, View } from 'react-native';
 
-import { base64ToDataUri, GRAIN_PNG_BASE64 } from './engineer';
+import { base64ToDataUri, GRAIN_PNG_BASE64 } from './engineerUtils';
 
 type VideoMaskingOverlayProps = {
   enabled?: boolean;

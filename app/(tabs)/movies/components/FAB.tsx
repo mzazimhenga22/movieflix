@@ -1,8 +1,7 @@
-import React from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import { TouchableOpacity } from 'react-native';
-import { StyleSheet } from 'react-native';
+import React from 'react';
+import { StyleSheet, TouchableOpacity } from 'react-native';
+import LiquidGlass from '../../../../components/app-components/LiquidGlass';
 
 interface FABProps {
   fabExpanded: boolean;
@@ -43,14 +42,16 @@ const FAB: React.FC<FABProps> = ({ fabExpanded, setFabExpanded, handleShuffle, r
                   }}
                   activeOpacity={0.9}
                 >
-                  <LinearGradient
-                    colors={['#ff8a00', '#e50914']}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
+                  <LiquidGlass
+                    cornerRadius={32}
+                    tintOpacity={0.3}
+                    borderOpacity={0.5}
+                    glowColor="#ffffff"
+                    glowIntensity={0.4}
                     style={styles.subFabGradient}
                   >
                     <Ionicons name={it.icon as any} size={20} color="#FFFFFF" />
-                  </LinearGradient>
+                  </LiquidGlass>
                 </TouchableOpacity>
               );
             })}
@@ -64,14 +65,16 @@ const FAB: React.FC<FABProps> = ({ fabExpanded, setFabExpanded, handleShuffle, r
         onPress={() => setFabExpanded(!fabExpanded)}
         activeOpacity={0.9}
       >
-        <LinearGradient
-          colors={['#ff8a00', '#e50914']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+        <LiquidGlass
+          cornerRadius={36}
+          tintOpacity={0.4}
+          borderOpacity={0.5}
+          glowColor="#ffffff"
+          glowIntensity={0.5}
           style={styles.fabGradient}
         >
           <Ionicons name="add" size={24} color="#FFFFFF" />
-        </LinearGradient>
+        </LiquidGlass>
       </TouchableOpacity>
     </>
   );
@@ -82,49 +85,24 @@ const styles = StyleSheet.create({
     position: 'absolute',
     width: 64,
     height: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
     right: 18,
     bottom: 150,
-    // Bold movie-red FAB
-    backgroundColor: '#e50914',
-    borderRadius: 36,
-    borderWidth: 0,
-    borderColor: 'transparent',
-    elevation: 12,
-    shadowColor: '#e50914',
-    shadowOpacity: 0.36,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
   },
   subFab: {
     position: 'absolute',
     width: 64,
     height: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
     right: 18,
-    backgroundColor: '#e50914',
-    borderRadius: 32,
-    elevation: 10,
-    shadowColor: '#e50914',
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
   },
   fabGradient: {
     width: '100%',
     height: '100%',
     borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   subFabGradient: {
     width: '100%',
     height: '100%',
     borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 });
 

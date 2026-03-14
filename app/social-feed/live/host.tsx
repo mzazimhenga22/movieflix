@@ -21,7 +21,7 @@ import { RTCView } from 'react-native-webrtc';
 import type { User } from 'firebase/auth';
 
 import { onAuthChange } from '../../messaging/controller';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import {
   createLiveStreamSession,
   endLiveStream,

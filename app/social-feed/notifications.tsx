@@ -1,24 +1,38 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+import { 
+  collection, 
+  doc, 
+  DocumentData, 
+  limit, 
+  onSnapshot, 
+  orderBy, 
+  query, 
+  QueryDocumentSnapshot, 
+  QuerySnapshot, 
+  updateDoc, 
+  where 
+} from 'firebase/firestore';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
+  ActivityIndicator,
   FlatList,
   Image,
   RefreshControl,
-  ActivityIndicator,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  StatusBar,
+  Animated,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useAccent } from '../../components/app-components/AccentContext';
 import ScreenWrapper from '../../components/ScreenWrapper';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useAccent } from '../components/AccentContext';
-import { collection, doc, limit, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
 import { firestore } from '../../constants/firebase';
 import { useUser } from '../../hooks/use-user';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
 
-// Enhanced notification types
 type NotificationType = 'like' | 'comment' | 'follow' | 'mention' | 'streak' | 'new_release' | 'new_post' | 'new_story' | 'message';
 
 interface Notification {
@@ -66,7 +80,8 @@ export default function NotificationsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  
+  const scrollY = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     setAccentColor('#e50914');
@@ -91,7 +106,6 @@ export default function NotificationsScreen() {
     }
 
     setLoading(true);
-    setError(null);
     const notificationsRef = collection(firestore, 'notifications');
     const notificationsQuery = query(
       notificationsRef,
@@ -102,41 +116,31 @@ export default function NotificationsScreen() {
 
     const unsubscribe = onSnapshot(
       notificationsQuery,
-      snapshot => {
-        const mapped: Notification[] = snapshot.docs.map(docSnap => {
+      (snapshot: QuerySnapshot<DocumentData>) => {
+        const mapped: Notification[] = snapshot.docs.map((docSnap: QueryDocumentSnapshot<DocumentData>) => {
           const data = docSnap.data() as Record<string, any>;
-          const createdAt =
-            typeof data.createdAt?.toDate === 'function'
-              ? data.createdAt.toDate()
-              : data.createdAt
-              ? new Date(data.createdAt)
-              : new Date();
-          const actorName =
-            data.actor?.displayName || data.actorName || data.actor || data.userName || 'MovieFlix member';
-          const avatar = data.actor?.avatar || data.actorAvatar || data.avatar;
-          const actionUrl = data.targetRoute || data.link || data.href || undefined;
+          const createdAt = typeof data.createdAt?.toDate === 'function' ? data.createdAt.toDate() : new Date();
+          const actorName = data.actorName || data.userName || 'MovieFlix User';
           return {
             id: docSnap.id,
             type: (data.type as NotificationType) || 'like',
             title: actorName,
-            message: data.message || data.body || data.content || 'New activity on your feed.',
+            message: data.message || 'New activity on your feed.',
             timestamp: createdAt.toISOString(),
             read: Boolean(data.read),
-            avatar,
+            avatar: data.actorAvatar || data.avatar,
             timeAgo: formatRelativeTime(createdAt),
-            actionUrl,
+            actionUrl: data.targetRoute || undefined,
             docPath: docSnap.ref.path,
           };
         });
         setNotifications(mapped);
         setLoading(false);
       },
-      err => {
-        console.warn('[notifications] subscription failed', err);
-        setError('Unable to load notifications right now.');
+      () => {
         setNotifications([]);
         setLoading(false);
-      },
+      }
     );
 
     return () => unsubscribe();
@@ -146,393 +150,137 @@ export default function NotificationsScreen() {
     filter === 'all' || (filter === 'unread' && !n.read)
   );
 
-  const unreadCount = notifications.filter(n => !n.read).length;
-
-  const handleRefresh = () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
-  };
-
   const markAsRead = useCallback(async (notification: Notification) => {
-    setNotifications(prev =>
-      prev.map(n => (n.id === notification.id ? { ...n, read: true } : n)),
-    );
-
+    if (notification.read) return;
     try {
-      const ref = notification.docPath
-        ? doc(firestore, notification.docPath)
-        : doc(firestore, 'notifications', notification.id);
+      const ref = notification.docPath ? doc(firestore, notification.docPath) : doc(firestore, 'notifications', notification.id);
       await updateDoc(ref, { read: true });
-    } catch (err) {
-      console.warn('[notifications] failed to update read state', err);
-    }
+    } catch (err) {}
   }, []);
 
-  const markAllAsRead = useCallback(async () => {
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-    try {
-      await Promise.all(
-        notifications
-          .filter(n => !n.read)
-          .map(n => {
-            const ref = n.docPath
-              ? doc(firestore, n.docPath)
-              : doc(firestore, 'notifications', n.id);
-            return updateDoc(ref, { read: true });
-          }),
-      );
-    } catch (err) {
-      console.warn('[notifications] failed to mark all as read', err);
-    }
-  }, [notifications]);
+  const renderNotification = ({ item }: { item: Notification }) => {
+    const accent = notificationColors[item.type];
+    
+    return (
+      <View style={styles.itemWrapper}>
+        <LiquidGlass cornerRadius={24} tintOpacity={item.read ? 0.04 : 0.1} glowColor={accent} glowIntensity={item.read ? 0.05 : 0.2} style={styles.itemGlass}>
+            <TouchableOpacity style={styles.itemContent} activeOpacity={0.8} onPress={() => {
+                markAsRead(item);
+                if (item.actionUrl) router.push(item.actionUrl as any);
+            }}>
+                <View style={styles.avatarWrapper}>
+                    {item.avatar ? (
+                        <Image source={{ uri: item.avatar }} style={styles.avatar} />
+                    ) : (
+                        <View style={[styles.avatar, { backgroundColor: `${accent}20`, alignItems: 'center', justifyContent: 'center' }]}>
+                            <Ionicons name="person" size={24} color={accent} />
+                        </View>
+                    )}
+                    <View style={[styles.typeBadge, { backgroundColor: accent }]}>
+                        <Ionicons name={notificationIcons[item.type]} size={12} color="#fff" />
+                    </View>
+                </View>
 
-  const handleNotificationPress = useCallback(
-    (notification: Notification) => {
-      void markAsRead(notification);
-      if (notification.actionUrl) {
-        router.push(notification.actionUrl as any);
-      }
-    },
-    [markAsRead, router],
-  );
-
-  const renderNotification = useCallback(
-    ({ item }: { item: Notification }) => (
-    <TouchableOpacity
-      style={[styles.notificationItem, !item.read && styles.unreadNotification]}
-      onPress={() => handleNotificationPress(item)}
-    >
-      <View style={styles.avatarContainer}>
-        {item.avatar ? (
-          <Image source={{ uri: item.avatar }} style={styles.avatar} />
-        ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <Ionicons name="person" size={20} color="#666" />
-          </View>
-        )}
-        <View style={[styles.iconBadge, { backgroundColor: notificationColors[item.type] }]}>
-          <Ionicons name={notificationIcons[item.type]} size={12} color="#fff" />
-        </View>
+                <View style={styles.textContent}>
+                    <View style={styles.itemHeader}>
+                        <Text style={styles.actorName} numberOfLines={1}>{item.title}</Text>
+                        <Text style={styles.timeLabel}>{item.timeAgo}</Text>
+                    </View>
+                    <Text style={styles.messageText} numberOfLines={2}>{item.message}</Text>
+                </View>
+                
+                {!item.read && <View style={[styles.unreadIndicator, { backgroundColor: accent }]} />}
+            </TouchableOpacity>
+        </LiquidGlass>
       </View>
-
-      <View style={styles.content}>
-        <Text style={styles.title} numberOfLines={1}>
-          {item.title}
-        </Text>
-        <Text style={styles.message} numberOfLines={2}>
-          {item.message}
-        </Text>
-        <Text style={styles.timeAgo}>{item.timeAgo}</Text>
-      </View>
-
-      {!item.read && <View style={styles.unreadDot} />}
-    </TouchableOpacity>
-  ),
-    [handleNotificationPress],
-  );
-
-  const accentBackground = useMemo(
-    () => ['#e50914', '#150a13', '#05060f'] as const,
-    [],
-  );
+    );
+  };
 
   return (
-    <ScreenWrapper>
-      <LinearGradient colors={accentBackground} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFillObject} />
-      <LinearGradient
-        colors={['rgba(125,216,255,0.18)', 'rgba(255,255,255,0)']}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 1 }}
-        style={styles.bgOrbPrimary}
-      />
-      <LinearGradient
-        colors={['rgba(95,132,255,0.14)', 'rgba(255,255,255,0)']}
-        start={{ x: 0.8, y: 0 }}
-        end={{ x: 0.2, y: 1 }}
-        style={styles.bgOrbSecondary}
-      />
-
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <View style={styles.titleBlock}>
-            <Text style={styles.headerEyebrow}>Inbox</Text>
-            <Text style={styles.headerTitle}>Notifications</Text>
-          </View>
-          <TouchableOpacity onPress={markAllAsRead} style={styles.markAllButton}>
-            <Ionicons name="checkmark-done" size={16} color="#fff" />
-            <Text style={styles.markAllText}>Mark all read</Text>
-          </TouchableOpacity>
+    <View style={styles.root}>
+      <ScreenWrapper>
+        <StatusBar barStyle="light-content" />
+        
+        {/* Dynamic Atmosphere */}
+        <View style={StyleSheet.absoluteFill}>
+            <LinearGradient colors={['#0a0a14', '#050508']} style={StyleSheet.absoluteFill} />
+            <View style={[styles.bgOrb, { top: -100, right: -50, backgroundColor: '#5f8afc10' }]} />
+            <View style={[styles.bgOrb, { bottom: 100, left: -100, backgroundColor: '#e5091408' }]} />
         </View>
 
-        <View style={styles.filterTabs}>
-          <TouchableOpacity
-            style={[styles.filterTab, filter === 'all' && styles.activeFilterTab]}
-            onPress={() => setFilter('all')}
-          >
-            <Text style={[styles.filterTabText, filter === 'all' && styles.activeFilterTabText]}>
-              All ({notifications.length})
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.filterTab, filter === 'unread' && styles.activeFilterTab]}
-            onPress={() => setFilter('unread')}
-          >
-            <Text style={[styles.filterTabText, filter === 'unread' && styles.activeFilterTabText]}>
-              Unread ({unreadCount})
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Notifications List */}
         <FlatList
           data={filteredNotifications}
           renderItem={renderNotification}
           keyExtractor={item => item.id}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={handleRefresh}
-              tintColor="#fff"
-              colors={['#667eea']}
-            />
-          }
+          contentContainerStyle={styles.list}
+          onScroll={Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: false })}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => setRefreshing(false)} tintColor="#fff" />}
           ListHeaderComponent={
-            loading ? (
-              <View style={styles.loadingState}>
-                <ActivityIndicator color="#fff" />
-                <Text style={styles.loadingText}>Syncing notifications…</Text>
+            <View style={styles.header}>
+              <View style={styles.titleRow}>
+                <Text style={styles.title}>Inbox</Text>
+                {notifications.some(n => !n.read) && (
+                    <LiquidGlass cornerRadius={12} tintOpacity={0.1} style={styles.badgeGlass}>
+                        <Text style={styles.badgeText}>{notifications.filter(n => !n.read).length} NEW</Text>
+                    </LiquidGlass>
+                )}
               </View>
-            ) : error ? (
-              <TouchableOpacity style={styles.errorBanner} onPress={handleRefresh}>
-                <Text style={styles.errorTitle}>Unable to sync</Text>
-                <Text style={styles.errorSubtitle}>{error}</Text>
-              </TouchableOpacity>
-            ) : null
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Ionicons name="notifications-off" size={64} color="rgba(255,255,255,0.3)" />
-              <Text style={styles.emptyTitle}>
-                {user
-                  ? filter === 'unread'
-                    ? 'No unread notifications'
-                    : 'No notifications yet'
-                  : 'Sign in to get notified'}
-              </Text>
-              <Text style={styles.emptySubtitle}>
-                {user
-                  ? filter === 'unread'
-                    ? 'You\'ve read all your notifications!'
-                    : 'When you get notifications, they\'ll appear here.'
-                  : 'Log in to see likes, follows, and new releases tailored to you.'}
-              </Text>
+
+              <View style={styles.tabRow}>
+                {['all', 'unread'].map(t => {
+                    const isActive = filter === t;
+                    return (
+                        <TouchableOpacity key={t} style={styles.tabBtn} onPress={() => setFilter(t as any)}>
+                            <LiquidGlass cornerRadius={16} tintOpacity={isActive ? 0.15 : 0.05} tintColor={isActive ? '#fff' : undefined} style={styles.tabGlass}>
+                                <Text style={[styles.tabLabel, isActive && { color: '#fff' }]}>{t.toUpperCase()}</Text>
+                            </LiquidGlass>
+                        </TouchableOpacity>
+                    );
+                })}
+              </View>
             </View>
           }
-          contentContainerStyle={styles.listContainer}
+          ListEmptyComponent={
+            loading ? <ActivityIndicator size="large" color="#fff" style={{ marginTop: 100 }} /> : (
+                <View style={styles.empty}>
+                    <Ionicons name="notifications-off-outline" size={64} color="rgba(255,255,255,0.1)" />
+                    <Text style={styles.emptyTitle}>Nothing here</Text>
+                    <Text style={styles.emptySub}>Your notification feed is currently silent.</Text>
+                </View>
+            )
+          }
         />
-      </View>
-    </ScreenWrapper>
+      </ScreenWrapper>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  bgOrbPrimary: {
-    position: 'absolute',
-    width: 360,
-    height: 360,
-    borderRadius: 180,
-    top: -60,
-    left: -40,
-    opacity: 0.5,
-  },
-  bgOrbSecondary: {
-    position: 'absolute',
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    bottom: -80,
-    right: -40,
-    opacity: 0.4,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 20,
-  },
-  titleBlock: {
-    gap: 4,
-  },
-  headerEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    letterSpacing: 0.6,
-    fontSize: 12,
-  },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-  },
-  markAllButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderRadius: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  markAllText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  filterTabs: {
-    flexDirection: 'row',
-    marginHorizontal: 20,
-    marginBottom: 20,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 25,
-    padding: 4,
-  },
-  filterTab: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderRadius: 21,
-  },
-  activeFilterTab: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-  },
-  filterTabText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  activeFilterTabText: {
-    color: '#fff',
-  },
-  listContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 100,
-  },
-  notificationItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(7,9,18,0.78)',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-  },
-  unreadNotification: {
-    backgroundColor: 'rgba(255,214,0,0.08)',
-    borderColor: 'rgba(255,214,0,0.3)',
-  },
-  avatarContainer: {
-    position: 'relative',
-    marginRight: 16,
-  },
-  avatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-  },
-  avatarFallback: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  iconBadge: {
-    position: 'absolute',
-    bottom: -2,
-    right: -2,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
-  },
-  content: {
-    flex: 1,
-  },
-  title: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#fff',
-    marginBottom: 4,
-  },
-  message: {
-    fontSize: 14,
-    color: 'rgba(255,255,255,0.8)',
-    lineHeight: 20,
-    marginBottom: 4,
-  },
-  timeAgo: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.5)',
-  },
-  unreadDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#4CAF50',
-    marginLeft: 8,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: 'rgba(255,255,255,0.6)',
-    textAlign: 'center',
-    lineHeight: 20,
-    maxWidth: 280,
-  },
-  loadingState: {
-    paddingVertical: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: {
-    color: 'rgba(255,255,255,0.7)',
-    marginTop: 8,
-    fontWeight: '600',
-  },
-  errorBanner: {
-    marginHorizontal: 20,
-    marginBottom: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,118,118,0.5)',
-    backgroundColor: 'rgba(255,118,118,0.12)',
-    padding: 14,
-  },
-  errorTitle: {
-    color: '#ffd0d0',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  errorSubtitle: {
-    color: '#ffb6b6',
-    fontSize: 12,
-    marginTop: 4,
-  },
+  root: { flex: 1, backgroundColor: '#050508' },
+  bgOrb: { position: 'absolute', width: 400, height: 400, borderRadius: 200, filter: 'blur(100px)' as any },
+  header: { paddingHorizontal: 24, paddingTop: 20, marginBottom: 20 },
+  titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  title: { fontSize: 34, fontWeight: '900', color: '#fff', letterSpacing: -1 },
+  badgeGlass: { paddingHorizontal: 10, paddingVertical: 4 },
+  badgeText: { color: '#ff4b4b', fontWeight: '900', fontSize: 11 },
+  tabRow: { flexDirection: 'row', gap: 10, marginTop: 25 },
+  tabBtn: { flex: 1, height: 44 },
+  tabGlass: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  tabLabel: { color: 'rgba(255,255,255,0.4)', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+  list: { paddingBottom: 120 },
+  itemWrapper: { paddingHorizontal: 16, marginBottom: 12 },
+  itemGlass: { padding: 14 },
+  itemContent: { flexDirection: 'row', alignItems: 'center' },
+  avatarWrapper: { position: 'relative' },
+  avatar: { width: 56, height: 56, borderRadius: 18, backgroundColor: '#111' },
+  typeBadge: { position: 'absolute', bottom: -4, right: -4, width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: '#000', alignItems: 'center', justifyContent: 'center' },
+  textContent: { flex: 1, marginLeft: 16 },
+  itemHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  actorName: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  timeLabel: { color: 'rgba(255,255,255,0.3)', fontSize: 12, fontWeight: '600' },
+  messageText: { color: 'rgba(255,255,255,0.6)', fontSize: 14, fontWeight: '500', lineHeight: 20 },
+  unreadIndicator: { width: 10, height: 10, borderRadius: 5, marginLeft: 12 },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 120, opacity: 0.5 },
+  emptyTitle: { color: '#fff', fontSize: 20, fontWeight: '900', marginTop: 20 },
+  emptySub: { color: 'rgba(255,255,255,0.5)', fontSize: 14, marginTop: 8, textAlign: 'center' },
 });

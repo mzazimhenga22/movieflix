@@ -1,4 +1,4 @@
-import LiquidGlass from '@/app/components/LiquidGlass';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef } from 'react';
@@ -71,6 +71,15 @@ const StoryComponent: React.FC<StoryProps> = ({ stories }) => {
               onPress={() => handleStoryPress(story)}
             >
               <View style={styles.storyImageWrapper}>
+                <LiquidGlass
+                  tintOpacity={0.15}
+                  cornerRadius={42}
+                  borderOpacity={0.4}
+                  glowIntensity={0.5}
+                  glowColor="#E50914"
+                  fastMode={true}
+                  style={StyleSheet.absoluteFill}
+                />
                 <Image source={{ uri: story.image }} style={styles.storyImage} />
               </View>
               <Text style={styles.storyText} numberOfLines={1} ellipsizeMode="tail">

@@ -1,7 +1,10 @@
 {
   "compilerOptions": {
     "target": "es2021",
-    "lib": ["es2021", "DOM"],
+    "lib": [
+      "es2021",
+      "DOM"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "esModuleInterop": true,
@@ -14,10 +17,23 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "paths": {
-      "@/*": ["./*"],
-      "@entrypoint": ["./index.ts"]
+      "cheerio": [
+        "./cheerio-shim.ts"
+      ],
+      "@/*": [
+        "./*"
+      ],
+      "@entrypoint": [
+        "./index.ts"
+      ]
     }
   },
-  "include": ["src", "vite.config.ts"],
-  "exclude": ["node_modules", "**/__test__"]
+  "include": [
+    "src",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/__test__"
+  ]
 }

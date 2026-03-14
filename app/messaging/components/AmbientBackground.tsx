@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { withAlpha } from '@/lib/colorUtils';
 
 const rand = (min: number, max: number) => min + Math.random() * (max - min);

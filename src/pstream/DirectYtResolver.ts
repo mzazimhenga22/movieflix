@@ -1,97 +1,128 @@
 
 export class DirectYtResolver {
-    private static baseUrl = 'https://music.youtube.com';
+    private static baseUrl = 'https://www.youtube.com';
     private static cachedApiKey: string | null = null;
-    private static cachedClientVersion: string | null = null;
+    private static cachedVisitorData: string | null = null;
 
     private static headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://music.youtube.com',
-        'Referer': 'https://music.youtube.com/',
+        'Origin': 'https://www.youtube.com',
+        'Referer': 'https://www.youtube.com/',
     };
 
-    static async getStream(videoId: string, type: 'audio' | 'video'): Promise<{ url: string; headers: Record<string, string> } | null> {
+    static async getStream(videoId: string, type: 'audio' | 'video'): Promise<{ url: string; headers: Record<string, string>; mimeType?: string } | null> {
         try {
             await this.ensureConfig();
             if (!this.cachedApiKey) return null;
 
-            const apiUrl = `${this.baseUrl}/youtubei/v1/player?key=${this.cachedApiKey}`;
-            const body = {
-                context: {
-                    client: {
-                        clientName: 'WEB_REMIX',
-                        clientVersion: this.cachedClientVersion || '1.20240101.01.00',
-                    },
-                },
-                videoId: videoId,
-            };
-
+            const apiUrl = `https://www.youtube.com/youtubei/v1/player?key=${this.cachedApiKey}&prettyPrint=false`;
+            
+            // Prioritized list of clients. ANDROID_VR is currently the most stable for direct streams in 2026.
             const clients = [
                 {
-                    name: 'WEB_REMIX',
-                    version: this.cachedClientVersion || '1.20240101.01.00',
+                    name: 'ANDROID_VR',
+                    version: '1.60.19',
+                    platform: 'MOBILE',
+                    userAgent: 'com.google.android.youtube.vr/1.60.19 (Linux; U; Android 12; en_US) gzip',
+                    clientName: 'ANDROID_VR'
                 },
                 {
-                    name: 'ANDROID',
-                    version: '19.09.37',
+                    name: 'MWEB',
+                    version: '2.20260312.01.00',
+                    platform: 'MOBILE',
+                    userAgent: 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36',
+                    clientName: 'MWEB'
                 },
                 {
-                    name: 'IOS',
-                    version: '19.09.3',
+                    name: 'TVHTML5',
+                    version: '7.20260312.16.00',
+                    platform: 'TV',
+                    userAgent: 'Mozilla/5.0 (SmartTV; Google TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                    clientName: 'TVHTML5'
+                },
+                {
+                    name: 'ANDROID_TESTSUITE',
+                    version: '1.9.3',
+                    platform: 'ANDROID',
+                    userAgent: 'com.google.android.youtube.testsuite/1.9.3 (Linux; U; Android 12; en_US) gzip',
+                    clientName: 'ANDROID_TESTSUITE'
                 }
             ];
 
             for (const client of clients) {
                 try {
-                    console.log(`[DirectYt] Trying client: ${client.name}`);
-                    body.context.client.clientName = client.name;
-                    body.context.client.clientVersion = client.version;
+                    console.log(`[DirectYt] Testing ${client.name} for ${videoId}`);
+                    
+                    const body: any = {
+                        context: {
+                            client: {
+                                clientName: client.clientName,
+                                clientVersion: client.version,
+                                platform: client.platform,
+                                hl: 'en-US',
+                                gl: 'US',
+                                utcOffsetMinutes: 0,
+                            },
+                        },
+                        videoId: videoId,
+                        playbackContext: {
+                            contentPlaybackContext: {
+                                signatureTimestamp: 20514,
+                            },
+                        },
+                        racyCheckOk: true,
+                        contentCheckOk: true,
+                    };
+
+                    if (this.cachedVisitorData) {
+                        body.context.client.visitorData = this.cachedVisitorData;
+                    }
+
+                    const reqHeaders: any = { 
+                        ...this.headers, 
+                        'Content-Type': 'application/json',
+                        'User-Agent': client.userAgent,
+                        'X-Goog-Visitor-Id': this.cachedVisitorData || '',
+                        'X-YouTube-Client-Name': client.clientName === 'MWEB' ? '2' : '1',
+                        'X-YouTube-Client-Version': client.version
+                    };
 
                     const res = await fetch(apiUrl, {
                         method: 'POST',
-                        headers: { ...this.headers, 'Content-Type': 'application/json' },
+                        headers: reqHeaders,
                         body: JSON.stringify(body),
                     });
 
-                    if (!res.ok) {
-                        console.warn(`[DirectYt] ${client.name} request failed: ${res.status}`);
-                        continue;
-                    }
+                    if (!res.ok) continue;
 
                     const data = await res.json();
-                    if (!data.streamingData) {
-                        console.warn(`[DirectYt] ${client.name} returned no streamingData`);
-                        if (client.name === 'IOS') { // Log playability on last attempt
-                            console.warn('[DirectYt] Playability:', JSON.stringify(data.playabilityStatus));
+                    
+                    if (data.playabilityStatus?.status === 'OK' && data.streamingData) {
+                        const stream = this.extractStream(data, type);
+                        if (stream) {
+                            console.log(`[DirectYt] Success with ${client.name}`);
+                            return {
+                                url: stream.url,
+                                mimeType: stream.mimeType,
+                                headers: {
+                                    'User-Agent': client.userAgent,
+                                    'Referer': 'https://www.youtube.com/',
+                                    'Origin': 'https://www.youtube.com'
+                                }
+                            };
                         }
-                        continue;
-                    }
-
-                    const stream = this.extractStream(data, type);
-                    if (stream) {
-                        console.log(`[DirectYt] Resolved ${type} for ${videoId} using ${client.name}`);
-                        // Return URL with the headers used to simulate the request
-                        return {
-                            url: stream,
-                            headers: {
-                                'User-Agent': this.headers['User-Agent'],
-                                'Referer': 'https://music.youtube.com/',
-                                'Origin': 'https://music.youtube.com'
-                            }
-                        };
-                    } else {
-                        console.log(`[DirectYt] ${client.name} returned only unusable (ciphered) streams`);
+                    } else if (data.playabilityStatus?.reason) {
+                        console.warn(`[DirectYt] ${client.name} rejected: ${data.playabilityStatus.reason}`);
                     }
                 } catch (clientErr) {
-                    console.warn(`[DirectYt] Error with ${client.name}:`, clientErr);
+                    console.warn(`[DirectYt] Client ${client.name} error:`, clientErr);
                 }
             }
 
-            console.warn(`[DirectYt] All clients failed to resolve usable stream for ${videoId}`);
             return null;
         } catch (err) {
-            console.warn('[DirectYt] Error:', err);
+            console.error('[DirectYt] Global error:', err);
             return null;
         }
     }
@@ -99,68 +130,26 @@ export class DirectYtResolver {
     static async getNext(videoId: string): Promise<any[]> {
         try {
             await this.ensureConfig();
-            if (!this.cachedApiKey) return [];
-
-            const apiUrl = `${this.baseUrl}/youtubei/v1/next?key=${this.cachedApiKey}`;
+            const apiUrl = `https://www.youtube.com/youtubei/v1/next?key=${this.cachedApiKey}`;
             const body = {
-                context: {
-                    client: {
-                        clientName: 'WEB_REMIX',
-                        clientVersion: this.cachedClientVersion || '1.20240101.01.00',
-                    },
-                },
+                context: { client: { clientName: 'WEB', clientVersion: '2.20240101.01.00' } },
                 videoId: videoId,
             };
-
-            console.log(`[DirectYt] Fetching Up Next for: ${videoId}`);
             const res = await fetch(apiUrl, {
                 method: 'POST',
                 headers: { ...this.headers, 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
-
             if (!res.ok) return [];
-
             const data = await res.json();
-            return this.extractRelated(data);
-        } catch (e) {
-            console.warn('[DirectYt] getNext failed:', e);
-            return [];
-        }
-    }
-
-    private static extractRelated(data: any): any[] {
-        try {
-            const tabs = data.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs;
-            const watchNextTab = tabs?.find((t: any) => t.tabRenderer?.title === 'Up Next' || t.tabRenderer?.title === 'Lyrics' || true); // Usually the first one or specifically 'Up Next'
-
-            // Actually usually it's in queue -> sidebar
-            // But efficient path:
-            const queue = data.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.musicQueueRenderer?.content?.playlistPanelRenderer?.contents;
-
-            // Or "Related" section
-            // In Music, "Up Next" comes from the playlistPanelRenderer mostly
-
             const results: any[] = [];
-
-            if (queue) {
-                queue.forEach((item: any) => {
-                    const renderer = item.playlistPanelVideoRenderer;
-                    if (renderer) {
-                        results.push({
-                            videoId: renderer.videoId,
-                            title: renderer.title?.runs?.[0]?.text,
-                            artist: renderer.shortBylineText?.runs?.[0]?.text,
-                            thumbnail: renderer.thumbnail?.thumbnails?.[0]?.url,
-                        });
-                    }
-                });
-            }
-
+            const contents = data.contents?.twoColumnWatchNextResults?.secondaryResults?.secondaryResults?.results || [];
+            contents.forEach((item: any) => {
+                const r = item.compactVideoRenderer;
+                if (r) results.push({ videoId: r.videoId, title: r.title?.simpleText, artist: r.shortBylineText?.runs?.[0]?.text, thumbnail: r.thumbnail?.thumbnails?.[0]?.url });
+            });
             return results;
-        } catch (e) {
-            return [];
-        }
+        } catch (e) { return []; }
     }
 
     private static async ensureConfig() {
@@ -168,80 +157,37 @@ export class DirectYtResolver {
         try {
             const res = await fetch(this.baseUrl, { headers: this.headers });
             const html = await res.text();
-
             const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"(.+?)"/);
-            if (apiKeyMatch) {
-                this.cachedApiKey = apiKeyMatch[1];
-            } else {
-                // Fallback to known working key (fetched Jan 2026)
-                console.warn('[DirectYt] Could not scrape API Key, using fallback');
-                this.cachedApiKey = process.env.EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY || '';
-            }
-
-            const clientVerMatch = html.match(/"clientVersion":"([\d\.]+)"/);
-            if (clientVerMatch) {
-                this.cachedClientVersion = clientVerMatch[1];
-            } else {
-                console.warn('[DirectYt] Could not scrape Client Version, using fallback');
-                this.cachedClientVersion = '1.20260114.03.00';
-            }
+            if (apiKeyMatch) this.cachedApiKey = apiKeyMatch[1];
+            const visitorDataMatch = html.match(/"visitorData":"(.+?)"/);
+            if (visitorDataMatch) this.cachedVisitorData = visitorDataMatch[1];
         } catch (e) {
-            console.warn('[DirectYt] config fetch failed, using fallbacks');
             this.cachedApiKey = process.env.EXPO_PUBLIC_YOUTUBE_INNERTUBE_KEY || '';
-            this.cachedClientVersion = '1.20260114.03.00';
         }
     }
 
-    private static extractStream(data: any, type: 'audio' | 'video'): string | null {
-        const formats = [
-            ...(data.streamingData?.formats || []),
-            ...(data.streamingData?.adaptiveFormats || [])
-        ];
-
+    private static extractStream(data: any, type: 'audio' | 'video'): { url: string; mimeType: string } | null {
+        const formats = [...(data.streamingData?.formats || []), ...(data.streamingData?.adaptiveFormats || [])];
         if (!formats.length) return null;
+        
+        // Filter out formats without direct URLs (those with signatureCipher need JS decryption)
+        const playableFormats = formats.filter((f: any) => f.url && !f.signatureCipher);
+        if (!playableFormats.length) return null;
 
-        // Diagnostic: Check for signature cipher
-        const ciphered = formats.filter((f: any) => f.signatureCipher || f.cipher);
-        if (ciphered.length > 0) {
-            console.log(`[DirectYt] Found ${ciphered.length} ciphered formats (playable via DirectYt might be limited)`);
-        }
-
-        let bestFormat;
-
+        let best;
         if (type === 'audio') {
-            // Prefer M4A/AAC audio
-            bestFormat = formats
-                .filter((f: any) => f.url && f.mimeType?.includes('audio'))
-                .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))
-                .find((f: any) => f.mimeType.includes('mp4') || f.mimeType.includes('audio/mp4'));
-
-            if (!bestFormat) {
-                // Fallback to any audio
-                bestFormat = formats
-                    .filter((f: any) => f.url && f.mimeType?.includes('audio'))
-                    .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-            }
+            best = playableFormats
+                .filter((f: any) => f.mimeType?.includes('audio'))
+                .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
         } else {
-            // Video: Priority 1 - Muxed MP4 (Video + Audio)
-            const muxedFormats = formats.filter((f: any) =>
-                f.url &&
-                f.mimeType?.includes('video/mp4') &&
-                (f.audioQuality || f.audioSampleRate) // Ensure audio track exists
+            // For video, look for muxed streams (video + audio) first
+            const muxed = playableFormats.filter((f: any) => 
+                f.mimeType?.includes('video/mp4') && (f.audioQuality || f.audioSampleRate)
             );
-
-            if (muxedFormats.length > 0) {
-                // Sort by quality (height)
-                bestFormat = muxedFormats.sort((a: any, b: any) => (b.height || 0) - (a.height || 0))[0];
-                console.log(`[DirectYt] Selected muxed video format: ${bestFormat.qualityLabel} (${bestFormat.height}p)`);
-            } else {
-                console.warn('[DirectYt] No muxed MP4 formats found with URL. Returning best available video (might be silent).');
-                // Fallback to any MP4 video (likely adaptive/silent)
-                bestFormat = formats
-                    .filter((f: any) => f.url && f.mimeType?.includes('video/mp4'))
-                    .sort((a: any, b: any) => (b.height || 0) - (a.height || 0))[0];
-            }
+            best = muxed.length > 0 
+                ? muxed.sort((a: any, b: any) => (b.height || 0) - (a.height || 0))[0] 
+                : playableFormats.filter((f: any) => f.mimeType?.includes('video/mp4')).sort((a: any, b: any) => (b.height || 0) - (a.height || 0))[0];
         }
-
-        return bestFormat?.url || null;
+        return best ? { url: best.url, mimeType: best.mimeType } : null;
     }
 }

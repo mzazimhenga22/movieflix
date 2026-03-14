@@ -16,7 +16,7 @@ import {
 import QRCode from 'react-native-qrcode-svg';
 
 import ScreenWrapper from '../../../components/ScreenWrapper';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '../../../components/app-components/AccentContext';
 import { useUser } from '../../../hooks/use-user';
 import { getTicketByTicketId, type MarketplaceTicket } from '../api';
 

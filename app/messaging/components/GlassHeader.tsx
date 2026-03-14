@@ -1,10 +1,10 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
+import { lightenColor, withAlpha } from '@/lib/colorUtils';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useAccent } from '../../components/AccentContext';
-import { darkenColor, lightenColor, withAlpha } from '@/lib/colorUtils';
-import LiquidGlass from '@/app/components/LiquidGlass';
+import React, { useEffect, useRef } from 'react';
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface GlassHeaderProps {
   title: string;
@@ -99,22 +99,22 @@ export default function GlassHeader({
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         />
-        
+
         <View style={styles.innerHighlight} />
 
         <View style={styles.headerContent}>
           <TouchableOpacity style={styles.titleRow} activeOpacity={0.8} onPress={onSearch}>
-            <Animated.View 
+            <Animated.View
               style={[
-                styles.accentDot, 
-                { 
+                styles.accentDot,
+                {
                   backgroundColor: accent,
                   shadowColor: accent,
                   transform: [{ scale: pulseAnim }],
                 }
-              ]} 
+              ]}
             />
-            
+
             <View style={styles.titleContent}>
               {greeting && <Text style={styles.eyebrow}>{greeting}</Text>}
               <Text style={styles.title}>{title}</Text>
@@ -124,53 +124,41 @@ export default function GlassHeader({
 
           <View style={styles.actions}>
             {onSnowToggle && (
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.iconBtn}
                 onPress={onSnowToggle}
               >
                 <LiquidGlass
-                  glowColor={isSnowing ? '#5AC8FA' : accent}
-                  tintColor="#2A1A3E"
                   tintOpacity={0.6}
                   cornerRadius={14}
-                  glowIntensity={0.5}
-                  borderWidth={1}
+                  borderOpacity={0.35}
                   style={styles.iconGlass}
-                  animated={false}
                 >
                   <Ionicons name="snow" size={20} color={isSnowing ? '#5AC8FA' : '#fff'} />
                 </LiquidGlass>
               </TouchableOpacity>
             )}
-            
+
             {onSearch && (
               <TouchableOpacity style={styles.iconBtn} onPress={onSearch}>
                 <LiquidGlass
-                  glowColor={accent}
-                  tintColor="#2A1A3E"
                   tintOpacity={0.6}
                   cornerRadius={14}
-                  glowIntensity={0.5}
-                  borderWidth={1}
+                  borderOpacity={0.35}
                   style={styles.iconGlass}
-                  animated={false}
                 >
                   <Ionicons name="search" size={20} color="#fff" />
                 </LiquidGlass>
               </TouchableOpacity>
             )}
-            
+
             {onSettings && (
               <TouchableOpacity style={styles.iconBtn} onPress={onSettings}>
                 <LiquidGlass
-                  glowColor={accent}
-                  tintColor="#2A1A3E"
                   tintOpacity={0.6}
                   cornerRadius={14}
-                  glowIntensity={0.5}
-                  borderWidth={1}
+                  borderOpacity={0.35}
                   style={styles.iconGlass}
-                  animated={false}
                 >
                   <Ionicons name="settings-outline" size={20} color="#fff" />
                 </LiquidGlass>
@@ -184,12 +172,12 @@ export default function GlassHeader({
             <Ionicons name="chatbubbles" size={14} color={lightenColor(accent, 0.3)} />
             <Text style={[styles.statText, { color: lightenColor(accent, 0.3) }]}>{chatCount} chats</Text>
           </View>
-          
+
           <View style={styles.statPill}>
             <Ionicons name="people" size={14} color="rgba(255,255,255,0.7)" />
             <Text style={styles.statText}>{followingCount} following</Text>
           </View>
-          
+
           <View style={[styles.statPill, styles.statPillOutline]}>
             <Ionicons name="call" size={14} color="rgba(255,255,255,0.7)" />
             <Text style={styles.statText}>Calls</Text>

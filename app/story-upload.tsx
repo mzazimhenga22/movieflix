@@ -4,15 +4,15 @@ import { updateStreakForContext } from '@/lib/streaks/streakManager';
 import { Ionicons } from '@expo/vector-icons';
 import BottomSheet from '@gorhom/bottom-sheet';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { ResizeMode, Video } from 'expo-av';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { addDoc, collection, doc, getDoc, serverTimestamp } from 'firebase/firestore';
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
@@ -28,6 +28,7 @@ import {
   View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import LiquidGlass from '../components/app-components/LiquidGlass';
 import ScreenWrapper from '../components/ScreenWrapper';
 import StoryMusicPicker, { MusicTrack } from '../components/story/StoryMusicPicker';
 import StoryStepIndicator from '../components/story/StoryStepIndicator';
@@ -35,7 +36,33 @@ import { firestore } from '../constants/firebase';
 import { supabase, supabaseConfigured } from '../constants/supabase';
 import { useUser } from '../hooks/use-user';
 
+const AnyVideoView = VideoView as any;
+
 type UploadStep = 'media' | 'edit' | 'music' | 'share';
+
+// Preview Video component to correctly use the hook
+const PreviewVideo = memo(({ uri, shouldPlay }: { uri: string; shouldPlay: boolean }) => {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.muted = true;
+  });
+
+  useEffect(() => {
+    if (shouldPlay) player.play();
+    else player.pause();
+  }, [shouldPlay, player]);
+
+  return (
+    <>
+      <AnyVideoView
+        player={player}
+        style={styles.previewMedia}
+        contentFit="cover"
+        showsPlaybackControls={false}
+      />
+    </>
+  );
+});
 
 export default function StoryUpload() {
   const insets = useSafeAreaInsets();
@@ -476,23 +503,25 @@ export default function StoryUpload() {
               {pickedUri && (
                 <View style={styles.previewWrap}>
                   {pickedType === 'video' ? (
-                    <Video
-                      source={{ uri: pickedUri }}
-                      style={styles.previewMedia}
-                      resizeMode={ResizeMode.COVER}
+                    <PreviewVideo
+                      uri={pickedUri}
                       shouldPlay={!keyboardVisible}
-                      isLooping
-                      isMuted
                     />
                   ) : (
                     <Image source={{ uri: pickedUri }} style={styles.previewMedia} />
                   )}
                   {deferredOverlayText ? (
-                    <View style={styles.overlayTextChip}>
+                    <LiquidGlass
+                      cornerRadius={12}
+                      blurRadius={50}
+                      tintOpacity={0.5}
+                      borderOpacity={0.2}
+                      style={styles.overlayTextChip}
+                    >
                       <Text style={styles.overlayTextPreview} numberOfLines={2}>
                         {deferredOverlayText}
                       </Text>
-                    </View>
+                    </LiquidGlass>
                   ) : null}
                 </View>
               )}
@@ -518,6 +547,9 @@ export default function StoryUpload() {
           <View style={styles.stepContent}>
             <StoryMusicPicker
               accent="#e50914"
+              previewUri={pickedUri}
+              previewType={pickedType}
+              previewOverlayText={overlayText}
               onSelect={handleMusicSelect}
               onSkip={handleMusicSkip}
             />
@@ -535,23 +567,25 @@ export default function StoryUpload() {
             {pickedUri && (
               <View style={styles.previewWrap}>
                 {pickedType === 'video' ? (
-                  <Video
-                    source={{ uri: pickedUri }}
-                    style={styles.previewMedia}
-                    resizeMode={ResizeMode.COVER}
+                  <PreviewVideo
+                    uri={pickedUri}
                     shouldPlay={!keyboardVisible}
-                    isLooping
-                    isMuted
                   />
                 ) : (
                   <Image source={{ uri: pickedUri }} style={styles.previewMedia} />
                 )}
                 {deferredOverlayText ? (
-                  <View style={styles.overlayTextChip}>
+                  <LiquidGlass
+                    cornerRadius={12}
+                    blurRadius={50}
+                    tintOpacity={0.5}
+                    borderOpacity={0.2}
+                    style={styles.overlayTextChip}
+                  >
                     <Text style={styles.overlayTextPreview} numberOfLines={2}>
                       {deferredOverlayText}
                     </Text>
-                  </View>
+                  </LiquidGlass>
                 ) : null}
 
                 {/* Music badge */}
@@ -658,13 +692,17 @@ export default function StoryUpload() {
         <View style={styles.container}>
           {/* Header */}
           <View style={[styles.header, { marginTop: Platform.OS === 'ios' ? insets.top : 12 }]}>
-            <TouchableOpacity onPress={goToPrevStep} style={styles.headerBtn}>
-              <Ionicons name="chevron-back" size={24} color="#fff" />
+            <TouchableOpacity onPress={goToPrevStep} activeOpacity={0.8}>
+              <LiquidGlass cornerRadius={12} tintOpacity={0.1} borderOpacity={0.2} style={styles.headerBtn}>
+                <Ionicons name="chevron-back" size={24} color="#fff" />
+              </LiquidGlass>
             </TouchableOpacity>
             <Text style={styles.headerTitle}>New Story</Text>
             {currentStep === 'edit' ? (
-              <TouchableOpacity onPress={goToNextStep} style={styles.headerBtn}>
-                <Ionicons name="musical-notes" size={24} color="#e50914" />
+              <TouchableOpacity onPress={goToNextStep} activeOpacity={0.8}>
+                <LiquidGlass cornerRadius={12} tintOpacity={0.1} borderOpacity={0.2} style={styles.headerBtn}>
+                  <Ionicons name="musical-notes" size={24} color="#e50914" />
+                </LiquidGlass>
               </TouchableOpacity>
             ) : (
               <View style={styles.headerBtn} />
@@ -717,8 +755,6 @@ const styles = StyleSheet.create({
     height: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   headerTitle: {
     fontSize: 18,
@@ -792,8 +828,6 @@ const styles = StyleSheet.create({
     right: 16,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,0,0,0.5)',
   },
   overlayTextPreview: {
     color: '#fff',

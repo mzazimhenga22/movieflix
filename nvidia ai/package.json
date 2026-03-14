@@ -1,0 +1,17 @@
+{
+    "name": "nvidia-ai-workspace",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Local workspace for NVIDIA AI chat integrations",
+    "bin": {
+        "kimi": "./kimi.js"
+    },
+    "dependencies": {
+        "axios": "^1.13.2",
+        "boxen": "^8.0.1",
+        "chalk": "^5.6.2",
+        "enquirer": "^2.4.1",
+        "openai": "^6.22.0",
+        "ora": "^9.3.0"
+    }
+}

@@ -1,8 +1,12 @@
-import React, { memo, useMemo, useRef } from 'react';
-import { View, Animated, Platform } from 'react-native';
+import React, { memo, useMemo, useRef, useEffect } from 'react';
+import { View, Animated, Platform, StyleSheet } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useAccent } from '@/components/app-components/AccentContext';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
+import { withAlpha } from '@/lib/colorUtils';
 import MessageBubble, { MessageItem } from './MessageBubble';
 
 // Helper to parse timestamps
@@ -138,35 +142,73 @@ const ChatRow = ({
   const groupPosition = getBubbleGroupPosition(index);
   
   let swipeableRef: any = null;
+  
+  const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
 
-  const renderReplyAction = (progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
+  const renderReplyAction = (
+    progress: Animated.AnimatedInterpolation<number>,
+    dragX: Animated.AnimatedInterpolation<number>
+  ) => {
+    const isMeSwipe = isMe;
+    
     const scale = dragX.interpolate({
-      inputRange: isMe ? [-80, 0] : [0, 80],
-      outputRange: isMe ? [1, 0] : [0, 1],
+      inputRange: isMeSwipe ? [-80, -40, 0] : [0, 40, 80],
+      outputRange: isMeSwipe ? [1, 0.8, 0] : [0, 0.8, 1],
       extrapolate: 'clamp',
     });
+
+    const opacity = dragX.interpolate({
+      inputRange: isMeSwipe ? [-80, -40, 0] : [0, 40, 80],
+      outputRange: isMeSwipe ? [1, 0.5, 0] : [0, 0.5, 1],
+      extrapolate: 'clamp',
+    });
+
+    const translateX = dragX.interpolate({
+      inputRange: isMeSwipe ? [-80, 0] : [0, 80],
+      outputRange: isMeSwipe ? [0, 20] : [-20, 0],
+      extrapolate: 'clamp',
+    });
+
     return (
-      <View style={{ justifyContent: 'center', alignItems: 'center', width: 80 }}>
-        <Animated.View style={{ transform: [{ scale }] }}>
-          <Ionicons name="return-up-back" size={24} color="#fff" />
+      <View style={[styles.replyActionContainer, { alignItems: isMeSwipe ? 'flex-end' : 'flex-start' }]}>
+        <Animated.View style={[styles.replyActionButton, { transform: [{ scale }, { translateX }], opacity }]}>
+          <LiquidGlass
+            cornerRadius={22}
+            tintOpacity={0.2}
+            tintColor={accent}
+            glowColor={accent}
+            glowIntensity={0.4}
+            chromaticAberration
+            interactive
+            style={StyleSheet.absoluteFill}
+          />
+          <Ionicons name="arrow-undo" size={20} color="#fff" style={{ zIndex: 1 }} />
         </Animated.View>
       </View>
     );
   };
 
+  const onSwipeableWillOpen = () => {
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+  };
+
   return (
     <Swipeable
       ref={(ref) => { swipeableRef = ref; }}
+      friction={2}
+      leftThreshold={60}
+      rightThreshold={60}
       renderRightActions={isMe ? renderReplyAction : undefined}
       renderLeftActions={!isMe ? renderReplyAction : undefined}
+      onSwipeableWillOpen={onSwipeableWillOpen}
       onSwipeableOpen={() => {
         onSwipeReply(item);
-        if (Platform.OS !== 'web') {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        }
         setTimeout(() => {
           swipeableRef?.close();
-        }, 150);
+        }, 100);
       }}
     >
       <MessageBubble
@@ -187,5 +229,21 @@ const ChatRow = ({
     </Swipeable>
   );
 };
+
+const styles = StyleSheet.create({
+  replyActionContainer: {
+    width: 80,
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  replyActionButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+});
 
 export default memo(ChatRow);

@@ -8,9 +8,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, Easing, PixelRatio, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
+import { useAccent } from '../components/app-components/AccentContext';
 import { authPromise, firestore } from '../constants/firebase';
 import { useSubscription } from '../providers/SubscriptionProvider';
-import { useAccent } from './components/AccentContext';
 
 type PlanTier = 'free' | 'plus' | 'premium';
 

@@ -1,13 +1,15 @@
-import LiquidGlass from '@/app/components/LiquidGlass';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { ResizeMode, Video } from 'expo-av';
 import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, Dimensions, Easing, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Media } from '../types';
+
+const AnyVideoView = VideoView as any;
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const TRAILER_WIDTH = Math.min(320, SCREEN_WIDTH * 0.85);
@@ -26,6 +28,216 @@ interface MovieTrailerCarouselProps {
 
 export type MovieTrailerCarouselHandle = {
   setPaused: (paused: boolean) => void;
+};
+
+// Trailer Item component to manage its own player instance
+const TrailerItem = React.memo(function TrailerItem({
+  movie,
+  isActive,
+  effectivePaused,
+  onTrailerPress,
+  handleTrailerPress,
+}: {
+  movie: Media & { trailerUrl: string };
+  isActive: boolean;
+  effectivePaused: boolean;
+  index: number;
+  onTrailerPress: (movie: Media) => void;
+  handleTrailerPress: (movie: Media & { trailerUrl: string }) => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
+
+  const player = useVideoPlayer(movie.trailerUrl, (p) => {
+    p.loop = true;
+    p.muted = true;
+  });
+
+  useEffect(() => {
+    if (isActive && !effectivePaused) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [isActive, effectivePaused, player]);
+
+  useEffect(() => {
+    const statusSub = player.addListener('statusChange', (event: any) => {
+      if (event.status === 'ready') {
+        setLoading(false);
+        setHasError(false);
+      } else if (event.status === 'loading') {
+        setLoading(true);
+      } else if (event.status === 'error') {
+        setHasError(true);
+        setLoading(false);
+      }
+    });
+    return () => statusSub.remove();
+  }, [player]);
+
+  const thumbPath = movie.backdrop_path || movie.poster_path;
+  const thumbUri = thumbPath ? `${IMAGE_BASE_URL_HD}${thumbPath}` : undefined;
+  const posterUri = movie.poster_path ? `${IMAGE_BASE_URL_POSTER}${movie.poster_path}` : undefined;
+  const accentColor = '#e50914';
+
+  return (
+    <View style={styles.cardWrapper}>
+      <GlowRing isActive={isActive} color={accentColor} />
+
+      <TrailerCardContainer isActive={isActive} accentColor={accentColor}>
+        <TouchableOpacity
+          style={[styles.trailerCard, isActive && styles.trailerCardActive]}
+          onPress={() => deferNav(() => onTrailerPress(movie))}
+          activeOpacity={0.95}
+        >
+          <View style={styles.videoContainer}>
+            <ExpoImage
+              source={thumbUri ? { uri: thumbUri } : undefined}
+              style={[styles.video, styles.thumbnailBackground]}
+              contentFit="cover"
+              transition={0}
+              cachePolicy="memory-disk"
+              recyclingKey={`trailer-thumb-${movie.id}`}
+              priority="high"
+            />
+
+            {isActive && !hasError && (
+              <AnyVideoView
+                player={player}
+                style={[styles.video, styles.videoOverlayPlayer]}
+                contentFit="cover"
+                showsPlaybackControls={false}
+              />
+            )}
+
+            {isActive && loading && (
+              <View style={styles.loadingOverlay}>
+                <ActivityIndicator size="large" color="#e50914" />
+              </View>
+            )}
+
+            {hasError && (
+              <View style={styles.errorOverlay}>
+                <Ionicons name="alert-circle" size={32} color="rgba(255,255,255,0.5)" />
+                <Text style={styles.errorText}>Trailer unavailable</Text>
+              </View>
+            )}
+
+            <LinearGradient
+              colors={['transparent', 'rgba(0,0,0,0.2)', 'rgba(0,0,0,0.85)']}
+              locations={[0, 0.4, 1]}
+              style={styles.cinematicOverlay}
+            />
+
+            <View style={styles.topAccentLine}>
+              <LinearGradient
+                colors={[accentColor, 'transparent']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.accentLineGradient}
+              />
+            </View>
+
+            <CinematicBadge
+              rating={movie.vote_average}
+              year={movie.release_date?.slice(0, 4)}
+            />
+
+            <LiveIndicator isPlaying={isActive && !effectivePaused} />
+
+            <View style={styles.centerPlayContainer}>
+              <PlayButton isPlaying={isActive && !effectivePaused} onPress={() => handleTrailerPress(movie)} />
+            </View>
+
+            <View style={styles.bottomOverlay}>
+              <View style={styles.titleContainer}>
+                <Text style={styles.movieTitle} numberOfLines={1}>
+                  {movie.title || movie.name}
+                </Text>
+                <View style={styles.trailerBadge}>
+                  <MaterialCommunityIcons name="filmstrip" size={10} color="#e50914" />
+                  <Text style={styles.trailerBadgeText}>TRAILER</Text>
+                </View>
+              </View>
+
+              <View style={styles.metaRow}>
+                {movie.genre_ids?.slice(0, 2).map((genreId) => (
+                  <View key={genreId} style={styles.genreChip}>
+                    <Text style={styles.genreChipText}>{getGenreName(genreId)}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.glassFooter}>
+            <View style={styles.footerLeft}>
+              <View style={styles.miniPoster}>
+                <ExpoImage
+                  source={posterUri ? { uri: posterUri } : undefined}
+                  style={styles.miniPosterImage}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                />
+              </View>
+              <View style={styles.footerInfo}>
+                <Text style={styles.footerSubtitle}>Official Trailer</Text>
+                <View style={styles.statsRow}>
+                  <Ionicons name="eye-outline" size={12} color="rgba(255,255,255,0.6)" />
+                  <Text style={styles.statsText}>{Math.floor(Math.random() * 500 + 100)}K views</Text>
+                </View>
+              </View>
+            </View>
+
+            <TouchableOpacity style={styles.watchButton} onPress={() => handleTrailerPress(movie)}>
+              <LiquidGlass
+                glowColor="#E50914"
+                tintColor="#B20710"
+                tintOpacity={0.9}
+                cornerRadius={14}
+                glowIntensity={0.6}
+                borderWidth={1}
+                chromaticAberration={true}
+                depthEffect={true}
+                interactive={false}
+                breathingEffect={false}
+                optimizeForScroll
+                style={styles.watchButtonGradient}
+                animated={false}
+              >
+                <Ionicons name="play" size={14} color="#fff" />
+                <Text style={styles.watchButtonText}>Watch</Text>
+              </LiquidGlass>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </TrailerCardContainer>
+    </View>
+  );
+});
+
+// Extra wrapper to use LiquidGlass properly
+const TrailerCardContainer = ({ children, isActive, accentColor }: { children: React.ReactNode, isActive: boolean, accentColor: string }) => {
+  return (
+    <LiquidGlass
+      cornerRadius={22}
+      tintColor="#141623"
+      tintOpacity={0.8}
+      borderOpacity={isActive ? 0.4 : 0.1}
+      glowColor={accentColor}
+      glowIntensity={isActive ? 0.3 : 0}
+      chromaticAberration={isActive}
+      depthEffect={isActive}
+      interactive={isActive}
+      breathingEffect={isActive}
+      optimizeForScroll={!isActive}
+      style={styles.trailerCard}
+    >
+      {children}
+    </LiquidGlass>
+  );
 };
 
 // Animated glow ring component
@@ -151,12 +363,9 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
 ) {
   const [playingIndex, setPlayingIndex] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [loadingStates, setLoadingStates] = useState<Record<number, boolean>>({});
-  const [errorStates, setErrorStates] = useState<Record<number, boolean>>({});
   const router = useRouter();
   const { deferNav } = useNavigationGuard({ cooldownMs: 900 });
   const flatListRef = useRef<any>(null);
-  const videoRefs = useRef<Record<number, any>>({});
 
   const setPausedSafe = useCallback((next: boolean) => {
     setPaused((prev) => (prev === next ? prev : next));
@@ -187,25 +396,6 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
     const next = Math.max(0, Math.min(currentIndex, trailers.length - 1));
     setPlayingIndex((prev) => (prev === next ? prev : next));
   }, [trailers.length]);
-
-  // Handle video status updates
-  const handleVideoStatus = useCallback((index: number, status: any) => {
-    if (status.isLoaded) {
-      setLoadingStates(prev => ({ ...prev, [index]: false }));
-      setErrorStates(prev => ({ ...prev, [index]: false }));
-    }
-  }, []);
-
-  // Handle video errors
-  const handleVideoError = useCallback((index: number) => {
-    setErrorStates(prev => ({ ...prev, [index]: true }));
-    setLoadingStates(prev => ({ ...prev, [index]: false }));
-  }, []);
-
-  // Handle video load start
-  const handleVideoLoadStart = useCallback((index: number) => {
-    setLoadingStates(prev => ({ ...prev, [index]: true }));
-  }, []);
 
   const createTrailerReels = useCallback((movie: Media & { trailerUrl: string }, allTrailers: (Media & { trailerUrl: string })[]) => {
     return allTrailers.map((trailerMovie) => ({
@@ -238,165 +428,19 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
     ({ item: movie, index }: { item: Media & { trailerUrl: string }; index: number }) => {
       const isActive = index === playingIndex;
       const effectivePaused = paused || isParentScrolling;
-      const shouldPlay = isActive && !effectivePaused;
-      const isLoading = loadingStates[index];
-      const hasError = errorStates[index];
-
-      // Use HD backdrop for better quality
-      const thumbPath = movie.backdrop_path || movie.poster_path;
-      const thumbUri = thumbPath ? `${IMAGE_BASE_URL_HD}${thumbPath}` : undefined;
-      const posterUri = movie.poster_path ? `${IMAGE_BASE_URL_POSTER}${movie.poster_path}` : undefined;
-      const accentColor = '#e50914';
 
       return (
-        <View style={styles.cardWrapper}>
-          <GlowRing isActive={isActive} color={accentColor} />
-
-          <TouchableOpacity
-            style={[styles.trailerCard, isActive && styles.trailerCardActive]}
-            onPress={() => deferNav(() => onTrailerPress(movie))}
-            activeOpacity={0.95}
-          >
-            {/* Video/Thumbnail Container */}
-            <View style={styles.videoContainer}>
-              {/* Always show HD thumbnail as background */}
-              <ExpoImage
-                source={thumbUri ? { uri: thumbUri } : undefined}
-                style={[styles.video, styles.thumbnailBackground]}
-                contentFit="cover"
-                transition={0}
-                cachePolicy="memory-disk"
-                recyclingKey={`trailer-thumb-${movie.id}`}
-                priority="high"
-              />
-
-              {/* Video player overlay - only render when active */}
-              {isActive && !hasError && (
-                <Video
-                  ref={(r: any) => { videoRefs.current[index] = r; }}
-                  source={{ uri: movie.trailerUrl }}
-                  style={[styles.video, styles.videoOverlayPlayer]}
-                  resizeMode={ResizeMode.COVER}
-                  shouldPlay={shouldPlay}
-                  isLooping
-                  isMuted
-                  useNativeControls={false}
-                  onLoadStart={() => handleVideoLoadStart(index)}
-                  onPlaybackStatusUpdate={(status: any) => handleVideoStatus(index, status)}
-                  onError={() => handleVideoError(index)}
-                  progressUpdateIntervalMillis={500}
-                />
-              )}
-
-              {/* Loading indicator */}
-              {isActive && isLoading && (
-                <View style={styles.loadingOverlay}>
-                  <ActivityIndicator size="large" color="#e50914" />
-                </View>
-              )}
-
-              {/* Error state */}
-              {hasError && (
-                <View style={styles.errorOverlay}>
-                  <Ionicons name="alert-circle" size={32} color="rgba(255,255,255,0.5)" />
-                  <Text style={styles.errorText}>Trailer unavailable</Text>
-                </View>
-              )}
-
-              {/* Cinematic gradient overlay */}
-              <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.2)', 'rgba(0,0,0,0.85)']}
-                locations={[0, 0.4, 1]}
-                style={styles.cinematicOverlay}
-              />
-
-              {/* Top decorative line */}
-              <View style={styles.topAccentLine}>
-                <LinearGradient
-                  colors={[accentColor, 'transparent']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.accentLineGradient}
-                />
-              </View>
-
-              {/* Badges */}
-              <CinematicBadge
-                rating={movie.vote_average}
-                year={movie.release_date?.slice(0, 4)}
-              />
-
-              {/* Live indicator */}
-              <LiveIndicator isPlaying={shouldPlay} />
-
-              {/* Center play button */}
-              <View style={styles.centerPlayContainer}>
-                <PlayButton isPlaying={shouldPlay} onPress={() => handleTrailerPress(movie)} />
-              </View>
-
-              {/* Bottom info overlay */}
-              <View style={styles.bottomOverlay}>
-                <View style={styles.titleContainer}>
-                  <Text style={styles.movieTitle} numberOfLines={1}>
-                    {movie.title || movie.name}
-                  </Text>
-                  <View style={styles.trailerBadge}>
-                    <MaterialCommunityIcons name="filmstrip" size={10} color="#e50914" />
-                    <Text style={styles.trailerBadgeText}>TRAILER</Text>
-                  </View>
-                </View>
-
-                <View style={styles.metaRow}>
-                  {movie.genre_ids?.slice(0, 2).map((genreId, i) => (
-                    <View key={genreId} style={styles.genreChip}>
-                      <Text style={styles.genreChipText}>{getGenreName(genreId)}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-            </View>
-
-            {/* Glass footer */}
-            <View style={styles.glassFooter}>
-              <View style={styles.footerLeft}>
-                <View style={styles.miniPoster}>
-                  <ExpoImage
-                    source={posterUri ? { uri: posterUri } : undefined}
-                    style={styles.miniPosterImage}
-                    contentFit="cover"
-                    cachePolicy="memory-disk"
-                  />
-                </View>
-                <View style={styles.footerInfo}>
-                  <Text style={styles.footerSubtitle}>Official Trailer</Text>
-                  <View style={styles.statsRow}>
-                    <Ionicons name="eye-outline" size={12} color="rgba(255,255,255,0.6)" />
-                    <Text style={styles.statsText}>{Math.floor(Math.random() * 500 + 100)}K views</Text>
-                  </View>
-                </View>
-              </View>
-
-              <TouchableOpacity style={styles.watchButton} onPress={() => handleTrailerPress(movie)}>
-                <LiquidGlass
-                  glowColor="#E50914"
-                  tintColor="#B20710"
-                  tintOpacity={0.9}
-                  cornerRadius={14}
-                  glowIntensity={0.6}
-                  borderWidth={1}
-                  style={styles.watchButtonGradient}
-                  animated={false}
-                >
-                  <Ionicons name="play" size={14} color="#fff" />
-                  <Text style={styles.watchButtonText}>Watch</Text>
-                </LiquidGlass>
-              </TouchableOpacity>
-            </View>
-          </TouchableOpacity>
-        </View>
+        <TrailerItem
+          movie={movie}
+          isActive={isActive}
+          effectivePaused={effectivePaused}
+          index={index}
+          onTrailerPress={onTrailerPress}
+          handleTrailerPress={handleTrailerPress}
+        />
       );
     },
-    [deferNav, handleTrailerPress, handleVideoError, handleVideoLoadStart, handleVideoStatus, isParentScrolling, loadingStates, errorStates, onTrailerPress, paused, playingIndex],
+    [handleTrailerPress, isParentScrolling, onTrailerPress, paused, playingIndex],
   );
 
   const indicators = useMemo(() => trailers.map((_, index) => index), [trailers]);
@@ -433,6 +477,10 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
             cornerRadius={11}
             glowIntensity={0.5}
             borderWidth={1}
+            chromaticAberration={false}
+            breathingEffect={false}
+            interactive={false}
+            optimizeForScroll
             style={styles.seeAllArrowLiquid}
             animated={false}
           >
@@ -453,6 +501,10 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
               cornerRadius={14}
               glowIntensity={0.5}
               borderWidth={1}
+              chromaticAberration={false}
+              interactive={false}
+              breathingEffect={false}
+              optimizeForScroll
               style={styles.navArrowGradient}
               animated={false}
             >
@@ -461,6 +513,7 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
           </TouchableOpacity>
         )}
 
+        {/* @ts-ignore - FlatList ref typing issue */}
         <FlatList
           ref={flatListRef}
           horizontal
@@ -474,10 +527,10 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
           snapToInterval={TRAILER_WIDTH + SPACING}
           snapToAlignment="start"
           getItemLayout={getItemLayout}
-          removeClippedSubviews
-          initialNumToRender={2}
-          maxToRenderPerBatch={3}
-          windowSize={5}
+          removeClippedSubviews={false}
+          initialNumToRender={3}
+          maxToRenderPerBatch={4}
+          windowSize={7}
           onScrollToIndexFailed={() => { }}
         />
 
@@ -491,6 +544,10 @@ const MovieTrailerCarousel = React.forwardRef<MovieTrailerCarouselHandle, MovieT
               cornerRadius={14}
               glowIntensity={0.5}
               borderWidth={1}
+              chromaticAberration={false}
+              interactive={false}
+              breathingEffect={false}
+              optimizeForScroll
               style={styles.navArrowGradient}
               animated={false}
             >
@@ -652,14 +709,13 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   trailerCard: {
+    flex: 1,
     borderRadius: 22,
     overflow: 'hidden',
-    backgroundColor: 'rgba(20,22,35,0.9)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'transparent',
   },
   trailerCardActive: {
-    borderColor: 'rgba(229,9,20,0.4)',
+    // handled by container borderOpacity/glow
   },
   videoContainer: {
     width: '100%',
@@ -927,6 +983,41 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: 'rgba(255,255,255,0.5)',
+  },
+  thumbnailBackground: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  videoOverlayPlayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1,
+  },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  errorText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 12,
+    marginTop: 8,
+    fontWeight: '600',
   },
 });
 

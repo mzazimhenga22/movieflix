@@ -1,26 +1,30 @@
+import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+import type { User } from 'firebase/auth';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
+  Dimensions,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-  Dimensions,
+  StatusBar,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { RTCView } from 'react-native-webrtc';
-import type { User } from 'firebase/auth';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useAccent } from '../components/AccentContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { mediaDevices, RTCView } from 'react-native-webrtc';
+import { useAccent } from '../../components/app-components/AccentContext';
 import { onAuthChange } from '../messaging/controller';
-import { mediaDevices } from 'react-native-webrtc';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+
+const { width, height: screenHeight } = Dimensions.get('window');
 
 const GoLiveScreen = () => {
   const router = useRouter();
   const { accentColor } = useAccent();
+  const accent = accentColor || '#e50914';
   const insets = useSafeAreaInsets();
   const [user, setUser] = useState<User | null>(null);
   const [title, setTitle] = useState('Movie night with friends');
@@ -29,8 +33,6 @@ const GoLiveScreen = () => {
   const [previewStream, setPreviewStream] = useState<any>(null);
   const [cameraFront, setCameraFront] = useState(true);
 
-  const { height: screenHeight } = Dimensions.get('window');
-
   useEffect(() => {
     const unsubscribe = onAuthChange((authUser) => setUser(authUser));
     return () => unsubscribe();
@@ -38,281 +40,138 @@ const GoLiveScreen = () => {
 
   const startPreview = useCallback(async () => {
     try {
-      const constraints = {
+      const stream = await mediaDevices.getUserMedia({
         audio: true,
-        video: {
-          width: { ideal: 720 },
-          height: { ideal: 1280 },
-          frameRate: { ideal: 30 },
-          facingMode: cameraFront ? 'user' : 'environment',
-        },
-      };
-      const stream = await mediaDevices.getUserMedia(constraints);
+        video: { width: { ideal: 720 }, height: { ideal: 1280 }, facingMode: cameraFront ? 'user' : 'environment' },
+      });
       setPreviewStream(stream);
       setPreviewMode(true);
-    } catch (err) {
-      Alert.alert('Camera Error', 'Unable to access camera');
-    }
+    } catch (err) { Alert.alert('Camera Error', 'Unable to access camera'); }
   }, [cameraFront]);
 
   const switchCamera = useCallback(async () => {
-    if (previewStream) {
-      previewStream.getTracks().forEach((track: any) => track.stop());
-    }
+    if (previewStream) previewStream.getTracks().forEach((track: any) => track.stop());
     setCameraFront(!cameraFront);
-    // Restart preview with new camera
-    setTimeout(() => {
-      startPreview();
-    }, 100);
+    setTimeout(() => startPreview(), 100);
   }, [previewStream, cameraFront, startPreview]);
 
   const stopPreview = useCallback(() => {
-    if (previewStream) {
-      previewStream.getTracks().forEach((track: any) => track.stop());
-      setPreviewStream(null);
-    }
+    if (previewStream) previewStream.getTracks().forEach((track: any) => track.stop());
+    setPreviewStream(null);
     setPreviewMode(false);
   }, [previewStream]);
 
   const handleContinueToLive = useCallback(async () => {
-    if (!user?.uid) {
-      Alert.alert('Please sign in', 'You need an account to go live.');
-      return;
-    }
-
-    // Stop preview stream before navigating so the host screen can claim the camera cleanly.
-    if (previewStream) {
-      previewStream.getTracks().forEach((track: any) => track.stop());
-      setPreviewStream(null);
-    }
+    if (!user?.uid) { Alert.alert('Sign in required'); return; }
+    if (previewStream) previewStream.getTracks().forEach((track: any) => track.stop());
+    setPreviewStream(null);
     setPreviewMode(false);
-
     await new Promise((r) => setTimeout(r, 300));
-
     router.push({
       pathname: '/social-feed/live/host',
-      params: {
-        title: title.trim() || 'Live on MovieFlix',
-        coverUrl: coverUrl.trim() || '',
-        cameraFront: cameraFront ? '1' : '0',
-      },
+      params: { title: title.trim() || 'Live on MovieFlix', coverUrl: coverUrl.trim() || '', cameraFront: cameraFront ? '1' : '0' },
     } as any);
   }, [cameraFront, coverUrl, previewStream, router, title, user?.uid]);
 
   return (
-    <LinearGradient
-      colors={[accentColor, '#05050a']}
-      style={StyleSheet.absoluteFill}
-    >
-      <View style={[styles.safeArea, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]}> 
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" />
+      <LinearGradient colors={['#1a0f1f', '#050509']} style={StyleSheet.absoluteFill} />
+      
+      <View style={[styles.safeArea, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]}>
         <View style={styles.header}>
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-            <Ionicons name="chevron-back" size={22} color="#fff" />
-            <Text style={styles.backLabel}>Feed</Text>
+            <Ionicons name="chevron-back" size={24} color="#fff" />
           </TouchableOpacity>
-          <Text style={styles.screenTitle}>Go Live</Text>
-          <View style={{ width: 40 }} />
+          <Text style={styles.screenTitle}>Broadcast</Text>
+          <View style={{ width: 44 }} />
         </View>
 
-        <View style={[styles.previewContainer, { maxHeight: screenHeight * 0.5 }]}>
-          {previewMode && previewStream ? (
-            <RTCView
-              streamURL={previewStream.toURL()}
-              style={styles.preview}
-              objectFit="cover"
-            />
-          ) : (
-            <View style={styles.previewPlaceholder}>
-              <Ionicons name="videocam" size={48} color="rgba(255,255,255,0.8)" />
-              <Text style={styles.previewHint}>
-                {previewMode ? 'Adjust your settings' : 'Tap "Go Live" to open your camera'}
-              </Text>
-            </View>
-          )}
+        <View style={[styles.previewWrapper, { height: screenHeight * 0.45 }]}>
+            <LiquidGlass cornerRadius={32} tintOpacity={0.1} style={styles.previewGlass}>
+                {previewMode && previewStream ? (
+                    <RTCView streamURL={previewStream.toURL()} style={styles.preview} objectFit="cover" />
+                ) : (
+                    <View style={styles.previewPlaceholder}>
+                        <Ionicons name="videocam" size={48} color="rgba(255,255,255,0.2)" />
+                        <Text style={styles.previewHint}>Tap to start preview</Text>
+                    </View>
+                )}
+            </LiquidGlass>
         </View>
 
         <View style={styles.form}>
-          <Text style={styles.label}>Live title</Text>
-          <TextInput
-            value={title}
-            onChangeText={setTitle}
-            placeholder="What are we watching?"
-            placeholderTextColor="rgba(255,255,255,0.4)"
-            style={styles.input}
-          />
-          <Text style={styles.label}>Cover image URL</Text>
-          <TextInput
-            value={coverUrl}
-            onChangeText={setCoverUrl}
-            placeholder="Optional thumbnail"
-            placeholderTextColor="rgba(255,255,255,0.4)"
-            style={styles.input}
-          />
+            <LiquidGlass cornerRadius={24} tintOpacity={0.05} style={styles.inputGlass}>
+                <Text style={styles.label}>LIVE TITLE</Text>
+                <TextInput value={title} onChangeText={setTitle} placeholder="What's happening?" placeholderTextColor="rgba(255,255,255,0.3)" style={styles.input} />
+            </LiquidGlass>
+            
+            <LiquidGlass cornerRadius={24} tintOpacity={0.05} style={styles.inputGlass}>
+                <Text style={styles.label}>THUMBNAIL URL</Text>
+                <TextInput value={coverUrl} onChangeText={setCoverUrl} placeholder="Optional cover image" placeholderTextColor="rgba(255,255,255,0.3)" style={styles.input} />
+            </LiquidGlass>
         </View>
 
-        {!previewMode && (
-          <View style={styles.buttonContainer}>
-            <TouchableOpacity
-              style={[styles.goLiveButton, { backgroundColor: accentColor }]}
-              onPress={startPreview}
-            >
-              <Ionicons name="videocam" size={20} color="#fff" />
-              <Text style={styles.goLiveLabel}>Start Camera</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+        <View style={styles.footer}>
+            {!previewMode ? (
+                <TouchableOpacity style={styles.mainBtn} onPress={startPreview}>
+                    <LiquidGlass cornerRadius={20} tintOpacity={0.2} tintColor={accent} glowColor={accent} glowIntensity={0.3} style={styles.mainBtnGlass}>
+                        <Ionicons name="videocam" size={22} color="#fff" />
+                        <Text style={styles.mainBtnText}>Enable Camera</Text>
+                    </LiquidGlass>
+                </TouchableOpacity>
+            ) : (
+                <View style={styles.controlRow}>
+                    <TouchableOpacity style={styles.subBtn} onPress={switchCamera}>
+                        <LiquidGlass cornerRadius={20} tintOpacity={0.1} style={styles.subBtnGlass}>
+                            <Ionicons name="camera-reverse" size={24} color="#fff" />
+                        </LiquidGlass>
+                    </TouchableOpacity>
 
-        {previewMode && (
-          <View style={styles.previewControls}>
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={switchCamera}
-            >
-              <Ionicons name="camera-reverse" size={24} color="#fff" />
-              <Text style={styles.controlLabel}>Flip</Text>
-            </TouchableOpacity>
+                    <TouchableOpacity style={styles.startBtn} onPress={handleContinueToLive}>
+                        <LiquidGlass cornerRadius={20} tintOpacity={0.3} tintColor="#0ecb7a" glowColor="#0ecb7a" glowIntensity={0.4} style={styles.startBtnGlass}>
+                            <Text style={styles.startBtnText}>GO LIVE</Text>
+                        </LiquidGlass>
+                    </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.startStreamButton}
-              onPress={handleContinueToLive}
-            >
-              <Ionicons name="radio" size={20} color="#fff" />
-              <Text style={styles.startStreamLabel}>
-                Next
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.controlButton}
-              onPress={stopPreview}
-            >
-              <Ionicons name="close" size={24} color="#fff" />
-              <Text style={styles.controlLabel}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+                    <TouchableOpacity style={styles.subBtn} onPress={stopPreview}>
+                        <LiquidGlass cornerRadius={20} tintOpacity={0.1} style={styles.subBtnGlass}>
+                            <Ionicons name="close" size={24} color="#fff" />
+                        </LiquidGlass>
+                    </TouchableOpacity>
+                </View>
+            )}
+        </View>
       </View>
-    </LinearGradient>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-    gap: 20,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 0,
-  },
-  backBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  backLabel: {
-    color: '#fff',
-    marginLeft: 6,
-    fontWeight: '600',
-  },
-  screenTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  previewContainer: {
-    flex: 1,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: 'rgba(255,255,255,0.04)',
-  },
-  preview: {
-    width: '100%',
-    height: '100%',
-  },
-  previewPlaceholder: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  previewHint: {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  form: {
-    gap: 12,
-  },
-  label: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    color: '#fff',
-  },
-  goLiveButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#ff4b4b',
-    borderRadius: 16,
-    paddingVertical: 16,
-    gap: 10,
-  },
-  disabledBtn: {
-    opacity: 0.8,
-  },
-  goLiveLabel: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 16,
-  },
-  buttonContainer: {
-    paddingBottom: 20,
-  },
-  previewControls: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingVertical: 20,
-  },
-  controlButton: {
-    alignItems: 'center',
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    minWidth: 70,
-  },
-  controlLabel: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  startStreamButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#ff4b4b',
-    borderRadius: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    gap: 10,
-  },
-  startStreamLabel: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 16,
-  },
+  root: { flex: 1, backgroundColor: '#000' },
+  safeArea: { flex: 1, paddingHorizontal: 20 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  backBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  screenTitle: { color: '#fff', fontSize: 20, fontWeight: '900', letterSpacing: -0.5 },
+  previewWrapper: { marginBottom: 30 },
+  previewGlass: { flex: 1, overflow: 'hidden' },
+  preview: { flex: 1 },
+  previewPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 15 },
+  previewHint: { color: 'rgba(255,255,255,0.4)', fontWeight: '700' },
+  form: { gap: 15 },
+  inputGlass: { padding: 16 },
+  label: { color: 'rgba(255,255,255,0.4)', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 8 },
+  input: { color: '#fff', fontSize: 16, fontWeight: '600', padding: 0 },
+  footer: { marginTop: 'auto', paddingBottom: 20 },
+  mainBtn: { height: 64 },
+  mainBtnGlass: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12 },
+  mainBtnText: { color: '#fff', fontSize: 18, fontWeight: '900' },
+  controlRow: { flexDirection: 'row', alignItems: 'center', gap: 15 },
+  subBtn: { width: 64, height: 64 },
+  subBtnGlass: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  startBtn: { flex: 1, height: 64 },
+  startBtnGlass: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  startBtnText: { color: '#fff', fontSize: 18, fontWeight: '900', letterSpacing: 1 },
 });
 
 export default GoLiveScreen;

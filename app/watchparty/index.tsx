@@ -28,7 +28,7 @@ import { logInteraction, recommendContent } from '@/lib/algo';
 
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { useSubscription } from '../../providers/SubscriptionProvider';
-import { useAccent } from '../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 

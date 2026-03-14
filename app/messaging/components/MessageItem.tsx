@@ -13,7 +13,7 @@ import { Conversation, Profile } from '../controller';
 import { User } from 'firebase/auth';
 import { Ionicons } from '@expo/vector-icons';
 import type { CallType } from '@/lib/calls/types';
-import { useAccent } from '../../components/AccentContext';
+import { useAccent } from '@/components/app-components/AccentContext';
 import { darkenColor, withAlpha } from '@/lib/colorUtils';
 
 interface MessageItemProps {

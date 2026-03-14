@@ -23,7 +23,7 @@ import { onHeavyScreenFocus } from '../../lib/backgroundScheduler'
 import { getNavPayload } from '../../lib/navPayloadCache'
 import { getProfileScopedKey } from '../../lib/profileStorage'
 import { useSubscription } from '../../providers/SubscriptionProvider'
-import FlixyAssistant from '../components/FlixyAssistant'
+import FlixyAssistant from '@/components/app-components/FlixyAssistant'
 import { GenreReelFeed } from './GenreReelFeed'
 import { FeedReelItem, ReelItem } from './types'
 

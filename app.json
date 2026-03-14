@@ -2,7 +2,7 @@
   "expo": {
     "name": "MovieFlix",
     "slug": "movieflix",
-    "version": "1.0.7",
+    "version": "1.2.5",
     "runtimeVersion": "1.0.0",
     "updates": {
       "enabled": true,
@@ -13,7 +13,6 @@
     "icon": "./assets/images/app-icon.png",
     "scheme": "movieflix",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.movieflix.app",
@@ -36,7 +35,6 @@
         "foregroundImage": "./assets/images/adaptive-foreground.png",
         "monochromeImage": "./assets/images/adaptive-monochrome.png"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "backgroundColor": "#1C1C1E",
       "intentFilters": [],
@@ -69,6 +67,8 @@
       "expo-router",
       "expo-notifications",
       "expo-camera",
+      "expo-image",
+      "expo-web-browser",
       [
         "expo-splash-screen",
         {
@@ -104,19 +104,23 @@
         }
       ],
       "expo-video",
+      "expo-font",
       "./plugins/patch-kotlin-version.js"
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": true,
+      "tsconfigPaths": true
     },
     "extra": {
-      "router": {},
+      "router": {
+        "origin": false
+      },
       "launchMode": "singleTask",
       "eas": {
-        "projectId": "76b623a6-074d-4730-ad44-40418502bdd1"
+        "projectId": "a7ee3266-5c53-48dc-8fce-d46c9a411b8c"
       }
     },
-    "owner": "waitas"
+    "owner": "kipsy"
   }
 }

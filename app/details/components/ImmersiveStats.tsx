@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, Text, View, Dimensions } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import Svg, { Circle, Defs, LinearGradient as SvgGradient, Stop } from 'react-native-svg';
+import React, { useEffect, useRef } from 'react';
+import { Animated, Dimensions, StyleSheet, Text, View } from 'react-native';
+import Svg, { Circle, Defs, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
+import LiquidGlass from '../../../components/app-components/LiquidGlass';
+
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -19,7 +20,7 @@ export default function ImmersiveStats({ movie, accentColor = '#e50914' }: Props
     new Animated.Value(0),
     new Animated.Value(0),
   ]).current;
-  
+
   const scaleAnims = useRef([
     new Animated.Value(0),
     new Animated.Value(0),
@@ -111,10 +112,15 @@ export default function ImmersiveStats({ movie, accentColor = '#e50914' }: Props
               },
             ]}
           >
-            <LinearGradient
-              colors={[`${stat.color}15`, 'transparent']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
+            <LiquidGlass
+              glowColor={stat.color}
+              tintColor="#0a0c18"
+              tintOpacity={0.5}
+              cornerRadius={20}
+              glowIntensity={0.4}
+              borderWidth={1.5}
+              chromaticAberration={true}
+              refractionAmount={0.4}
               style={styles.cardGradient}
             />
 
@@ -176,6 +182,18 @@ export default function ImmersiveStats({ movie, accentColor = '#e50914' }: Props
 
       {/* Bottom info bar */}
       <View style={styles.infoBar}>
+        <LiquidGlass
+          glowColor={accentColor}
+          tintColor="#0a0c18"
+          tintOpacity={0.4}
+          cornerRadius={16}
+          glowIntensity={0.2}
+          borderWidth={1}
+          chromaticAberration={true}
+          refractionAmount={0.3}
+          style={StyleSheet.absoluteFillObject}
+        />
+
         <View style={styles.infoItem}>
           <Ionicons name="language-outline" size={16} color="rgba(255,255,255,0.6)" />
           <Text style={styles.infoText}>{movie?.original_language?.toUpperCase() || 'EN'}</Text>

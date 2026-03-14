@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+  InteractionManager,
   Modal,
   Platform,
   StatusBar,
@@ -12,17 +13,20 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { MainVideoPlayer } from '../../components/MainVideoPlayer';
 import AdBanner from '../../components/ads/AdBanner';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import { MainVideoPlayer } from '../../components/MainVideoPlayer/MainVideoPlayer';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { API_BASE_URL, API_KEY } from '../../constants/api';
 import { getAccentFromPosterPath } from '../../constants/theme';
+import { useUser } from '../../hooks/use-user';
+import { logInteraction } from '../../lib/algo';
+import { buildProfileScopedKey, getStoredActiveProfile } from '../../lib/profileStorage';
+import { usePStream } from '../../src/pstream/usePStream';
 import { CastMember, Media } from '../../types';
 import NewChatSheet from '../messaging/components/NewChatSheet';
 import { Profile, findOrCreateConversation, getFollowing } from '../messaging/controller';
 import MovieDetailsView from './MovieDetailsView';
-import { logInteraction } from '../../lib/algo';
-import { useUser } from '../../hooks/use-user';
 
 interface Video {
   key: string;
@@ -37,6 +41,7 @@ const MovieDetailsContainer: React.FC = () => {
   const { id, mediaType } = useLocalSearchParams();
   const router = useRouter();
   const { user } = useUser();
+  const { scrape } = usePStream();
   const [movie, setMovie] = useState<Media | null>(null);
   // ... (keep existing state)
 
@@ -82,15 +87,67 @@ const MovieDetailsContainer: React.FC = () => {
 
         const normalizedDetails = detailsData
           ? {
-              ...detailsData,
-              imdb_id: detailsData.imdb_id ?? detailsData.external_ids?.imdb_id ?? null,
-            }
+            ...detailsData,
+            imdb_id: detailsData.imdb_id ?? detailsData.external_ids?.imdb_id ?? null,
+          }
           : null;
 
         // Set the main movie object right away so the view appears fast
         setMovie(normalizedDetails);
         // mark main loading complete (we'll load ancillary data in background)
         if (mounted) setIsLoading(false);
+
+        // [PRE-EMPTIVE SCRAPING]
+        // Silently start the source race in the background so it's ready when user hits Play.
+        if (mounted && normalizedDetails) {
+          InteractionManager.runAfterInteractions(async () => {
+            const releaseYear = normalizedDetails.release_date
+              ? new Date(normalizedDetails.release_date).getFullYear()
+              : (normalizedDetails as any).first_air_date
+                ? new Date((normalizedDetails as any).first_air_date).getFullYear()
+                : undefined;
+
+            let targetSeason = 1;
+            let targetEpisode = 1;
+
+            // Intelligent TV Resume Detection
+            if (mediaType === 'tv') {
+              try {
+                const profile = await getStoredActiveProfile();
+                const historyKey = buildProfileScopedKey('watchHistory', profile?.id ?? undefined);
+                const localRaw = await AsyncStorage.getItem(historyKey);
+                if (localRaw) {
+                  const history = JSON.parse(localRaw);
+                  // Find progress for THIS show (check both id and tmdbId for robustness)
+                  const entry = history.find((item: any) => String(item.id) === String(id) || String(item.tmdbId) === String(id));
+                  if (entry?.watchProgress?.seasonNumber) {
+                    targetSeason = entry.watchProgress.seasonNumber;
+                    targetEpisode = entry.watchProgress.episodeNumber || 1;
+                    console.log(`[Details] Intelligent pre-fetch targeting resume point: S${targetSeason}E${targetEpisode}`);
+                  }
+                }
+              } catch (e) {
+                console.warn('[Details] Failed to resolve resume point for prefetch', e);
+              }
+            }
+
+            const mediaPayload = {
+              type: mediaType === 'tv' ? 'show' : 'movie',
+              title: normalizedDetails.title || (normalizedDetails as any).name || '',
+              tmdbId: String(id),
+              imdbId: normalizedDetails.imdb_id || undefined,
+              releaseYear,
+              ...(mediaType === 'tv' ? {
+                season: { number: targetSeason },
+                episode: { number: targetEpisode }
+              } : {}),
+            } as any;
+
+            console.log('[Details] Pre-warming stream for:', mediaPayload.title, mediaType === 'tv' ? `(S${targetSeason}E${targetEpisode})` : '');
+            // Fire and forget (it will be cached in usePStream's memory cache)
+            scrape(mediaPayload, { isPrefetch: true }).catch(() => { });
+          });
+        }
 
         // Lazy-load trailers, related items and credits in background
         (async () => {
@@ -211,36 +268,6 @@ const MovieDetailsContainer: React.FC = () => {
     <>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
       <ScreenWrapper style={styles.pageWrapper}>
-        {/* Beautiful love-themed gradient background */}
-        <LinearGradient
-          colors={[accentColor || '#ff6b9d', '#ff8fab', '#ffb3d9', '#150a13', '#05060f']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={StyleSheet.absoluteFillObject}
-        />
-
-        {/* Floating liquid glows - love theme */}
-        <LinearGradient
-          colors={['rgba(255,107,157,0.25)', 'rgba(255,255,255,0)']}
-          start={{ x: 0.1, y: 0 }}
-          end={{ x: 0.9, y: 1 }}
-          style={styles.bgOrbPrimary}
-        />
-        <LinearGradient
-          colors={['rgba(255,143,171,0.18)', 'rgba(255,255,255,0)']}
-          start={{ x: 0.8, y: 0 }}
-          end={{ x: 0.2, y: 1 }}
-          style={styles.bgOrbSecondary}
-        />
-
-        {/* Additional romantic floating elements */}
-        <LinearGradient
-          colors={['rgba(255,179,217,0.15)', 'rgba(255,255,255,0)']}
-          start={{ x: 0.5, y: 0.2 }}
-          end={{ x: 0.7, y: 0.8 }}
-          style={styles.bgOrbTertiary}
-        />
-
         <View style={styles.backgroundLayer} />
 
         <MovieDetailsView
@@ -276,7 +303,7 @@ const MovieDetailsContainer: React.FC = () => {
           start={[0, 0]}
           end={[1, 1]}
         >
-          <BlurView intensity={40} tint="dark" style={styles.modalBlur} />
+          <LiquidGlass tintOpacity={0.8} borderOpacity={0} cornerRadius={0} style={styles.modalBlur} />
 
           {/* top bar with back/close button */}
           <View style={styles.modalTopBar}>

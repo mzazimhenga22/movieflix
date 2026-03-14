@@ -35,7 +35,8 @@ interface StreamData {
 
 const getUserToken = (): string | null => {
   try {
-    return typeof window !== 'undefined' ? window.localStorage.getItem('febbox_ui_token') : null;
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    return window.localStorage.getItem('febbox_ui_token');
   } catch (e) {
     console.warn('Unable to access localStorage:', e);
     return null;

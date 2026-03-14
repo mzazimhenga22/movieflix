@@ -1,6 +1,6 @@
 ﻿import { Media } from '@/types/index';
 import React, { useCallback } from 'react';
-import { Platform, requireNativeComponent } from 'react-native';
+import { Platform, requireNativeComponent, View } from 'react-native';
 import type { NativeSyntheticEvent } from 'react-native/Libraries/Types/CoreEventTypes';
 import type { ViewStyle } from 'react-native/Libraries/StyleSheet/StyleSheetTypes';
 
@@ -13,7 +13,14 @@ interface FastMovieRailProps {
     onSeeAllPress?: (event: NativeSyntheticEvent<{}>) => void;
 }
 
-const NativeFastMovieRail = requireNativeComponent('FastMovieRail') as unknown as React.ComponentType<FastMovieRailProps>;
+let NativeFastMovieRail: React.ComponentType<FastMovieRailProps> | null = null;
+try {
+    if (Platform.OS === 'android') {
+        NativeFastMovieRail = requireNativeComponent('FastMovieRail');
+    }
+} catch (e) {
+    console.warn('FastMovieRail native component not found');
+}
 
 interface Props {
     title: string;
@@ -46,8 +53,8 @@ export const FastMovieRail: React.FC<Props> = ({
         onSeeAllPress?.();
     }, [onSeeAllPress]);
 
-    if (Platform.OS !== 'android') {
-        return null;
+    if (Platform.OS !== 'android' || !NativeFastMovieRail) {
+        return <View style={{ height: 320, marginBottom: 16 } as ViewStyle} />;
     }
 
     return (

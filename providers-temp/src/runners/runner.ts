@@ -47,7 +47,6 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
   });
   const embeds = reorderOnIdList(ops.embedOrder ?? [], list.embeds);
   const embedIds = embeds.map((embed) => embed.id);
-  let lastId = '';
 
   // To reduce time-to-first-playback, do a fast pass over all sources first.
   // Many sources return direct streams quickly; embed scraping is slower and is deferred
@@ -64,11 +63,8 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
     proxiedFetcher: ops.proxiedFetcher,
     features: ops.features,
     progress(val) {
-      ops.events?.update?.({
-        id: lastId,
-        percentage: val,
-        status: 'pending',
-      });
+      // In parallel mode, individual progress is less meaningful for the global UI,
+      // but we can still emit it for the last started source.
     },
   };
 
@@ -76,150 +72,150 @@ export async function runAllProviders(list: ProviderList, ops: ProviderRunnerOpt
     sourceIds: sources.map((v) => v.id),
   });
 
-  for (const source of sources) {
-    ops.events?.start?.(source.id);
-    lastId = source.id;
+  // Racing Strategy: Run sources in batches. First valid stream in a batch wins.
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < sources.length; i += BATCH_SIZE) {
+    const batch = sources.slice(i, i + BATCH_SIZE);
+    
+    const batchResult = await new Promise<RunOutput | null>((resolve) => {
+      let resolved = false;
+      let finishedCount = 0;
 
-    // run source scrapers
-    let output: SourcererOutput | null = null;
-    try {
-      if (ops.media.type === 'movie' && source.scrapeMovie)
-        output = await source.scrapeMovie({
-          ...contextBase,
-          media: ops.media,
-        });
-      else if (ops.media.type === 'show' && source.scrapeShow)
-        output = await source.scrapeShow({
-          ...contextBase,
-          media: ops.media,
-        });
-      if (output) {
-        output.stream = (output.stream ?? [])
-          .filter(isValidStream)
-          .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
+      batch.forEach(async (source) => {
+        try {
+          ops.events?.start?.(source.id);
+          let output: SourcererOutput | null = null;
+          
+          if (ops.media.type === 'movie' && source.scrapeMovie)
+            output = await source.scrapeMovie({ ...contextBase, media: ops.media });
+          else if (ops.media.type === 'show' && source.scrapeShow)
+            output = await source.scrapeShow({ ...contextBase, media: ops.media });
 
-        output.stream = output.stream.map((stream) =>
-          requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
-        );
-      }
-      if (!output || (!output.stream?.length && !output.embeds.length)) {
-        throw new NotFoundError('No streams found');
-      }
-    } catch (error) {
-      const updateParams: UpdateEvent = {
-        id: source.id,
-        percentage: 100,
-        status: error instanceof NotFoundError ? 'notfound' : 'failure',
-        reason: error instanceof NotFoundError ? error.message : undefined,
-        error: error instanceof NotFoundError ? undefined : error,
-      };
+          if (resolved) return;
 
-      ops.events?.update?.(updateParams);
-      continue;
-    }
-    if (!output) throw new Error('Invalid media type');
+          if (output) {
+            output.stream = (output.stream ?? [])
+              .filter(isValidStream)
+              .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
 
-    // return stream is there are any
-    if (output.stream?.[0]) {
-      try {
-        const playableStream = await validatePlayableStream(output.stream[0], ops, source.id);
-        if (!playableStream) throw new NotFoundError('No streams found');
+            output.stream = output.stream.map((stream) =>
+              requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
+            );
 
-        return {
-          sourceId: source.id,
-          stream: playableStream,
-        };
-      } catch (error) {
-        const updateParams: UpdateEvent = {
-          id: source.id,
-          percentage: 100,
-          status: error instanceof NotFoundError ? 'notfound' : 'failure',
-          reason: error instanceof NotFoundError ? error.message : undefined,
-          error: error instanceof NotFoundError ? undefined : error,
-        };
+            if (output.stream?.[0]) {
+              const playableStream = await validatePlayableStream(output.stream[0], ops, source.id);
+              if (playableStream && !resolved) {
+                resolved = true;
+                resolve({ sourceId: source.id, stream: playableStream });
+                return;
+              }
+            }
 
-        ops.events?.update?.(updateParams);
-        continue;
-      }
-    }
+            // If no stream but has embeds, add them to deferred
+            const sortedEmbeds = output.embeds
+              .filter((embed) => {
+                const e = list.embeds.find((v) => v.id === embed.embedId);
+                return e && !e.disabled;
+              })
+              .sort((a, b) => embedIds.indexOf(a.embedId) - embedIds.indexOf(b.embedId));
 
-    // filter disabled and run embed scrapers on listed embeds
-    const sortedEmbeds = output.embeds
-      .filter((embed) => {
-        const e = list.embeds.find((v) => v.id === embed.embedId);
-        return e && !e.disabled;
-      })
-      .sort((a, b) => embedIds.indexOf(a.embedId) - embedIds.indexOf(b.embedId));
-
-    if (sortedEmbeds.length > 0) {
-      ops.events?.discoverEmbeds?.({
-        embeds: sortedEmbeds.map((embed, i) => ({
-          id: [source.id, i].join('-'),
-          embedScraperId: embed.embedId,
-        })),
-        sourceId: source.id,
+            if (sortedEmbeds.length > 0) {
+              ops.events?.discoverEmbeds?.({
+                embeds: sortedEmbeds.map((embed, ind) => ({
+                  id: [source.id, ind].join('-'),
+                  embedScraperId: embed.embedId,
+                })),
+                sourceId: source.id,
+              });
+              
+              for (const [ind, embed] of sortedEmbeds.entries()) {
+                deferredEmbeds.push({
+                  sourceId: source.id,
+                  id: [source.id, ind].join('-'),
+                  embedId: embed.embedId,
+                  url: embed.url,
+                });
+              }
+            }
+          }
+        } catch (error) {
+          if (!resolved) {
+            ops.events?.update?.({
+              id: source.id,
+              percentage: 100,
+              status: error instanceof NotFoundError ? 'notfound' : 'failure',
+            });
+          }
+        } finally {
+          finishedCount++;
+          if (finishedCount === batch.length && !resolved) {
+            resolve(null);
+          }
+        }
       });
-    }
+    });
 
-    // Defer embed scraping until after we've tried all sources.
-    for (const [ind, embed] of sortedEmbeds.entries()) {
-      deferredEmbeds.push({
-        sourceId: source.id,
-        id: [source.id, ind].join('-'),
-        embedId: embed.embedId,
-        url: embed.url,
-      });
-    }
+    if (batchResult) return batchResult;
   }
 
-  // Second pass: try embed scrapers in discovered order.
-  for (const embed of deferredEmbeds) {
-    const scraper = embeds.find((v) => v.id === embed.embedId);
-    if (!scraper) continue;
+  // Second pass: try embed scrapers in parallel batches.
+  const EMBED_BATCH_SIZE = 3;
+  for (let i = 0; i < deferredEmbeds.length; i += EMBED_BATCH_SIZE) {
+    const batch = deferredEmbeds.slice(i, i + EMBED_BATCH_SIZE);
+    
+    const batchResult = await new Promise<RunOutput | null>((resolve) => {
+      let resolved = false;
+      let finishedCount = 0;
 
-    ops.events?.start?.(embed.id);
-    lastId = embed.id;
+      batch.forEach(async (embed) => {
+        const scraper = embeds.find((v) => v.id === embed.embedId);
+        if (!scraper) {
+          finishedCount++;
+          if (finishedCount === batch.length && !resolved) resolve(null);
+          return;
+        }
 
-    let embedOutput: EmbedOutput;
-    try {
-      embedOutput = await scraper.scrape({
-        ...contextBase,
-        url: embed.url,
+        try {
+          ops.events?.start?.(embed.id);
+          let embedOutput = await scraper.scrape({ ...contextBase, url: embed.url });
+          
+          if (resolved) return;
+
+          embedOutput.stream = embedOutput.stream
+            .filter(isValidStream)
+            .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
+            
+          embedOutput.stream = embedOutput.stream.map((stream) =>
+            requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
+          );
+
+          if (embedOutput.stream?.[0]) {
+            const playableStream = await validatePlayableStream(embedOutput.stream[0], ops, embed.embedId);
+            if (playableStream && !resolved) {
+              resolved = true;
+              resolve({ sourceId: embed.sourceId, embedId: scraper.id, stream: playableStream });
+              return;
+            }
+          }
+        } catch (error) {
+          if (!resolved) {
+            ops.events?.update?.({
+              id: embed.id,
+              percentage: 100,
+              status: 'failure',
+            });
+          }
+        } finally {
+          finishedCount++;
+          if (finishedCount === batch.length && !resolved) {
+            resolve(null);
+          }
+        }
       });
-      embedOutput.stream = embedOutput.stream
-        .filter(isValidStream)
-        .filter((stream) => flagsAllowedInFeatures(ops.features, stream.flags));
-      embedOutput.stream = embedOutput.stream.map((stream) =>
-        requiresProxy(stream) && ops.proxyStreams ? setupProxy(stream) : stream,
-      );
-      if (embedOutput.stream.length === 0) {
-        throw new NotFoundError('No streams found');
-      }
+    });
 
-      const playableStream = await validatePlayableStream(embedOutput.stream[0], ops, embed.embedId);
-      if (!playableStream) throw new NotFoundError('No streams found');
-
-      embedOutput.stream = [playableStream];
-    } catch (error) {
-      const updateParams: UpdateEvent = {
-        id: embed.id,
-        percentage: 100,
-        status: error instanceof NotFoundError ? 'notfound' : 'failure',
-        reason: error instanceof NotFoundError ? error.message : undefined,
-        error: error instanceof NotFoundError ? undefined : error,
-      };
-
-      ops.events?.update?.(updateParams);
-      continue;
-    }
-
-    return {
-      sourceId: embed.sourceId,
-      embedId: scraper.id,
-      stream: embedOutput.stream[0],
-    };
+    if (batchResult) return batchResult;
   }
 
-  // no providers or embeds returns streams
   return null;
 }

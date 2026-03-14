@@ -1,4 +1,4 @@
-import LiquidGlass from '@/app/components/LiquidGlass';
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { IMAGE_BASE_URL } from '@/constants/api';
 import { useNavigationGuard } from '@/hooks/use-navigation-guard';
 import { Media } from '@/types';
@@ -6,7 +6,7 @@ import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { memo, useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Dimensions,
@@ -67,8 +67,24 @@ const SongCard = memo(function SongCard({
   const pulseAnim = useRef(new Animated.Value(0)).current;
   const vinylRotate = useRef(new Animated.Value(0)).current;
 
+  // Store animation references for cleanup
+  const scaleGlowAnimation = useRef<ReturnType<typeof Animated.parallel> | null>(null);
+  const pulseAnimation = useRef<ReturnType<typeof Animated.loop> | null>(null);
+  const rotateAnimation = useRef<ReturnType<typeof Animated.loop> | null>(null);
+
+  const waveData = useMemo(() =>
+    Array.from({ length: 20 }).map(() => ({
+      height: 8 + Math.random() * 16,
+      opacityRange: [0.5 + Math.random() * 0.5, 0.8 + Math.random() * 0.2] as [number, number],
+    })),
+    []
+  );
   useEffect(() => {
-    Animated.parallel([
+    // Stop any existing animation before starting new one
+    scaleGlowAnimation.current?.stop();
+    scaleGlowAnimation.current?.reset();
+
+    scaleGlowAnimation.current = Animated.parallel([
       Animated.spring(scaleAnim, {
         toValue: isActive ? 1 : 0.92,
         friction: 8,
@@ -81,199 +97,210 @@ const SongCard = memo(function SongCard({
         easing: Easing.out(Easing.cubic),
         useNativeDriver: false,
       }),
-    ]).start();
+    ]);
+
+    scaleGlowAnimation.current.start();
+
+    return () => {
+      scaleGlowAnimation.current?.stop();
+    };
   }, [isActive, scaleAnim, glowAnim]);
 
   useEffect(() => {
+    // Stop existing animations first
+    pulseAnimation.current?.stop();
+    pulseAnimation.current?.reset();
+    rotateAnimation.current?.stop();
+    rotateAnimation.current?.reset();
+
     if (isActive) {
-      const pulse = Animated.loop(
+      pulseAnim.setValue(0);
+      vinylRotate.setValue(0);
+
+      pulseAnimation.current = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
           Animated.timing(pulseAnim, { toValue: 0, duration: 1500, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
         ])
       );
-      pulse.start();
+      pulseAnimation.current.start();
 
-      const rotate = Animated.loop(
+      rotateAnimation.current = Animated.loop(
         Animated.timing(vinylRotate, { toValue: 1, duration: 4000, easing: Easing.linear, useNativeDriver: true })
       );
-      rotate.start();
+      rotateAnimation.current.start();
 
       return () => {
-        pulse.stop();
-        rotate.stop();
+        pulseAnimation.current?.stop();
+        pulseAnimation.current?.reset();
+        rotateAnimation.current?.stop();
+        rotateAnimation.current?.reset();
       };
     } else {
+      // Reset values when not active
       pulseAnim.setValue(0);
+      vinylRotate.setValue(0);
     }
   }, [isActive, pulseAnim, vinylRotate]);
 
-  const animatedBorderColor = glowAnim.interpolate({
+  const animatedBorderColor = useMemo(() => glowAnim.interpolate({
     inputRange: [0, 1],
     outputRange: ['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.25)'],
-  });
-
-  const vinylSpin = vinylRotate.interpolate({
+  }), [glowAnim]);
+  const vinylSpin = useMemo(() => vinylRotate.interpolate({
     inputRange: [0, 1],
     outputRange: ['0deg', '360deg'],
-  });
+  }), [vinylRotate]);
+
+  const accentPulseOpacity = useMemo(() => pulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.15, 0.25],
+  }), [pulseAnim]);
+
+  const waveBarsOpacity = useMemo(() => waveData.map(data => pulseAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: data.opacityRange,
+  })), [waveData, pulseAnim]);
 
   const posterUri = song.poster_path ? `${IMAGE_BASE_URL}${song.poster_path}` : null;
   const backdropUri = song.backdrop_path ? `${IMAGE_BASE_URL}${song.backdrop_path}` : posterUri;
-  const title = song.title || song.name || 'Unknown Track';
-  const year = (song.release_date || song.first_air_date || '').slice(0, 4);
 
   return (
     <Animated.View style={[styles.cardOuter, { transform: [{ scale: scaleAnim }] }]}>
       <TouchableOpacity activeOpacity={0.9} onPress={onPress}>
         <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#1A0A14"
-          tintOpacity={0.55}
+          tintOpacity={0.45}
+          tintColor={accentColor}
           cornerRadius={24}
-          glowIntensity={0.6}
-          borderWidth={1}
-          style={[styles.card, { borderColor: animatedBorderColor }]}
+          glowIntensity={isActive ? 0.4 : 0.05}
+          glowColor={accentColor}
+          chromaticAberration={isActive}
+          depthEffect={isActive}
+          interactive={isActive}
+          breathingEffect={isActive}
+          optimizeForScroll={!isActive}
+          style={styles.card}
         >
-          {/* Background image with blur */}
           {backdropUri && (
-            <ImageBackground source={{ uri: backdropUri }} style={styles.cardBg} blurRadius={20}>
-              <LinearGradient
-                colors={['rgba(5,6,15,0.7)', 'rgba(5,6,15,0.95)']}
-                style={StyleSheet.absoluteFill}
-              />
-            </ImageBackground>
-          )}
-
-          {/* Accent glow */}
-          {isActive && (
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.accentGlow,
-                { backgroundColor: accentColor, opacity: pulseAnim.interpolate({ inputRange: [0, 1], outputRange: [0.15, 0.25] }) },
-              ]}
+            <ImageBackground
+              source={{ uri: backdropUri }}
+              style={styles.cardBg}
+              imageStyle={{ opacity: 0.15 }}
             />
           )}
 
+          <Animated.View
+            style={[
+              styles.accentGlow,
+              {
+                backgroundColor: accentColor,
+                opacity: accentPulseOpacity,
+              },
+            ]}
+          />
+
           <View style={styles.cardContent}>
-            {/* Album art with vinyl effect */}
             <View style={styles.albumSection}>
-              <View style={styles.albumArtContainer}>
-                {posterUri ? (
-                  <ImageBackground source={{ uri: posterUri }} style={styles.albumArt}>
-                    <LinearGradient
-                      colors={['transparent', 'rgba(0,0,0,0.4)']}
-                      style={StyleSheet.absoluteFill}
-                    />
-                  </ImageBackground>
-                ) : (
-                  <View style={[styles.albumArt, styles.albumPlaceholder]}>
-                    <Ionicons name="musical-notes" size={32} color="rgba(255,255,255,0.3)" />
-                  </View>
-                )}
-
-                {/* Play indicator */}
-                {isActive && (
-                  <View style={[styles.nowPlayingBadge, { backgroundColor: accentColor }]}>
-                    <Animated.View style={{ opacity: pulseAnim }}>
-                      <View style={styles.soundBars}>
-                        <View style={[styles.soundBar, styles.soundBar1]} />
-                        <View style={[styles.soundBar, styles.soundBar2]} />
-                        <View style={[styles.soundBar, styles.soundBar3]} />
-                      </View>
-                    </Animated.View>
-                  </View>
-                )}
-              </View>
-
-              {/* Vinyl record peeking out */}
               <Animated.View style={[styles.vinylDisc, { transform: [{ rotate: vinylSpin }] }]}>
                 <LinearGradient
-                  colors={['#1a1a1a', '#0d0d0d', '#1a1a1a']}
+                  colors={['#1a1a1a', '#333', '#1a1a1a']}
                   style={styles.vinylGradient}
                 >
+                  <View style={styles.vinylGrooves} />
                   <View style={styles.vinylCenter}>
                     <View style={[styles.vinylCenterDot, { backgroundColor: accentColor }]} />
                   </View>
-                  <View style={styles.vinylGrooves} />
                 </LinearGradient>
               </Animated.View>
+
+              <View style={styles.albumArtContainer}>
+                {posterUri ? (
+                  <ImageBackground source={{ uri: posterUri }} style={styles.albumArt} />
+                ) : (
+                  <View style={[styles.albumArt, styles.albumPlaceholder]}>
+                    <Ionicons name="musical-notes" size={32} color="rgba(255,255,255,0.2)" />
+                  </View>
+                )}
+                {isActive && (
+                  <View style={[styles.nowPlayingBadge, { backgroundColor: accentColor }]}>
+                    <View style={styles.soundBars}>
+                      <View style={[styles.soundBar, styles.soundBar1]} />
+                      <View style={[styles.soundBar, styles.soundBar2]} />
+                      <View style={[styles.soundBar, styles.soundBar3]} />
+                    </View>
+                  </View>
+                )}
+              </View>
             </View>
 
-            {/* Track info */}
             <View style={styles.trackInfo}>
               <View style={styles.trackHeader}>
                 <View style={styles.trackBadge}>
-                  <FontAwesome name="youtube-play" size={10} color="#fff" />
-                  <Text style={styles.trackBadgeText}>Official</Text>
+                  <Ionicons name="flash" size={10} color="#fff" />
+                  <Text style={styles.trackBadgeText}>POPULAR</Text>
                 </View>
-                {year ? (
-                  <View style={styles.yearBadge}>
-                    <Text style={styles.yearText}>{year}</Text>
-                  </View>
-                ) : null}
+                <View style={styles.yearBadge}>
+                  <Text style={styles.yearText}>{(song.release_date || '').slice(0, 4)}</Text>
+                </View>
               </View>
 
-              <Text style={styles.trackTitle} numberOfLines={2}>{title}</Text>
-              <Text style={styles.trackSubtitle}>Movie Soundtrack</Text>
+              <Text style={styles.trackTitle} numberOfLines={1}>
+                {song.title || song.name || 'Unknown Track'}
+              </Text>
+              <Text style={styles.trackSubtitle} numberOfLines={1}>
+                {song.overview || 'Featured Soundtrack'}
+              </Text>
 
-              {/* Waveform visualization */}
               <View style={styles.waveformContainer}>
-                {Array.from({ length: 20 }).map((_, i) => (
+                {waveBarsOpacity.map((opacity, i) => (
                   <Animated.View
                     key={i}
                     style={[
                       styles.waveBar,
                       {
-                        height: 8 + Math.random() * 16,
-                        backgroundColor: isActive ? accentColor : 'rgba(255,255,255,0.2)',
-                        opacity: isActive
-                          ? pulseAnim.interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [0.5 + Math.random() * 0.5, 0.8 + Math.random() * 0.2],
-                          })
-                          : 0.3,
+                        height: waveData[i].height,
+                        backgroundColor: i < 10 ? accentColor : 'rgba(255,255,255,0.2)',
+                        opacity,
                       },
                     ]}
                   />
                 ))}
               </View>
 
-              {/* Action buttons */}
               <View style={styles.actionRow}>
                 <TouchableOpacity
                   style={styles.watchBtn}
                   onPress={onWatch}
-                  activeOpacity={0.8}
                 >
                   <LiquidGlass
-                    glowColor={accentColor}
-                    tintColor={accentColor}
-                    tintOpacity={0.8}
+                    tintOpacity={0.9}
                     cornerRadius={999}
                     glowIntensity={0.6}
-                    borderWidth={1}
+                    glowColor={accentColor}
+                    breathingEffect={false}
+                    interactive={false}
+                    optimizeForScroll
                     style={styles.watchBtnLiquid}
-                  >
-                    <FontAwesome name="youtube-play" size={16} color="#fff" />
-                    <Text style={styles.watchBtnText}>Watch Video</Text>
-                  </LiquidGlass>
+                  />
+                  <Ionicons name="play-circle" size={18} color="#fff" />
+                  <Text style={styles.watchBtnText}>Play Now</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity style={styles.moreBtn} onPress={onPress}>
+                <TouchableOpacity
+                  style={styles.moreBtn}
+                  onPress={onPress}
+                >
                   <LiquidGlass
-                    glowColor={accentColor}
-                    tintColor="#2A1A3E"
                     tintOpacity={0.15}
                     cornerRadius={20}
-                    glowIntensity={0.5}
-                    borderWidth={1}
+                    breathingEffect={false}
+                    interactive={false}
+                    optimizeForScroll
                     style={styles.moreBtnLiquid}
-                    animated={false}
-                  >
-                    <Ionicons name="ellipsis-horizontal" size={20} color="#fff" />
-                  </LiquidGlass>
+                  />
+                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="information-circle-outline" size={20} color="#fff" />
+                  </View>
                 </TouchableOpacity>
               </View>
             </View>
@@ -392,7 +419,7 @@ const SongList: React.FC<SongListProps> = ({ title, songs, onOpenAll, accentColo
               scrollViewRef.current?.scrollTo({ x: index * (CARD_WIDTH + 16), animated: true });
             }}
           >
-            <Animated.View
+            <View
               style={[
                 styles.dot,
                 {

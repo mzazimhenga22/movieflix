@@ -7,8 +7,7 @@ export default function MessagingLayout() {
       <Stack.Screen name="settings" />
       <Stack.Screen name="profile" />
       <Stack.Screen name="group-details" />
-      <Stack.Screen name="chat/[id]" />
-      <Stack.Screen name="chat/media-viewer" />
+      <Stack.Screen name="chat" />
     </Stack>
   );
 }

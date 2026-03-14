@@ -1,11 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
 import BottomSheet, { BottomSheetBackdrop } from '@gorhom/bottom-sheet';
 import { FlashList } from '@shopify/flash-list';
-import { ResizeMode, Video } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Image,
@@ -79,6 +79,23 @@ const toMillis = (createdAt: any) => {
   }
   return 0;
 };
+
+const MiniChatVideoPreview = memo(({ uri }: { uri: string }) => {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.muted = true;
+    p.play();
+  });
+
+  return (
+    <VideoView
+      player={player}
+      style={styles.mediaPreview}
+      contentFit="cover"
+      showsPlaybackControls={false}
+    />
+  );
+});
 
 export default function MiniChatSheet(props: {
   bottomSheetRef: React.RefObject<BottomSheet | null>;
@@ -671,12 +688,7 @@ export default function MiniChatSheet(props: {
                 {pendingMedia?.type === 'image' ? (
                   <Image source={{ uri: pendingMedia.uri }} style={styles.mediaPreview} />
                 ) : pendingMedia?.type === 'video' ? (
-                  <Video
-                    source={{ uri: pendingMedia.uri }}
-                    style={styles.mediaPreview}
-                    useNativeControls
-                    resizeMode={ResizeMode.COVER}
-                  />
+                  <MiniChatVideoPreview uri={pendingMedia.uri} />
                 ) : (
                   <View style={styles.filePreview}>
                     <Ionicons name={pendingMedia?.type === 'audio' ? 'mic-outline' : 'document-outline'} size={26} color="#fff" />

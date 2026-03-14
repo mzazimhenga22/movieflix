@@ -12,68 +12,69 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { getAccentFromPosterPath } from '../../constants/theme';
-import { useAccent } from '../components/AccentContext';
-import FeatureCard from '../components/interactive/FeatureCard';
+import { useAccent } from '../../components/app-components/AccentContext';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import FeatureCard from '../../components/app-components/interactive/FeatureCard';
 import { useActiveProfile } from '../../hooks/use-active-profile';
 
 const ACCENT = '#e50914';
 
-  const InteractiveScreen = () => {
-    const router = useRouter();
-    const { setAccentColor } = useAccent();
-    const accentColor = getAccentFromPosterPath('/interactive/accent');
-    const activeProfile = useActiveProfile();
-    const isKidsProfile = Boolean(activeProfile?.isKids);
+const InteractiveScreen = () => {
+  const router = useRouter();
+  const { setAccentColor } = useAccent();
+  const accentColor = getAccentFromPosterPath('/interactive/accent');
+  const activeProfile = useActiveProfile();
+  const isKidsProfile = Boolean(activeProfile?.isKids);
 
-    useEffect(() => {
-      if (accentColor) {
-        setAccentColor(accentColor);
-      }
-    }, [accentColor, setAccentColor]);
-
-    if (isKidsProfile) {
-      return (
-        <ScreenWrapper>
-          <LinearGradient
-            colors={[accentColor, '#150a13', '#05060f']}
-            start={[0, 0]}
-            end={[1, 1]}
-            style={styles.gradient}
-          />
-          <LinearGradient
-            colors={['rgba(125,216,255,0.2)', 'rgba(255,255,255,0)']}
-            start={{ x: 0.1, y: 0 }}
-            end={{ x: 0.9, y: 1 }}
-            style={styles.bgOrbPrimary}
-          />
-          <LinearGradient
-            colors={['rgba(229,9,20,0.18)', 'rgba(255,255,255,0)']}
-            start={{ x: 0.8, y: 0 }}
-            end={{ x: 0.2, y: 1 }}
-            style={styles.bgOrbSecondary}
-          />
-
-          <View style={styles.kidsBlockWrap}>
-            <View style={styles.kidsBlockCard}>
-              <Text style={styles.kidsBlockTitle}>Not available on Kids profiles</Text>
-              <Text style={styles.kidsBlockBody}>
-                Interactive and social features are disabled on Kids profiles.
-              </Text>
-              <TouchableOpacity style={styles.kidsBlockButton} onPress={() => router.push('/select-profile')}>
-                <Text style={styles.kidsBlockButtonText}>Switch profile</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </ScreenWrapper>
-      );
+  useEffect(() => {
+    if (accentColor) {
+      setAccentColor(accentColor);
     }
+  }, [accentColor, setAccentColor]);
+
+  if (isKidsProfile) {
+    return (
+      <ScreenWrapper>
+        <LinearGradient
+          colors={[accentColor, '#150a13', '#05060f']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.gradient}
+        />
+        <LinearGradient
+          colors={['rgba(125,216,255,0.2)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.1, y: 0 }}
+          end={{ x: 0.9, y: 1 }}
+          style={styles.bgOrbPrimary}
+        />
+        <LinearGradient
+          colors={['rgba(229,9,20,0.18)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.8, y: 0 }}
+          end={{ x: 0.2, y: 1 }}
+          style={styles.bgOrbSecondary}
+        />
+
+        <View style={styles.kidsBlockWrap}>
+          <View style={styles.kidsBlockCard}>
+            <Text style={styles.kidsBlockTitle}>Not available on Kids profiles</Text>
+            <Text style={styles.kidsBlockBody}>
+              Interactive and social features are disabled on Kids profiles.
+            </Text>
+            <TouchableOpacity style={styles.kidsBlockButton} onPress={() => router.push('/select-profile')}>
+              <Text style={styles.kidsBlockButtonText}>Switch profile</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </ScreenWrapper>
+    );
+  }
 
   return (
     <ScreenWrapper>
       <LinearGradient
         colors={[accentColor, '#150a13', '#05060f']}
-        start={[0, 0]}
-        end={[1, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
         style={styles.gradient}
       />
       <LinearGradient
@@ -92,24 +93,22 @@ const ACCENT = '#e50914';
       <ScrollView contentContainerStyle={styles.scrollViewContent}>
         {/* Header */}
         <View style={styles.headerContainer}>
-          <LinearGradient
-            colors={['#e50914', '#b20710']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.headerGlow}
+          <LiquidGlass
+            tintOpacity={0.12}
+            tintColor="#000"
+            cornerRadius={18}
+            borderOpacity={0.2}
+            glowIntensity={0.4}
+            glowColor={accentColor || '#e50914'}
+            chromaticAberration={true}
+            style={StyleSheet.absoluteFillObject}
           />
           <View style={styles.headerGlass}>
-            <LinearGradient
-              colors={['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.02)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.headerSheen}
-            />
             <View>
               <Text style={styles.headerEyebrow}>Playground</Text>
               <Text style={styles.header}>Interactive Features</Text>
             </View>
-            <TouchableOpacity style={styles.iconBtn}>
+            <TouchableOpacity style={[styles.iconBtn, { backgroundColor: accentColor || '#e50914' }]}>
               <MaterialCommunityIcons name="cog" size={24} color="#ffffff" />
             </TouchableOpacity>
           </View>
@@ -136,15 +135,16 @@ const ACCENT = '#e50914';
         </View>
         <View style={styles.sectionWrapper}>
           <View style={styles.glassCard}>
-            <LinearGradient
-              colors={['rgba(229,9,20,0.18)', 'rgba(255,255,255,0)']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.cardSheen}
+            <LiquidGlass
+              tintOpacity={0.08}
+              tintColor="#0a0a0a"
+              cornerRadius={16}
+              borderOpacity={0.15}
+              style={StyleSheet.absoluteFillObject}
             />
             <View style={styles.localStorageRow}>
-              <View style={styles.iconWrap}>
-                <MaterialCommunityIcons name="sd" size={36} color={ACCENT} />
+              <View style={[styles.iconWrap, { backgroundColor: `${accentColor}15`, borderColor: `${accentColor}30` }]}>
+                <MaterialCommunityIcons name="sd" size={36} color={accentColor} />
               </View>
 
               <View style={styles.localStorageTextContent}>
@@ -162,11 +162,11 @@ const ACCENT = '#e50914';
                 <View style={{ height: 8 }} />
 
                 <View style={styles.progressBarContainer}>
-                  <View style={[styles.progressBarFill, { width: '36%' }]} />
+                  <View style={[styles.progressBarFill, { width: '36%', backgroundColor: accentColor }]} />
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.allocateButton}>
+              <TouchableOpacity style={[styles.allocateButton, { backgroundColor: accentColor, shadowColor: accentColor }]}>
                 <Text style={styles.allocateButtonText}>Allocate</Text>
               </TouchableOpacity>
             </View>

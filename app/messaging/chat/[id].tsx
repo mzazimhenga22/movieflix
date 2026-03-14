@@ -4,7 +4,7 @@ import { FlashList } from '@shopify/flash-list';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as RN from 'react-native';
 import {
   ActivityIndicator,
@@ -30,6 +30,9 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text as WebText } from 'react-native-web';
+
+const AnimatedFlashList = Animated.createAnimatedComponent(FlashList as any);
+
 import {
   acceptMessageRequest,
   addMessageReaction,
@@ -73,6 +76,7 @@ import { createCallSession } from '@/lib/calls/callService';
 import type { CallType } from '@/lib/calls/types';
 import { Ionicons } from '@expo/vector-icons';
 
+import LiquidGlass from '@/components/app-components/LiquidGlass';
 import { useActiveProfile } from '@/hooks/use-active-profile';
 import { useMessagingSettings } from '@/hooks/useMessagingSettings';
 import {
@@ -85,16 +89,16 @@ import {
   shouldSendBotMessage,
   type TmdbTrendingItem
 } from '@/lib/onboardingChatBot';
-import { ResizeMode, Video } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import ScreenWrapper from '../../../components/ScreenWrapper';
 import AdBanner from '../../../components/ads/AdBanner';
+import { useAccent } from '../../../components/app-components/AccentContext';
 import { supabase, supabaseConfigured } from '../../../constants/supabase';
 import { accentGradient, darkenColor, withAlpha } from '../../../lib/colorUtils';
-import { useAccent } from '../../components/AccentContext';
 import MessagingErrorBoundary from '../components/ErrorBoundary';
 import ChatRow from './components/ChatRow';
 import MessageBubble from './components/MessageBubble';
@@ -176,6 +180,23 @@ type ChatMessage = {
   };
   [key: string]: any;
 };
+
+const ChatMediaPreviewVideo = memo(({ uri }: { uri: string }) => {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.muted = true;
+    p.play();
+  });
+
+  return (
+    <VideoView
+      player={player}
+      style={styles.mediaPreviewImage}
+      contentFit="contain"
+      showsPlaybackControls={false}
+    />
+  );
+});
 
 const ChatScreen = () => {
   const { id, fromStreak, title, avatar, otherUserId } = useLocalSearchParams();
@@ -265,7 +286,98 @@ const ChatScreen = () => {
   const [isMuting, setIsMuting] = useState(false);
   const [isReporting, setIsReporting] = useState(false);
   const flatListRef = useRef<any>(null);
+  const scrollY = useRef(new Animated.Value(0)).current;
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Header animations - Dynamic Island
+  const islandWidth = scrollY.interpolate({
+    inputRange: [0, 80],
+    outputRange: ['100%', '70%'],
+    extrapolate: 'clamp',
+  });
+
+  const islandTranslateY = scrollY.interpolate({
+    inputRange: [0, 100],
+    outputRange: [0, -5],
+    extrapolate: 'clamp',
+  });
+
+  const textOpacity = scrollY.interpolate({
+    inputRange: [0, 40],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+
+  const ChatHeader = () => (
+    <View style={[styles.headerOuter, { paddingTop: Math.max(insets.top, 12) }]}>
+      <Animated.View style={[
+        styles.islandWrap,
+        {
+          width: islandWidth,
+          transform: [{ translateY: islandTranslateY }]
+        }
+      ]}>
+        <LiquidGlass
+          tintOpacity={0.18}
+          tintColor="#000000"
+          cornerRadius={32}
+          borderOpacity={0.25}
+          glowIntensity={0.2}
+          glowColor={accent}
+          chromaticAberration={true}
+          style={StyleSheet.absoluteFill}
+        />
+        
+        <View style={styles.islandContent}>
+          <TouchableOpacity 
+            activeOpacity={0.8} 
+            onPress={() => router.back()} 
+            style={styles.headerBackBtn}
+          >
+            <Ionicons name="chevron-back" size={24} color="#fff" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => setShowInfoSheet(true)}
+            style={styles.headerProfileSection}
+          >
+            <View style={styles.headerAvatarWrap}>
+              {infoAvatarUri ? (
+                <Image source={{ uri: infoAvatarUri }} style={styles.headerAvatar} />
+              ) : (
+                <View style={[styles.headerAvatarPlaceholder, { backgroundColor: accent }]}>
+                  <Ionicons name={infoBadgeIcon as any} size={16} color="#fff" />
+                </View>
+              )}
+              {otherPresence?.state === 'online' && (
+                <View style={[styles.presenceIndicator, { backgroundColor: '#4CAF50' }]} />
+              )}
+            </View>
+            <Animated.View style={{ opacity: textOpacity, marginLeft: 8, overflow: 'hidden' }}>
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                {infoTitle}
+              </Text>
+              <Text style={styles.headerStatus} numberOfLines={1}>
+                {isOtherTyping ? 'Typing...' : infoSubtitle}
+              </Text>
+            </Animated.View>
+          </TouchableOpacity>
+
+          <View style={styles.headerActions}>
+            {callAvailable && (
+              <TouchableOpacity style={styles.headerActionBtn} onPress={() => handleCallPress('video')}>
+                <Ionicons name="videocam-outline" size={20} color="#fff" />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={[styles.headerActionBtn, styles.lastActionBtn]} onPress={() => setShowInfoSheet(true)}>
+              <Ionicons name="ellipsis-vertical" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Animated.View>
+    </View>
+  );
 
   const [hasInitialMessageSnapshot, setHasInitialMessageSnapshot] = useState(false);
   const [renderMessageList, setRenderMessageList] = useState(false);
@@ -2295,207 +2407,39 @@ const ChatScreen = () => {
         <SafeAreaView style={styles.safeArea}>
           <View style={styles.flex}>
             <View style={styles.container}>
-              {/* Header (glassy hero) */}
-              <View style={[styles.headerWrap, { marginTop: Platform.OS === 'ios' ? Math.max(4, insets.top - 12) : 6 }]}>
-                <LinearGradient
-                  colors={[accentGlow, 'rgba(10,12,24,0.4)']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.headerGlow}
-                />
-                {isSearchMode ? (
-                  <View style={styles.headerBar}>
-                    <TouchableOpacity onPress={handleCloseSearch} style={styles.backButton}>
-                      <Ionicons name="arrow-back" size={22} color="#fff" />
-                    </TouchableOpacity>
-                    <View style={styles.chatSearchRow}>
-                      <Ionicons name="search" size={18} color="rgba(255,255,255,0.8)" />
-                      <TextInput
-                        style={styles.chatSearchInput}
-                        placeholder="Search in chat"
-                        placeholderTextColor="rgba(255,255,255,0.5)"
-                        value={searchQuery}
-                        onChangeText={handleSearchMessages}
-                        autoFocus
+              {/* Chat Header (Dynamic Island) */}
+              <ChatHeader />
+
+              {!isSearchMode && headerBio && (
+                <View style={styles.chatAdWrap}>
+                  <View style={styles.statusBubbleContainer}>
+                    <View style={styles.statusBubble}>
+                      <LiquidGlass
+                        tintOpacity={0.12}
+                        tintColor="#000"
+                        cornerRadius={16}
+                        borderOpacity={0.2}
+                        glowIntensity={0.3}
+                        glowColor={accent}
+                        style={StyleSheet.absoluteFillObject}
                       />
-                      {searchQuery.length > 0 && (
-                        <TouchableOpacity onPress={() => handleSearchMessages('')} style={styles.chatSearchClear}>
-                          <Ionicons name="close" size={16} color="#fff" />
-                        </TouchableOpacity>
-                      )}
+                      <View style={[
+                        styles.statusDot,
+                        otherPresence?.state === 'online'
+                          ? styles.statusDotOnline
+                          : styles.statusDotOffline
+                      ]} />
+                      <Text style={styles.statusBubbleText} numberOfLines={2} ellipsizeMode="tail">
+                        {headerBio}
+                      </Text>
+                    </View>
+                    <View style={styles.statusBubbleTail}>
+                      <View style={[styles.statusTailInner, { backgroundColor: withAlpha(accent, 0.25) }]} />
                     </View>
                   </View>
-                ) : (
-                  <>
-                    <View style={styles.headerBar}>
-                      <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-                        <Ionicons name="arrow-back" size={24} color="#fff" />
-                      </TouchableOpacity>
-                      <TouchableOpacity style={styles.titleRow} activeOpacity={0.9} onPress={() => setShowInfoSheet(true)}>
-                        <View style={[styles.accentDot, accentDotStyle]} />
-                        {conversation?.isGroup ? (
-                          <View style={styles.headerAvatarFallback}>
-                            <Text style={styles.headerAvatarFallbackText}>
-                              {String(conversation.name || routeTitle || 'G')
-                                .split(' ')
-                                .filter(Boolean)
-                                .map((p) => p[0])
-                                .join('')
-                                .slice(0, 2)
-                                .toUpperCase()}
-                            </Text>
-                          </View>
-                        ) : conversation?.isBroadcast ? (
-                          <View style={styles.headerAvatarFallback}>
-                            <Ionicons name="megaphone" size={16} color="#fff" />
-                          </View>
-                        ) : otherUser?.photoURL || routeAvatar ? (
-                          <Image source={{ uri: String(otherUser?.photoURL || routeAvatar) }} style={styles.headerAvatar} />
-                        ) : (
-                          <View style={styles.headerAvatarFallback}>
-                            <Text style={styles.headerAvatarFallbackText}>
-                              {String(otherUser?.displayName || routeTitle || 'U')
-                                .split(' ')
-                                .filter(Boolean)
-                                .map((p) => p[0])
-                                .join('')
-                                .slice(0, 2)
-                                .toUpperCase()}
-                            </Text>
-                          </View>
-                        )}
-                        <View style={styles.headerTitleCol}>
-                          <Text style={styles.headerEyebrow} numberOfLines={1} ellipsizeMode="tail">
-                            {conversation?.isGroup ? 'Group Chat' : 'Direct Message'}
-                          </Text>
-                          <Text style={styles.headerText} numberOfLines={1} ellipsizeMode="tail">
-                            {conversation?.isGroup
-                              ? conversation.name || routeTitle || 'Group'
-                              : otherUser?.displayName || routeTitle || 'Chat'}
-                          </Text>
-                        </View>
-                      </TouchableOpacity>
-
-                      <View style={styles.headerIcons}>
-                        <Pressable
-                          style={[styles.iconBtn, iconShadowStyle]}
-                          onPress={handleOpenSearch}
-                          android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: true, radius: 20 }}
-                        >
-                          <LinearGradient
-                            colors={iconGradientColors}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={styles.iconBg}
-                          >
-                            <Ionicons name="search" size={22} color="#ffffff" style={styles.iconMargin} />
-                          </LinearGradient>
-                        </Pressable>
-
-                        <Pressable
-                          style={[styles.iconBtn, iconShadowStyle]}
-                          onPress={() => handleStartCall('voice')}
-                          disabled={isStartingCall || !callAvailable}
-                          android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: true, radius: 20 }}
-                        >
-                          <LinearGradient
-                            colors={iconGradientColors}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={styles.iconBg}
-                          >
-                            <Ionicons name="call" size={22} color="#ffffff" />
-                          </LinearGradient>
-                        </Pressable>
-
-                        <Pressable
-                          style={[styles.iconBtn, iconShadowStyle]}
-                          onPress={() => handleStartCall('video')}
-                          disabled={isStartingCall || !callAvailable}
-                          android_ripple={{ color: 'rgba(255,255,255,0.2)', borderless: true, radius: 20 }}
-                        >
-                          <LinearGradient
-                            colors={iconGradientColors}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={styles.iconBg}
-                          >
-                            <Ionicons name="videocam" size={22} color="#ffffff" />
-                          </LinearGradient>
-                        </Pressable>
-                      </View>
-                    </View>
-
-                    <View style={styles.headerMetaRow}>
-                      {Boolean(streakMetaLabel) && (
-                        <View style={styles.metaPill}>
-                          <Ionicons name="flame" size={14} color="#fff" />
-                          <Text style={styles.metaText}>
-                            {streakMetaLabel}
-                          </Text>
-                        </View>
-                      )}
-                      <View style={[styles.metaPill, styles.metaPillSoft]}>
-                        <Ionicons name="radio-button-on" size={14} color="#fff" />
-                        <Text style={styles.metaText}>
-                          {isOtherTyping
-                            ? 'Typing...'
-                            : settings.hibernate
-                              ? '—'
-                              : otherPresence?.state === 'online'
-                                ? 'Online'
-                                : lastSeen
-                                  ? `Last seen ${lastSeen.toLocaleString()}`
-                                  : 'Offline'}
-                        </Text>
-                      </View>
-                      <View style={[styles.metaPill, styles.metaPillOutline]}>
-                        <Ionicons name="shield-checkmark" size={14} color="#fff" />
-                        <Text style={styles.metaText}>Encrypted</Text>
-                      </View>
-                    </View>
-                  </>
-                )}
-              </View>
-
-              {!isSearchMode ? (
-                <View style={styles.chatAdWrap}>
-                  {/* Status/Bio Bubble */}
-                  {headerBio ? (
-                    <View style={styles.statusBubbleContainer}>
-                      <View style={styles.statusBubble}>
-                        {Platform.OS === 'ios' ? (
-                          <BlurView intensity={30} tint="dark" style={StyleSheet.absoluteFillObject} />
-                        ) : null}
-                        <LinearGradient
-                          colors={[withAlpha(accent, 0.3), 'rgba(255,255,255,0.08)']}
-                          start={{ x: 0, y: 0 }}
-                          end={{ x: 1, y: 1 }}
-                          style={StyleSheet.absoluteFillObject}
-                        />
-                        {/* Status indicator dot */}
-                        <View style={[
-                          styles.statusDot,
-                          otherPresence?.state === 'online'
-                            ? styles.statusDotOnline
-                            : styles.statusDotOffline
-                        ]} />
-                        {/* Bio text */}
-                        <Text style={styles.statusBubbleText} numberOfLines={2} ellipsizeMode="tail">
-                          {headerBio}
-                        </Text>
-                        {/* Glass border highlight */}
-                        <View style={styles.statusBubbleBorder} pointerEvents="none" />
-                      </View>
-                      {/* Speech bubble tail */}
-                      <View style={styles.statusBubbleTail}>
-                        <View style={[styles.statusTailInner, { backgroundColor: withAlpha(accent, 0.25) }]} />
-                      </View>
-                    </View>
-                  ) : null}
                   <AdBanner placement="feed" />
                 </View>
-              ) : null}
+              )}
 
               {isSearchMode && (
                 <View style={styles.inlineSearchPanel}>
@@ -2560,7 +2504,7 @@ const ChatScreen = () => {
                         transform: [{ translateY: entryTranslateY }],
                       }}
                     >
-                      <FlashList
+                      <AnimatedFlashList
                         ref={flatListRef}
                         data={visibleMessages}
                         renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
@@ -2605,7 +2549,14 @@ const ChatScreen = () => {
                           return 'text';
                         }}
                         showsVerticalScrollIndicator={false}
-                        onScroll={handleScroll}
+                        onScroll={Animated.event(
+                          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+                          { 
+                            useNativeDriver: false,
+                            listener: handleScroll
+                          }
+                        )}
+                        scrollEventThrottle={16}
                         maintainVisibleContentPosition={{
                           minIndexForVisible: 0,
                           autoscrollToTopThreshold: 24,
@@ -2635,6 +2586,7 @@ const ChatScreen = () => {
                           {
                             flexGrow: 1,
                             justifyContent: 'flex-end',
+                            paddingTop: 80,
                             paddingBottom: Math.max(10, inputDockHeight + keyboardHeight + 10),
                           },
                         ]}
@@ -2851,15 +2803,12 @@ const ChatScreen = () => {
                   },
                 ]}
               >
-                {Platform.OS === 'ios' ? (
-                  <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFillObject} />
-                ) : (
-                  <View style={styles.spotlightBackdropAndroid} />
-                )}
-                <LinearGradient
-                  colors={['rgba(0,0,0,0.1)', 'rgba(0,0,0,0.75)', 'rgba(0,0,0,0.65)']}
-                  start={{ x: 0.2, y: 0 }}
-                  end={{ x: 0.8, y: 1 }}
+                <LiquidGlass
+                  glowColor={accentColor}
+                  tintOpacity={0.7}
+                  cornerRadius={0}
+                  glowIntensity={0.2}
+                  borderOpacity={0}
                   style={StyleSheet.absoluteFillObject}
                 />
                 {/* Animated gradient orbs */}
@@ -3025,7 +2974,14 @@ const ChatScreen = () => {
                         },
                       ]}
                     >
-                      <BlurView intensity={85} tint="dark" style={styles.spotlightActionBarBlur} />
+                      <LiquidGlass
+                        glowColor={accentColor}
+                        tintOpacity={0.85}
+                        cornerRadius={20}
+                        glowIntensity={0.2}
+                        borderOpacity={0.3}
+                        style={StyleSheet.absoluteFillObject}
+                      />
                       <ScrollView
                         horizontal
                         showsHorizontalScrollIndicator={false}
@@ -3171,6 +3127,15 @@ const ChatScreen = () => {
               style={styles.mediaSheetAvoid}
             >
               <View style={styles.mediaSheet}>
+                <LiquidGlass
+                  glowColor={accentColor}
+                  tintColor="#05060f"
+                  tintOpacity={0.95}
+                  cornerRadius={24}
+                  glowIntensity={0.2}
+                  borderOpacity={0.25}
+                  style={StyleSheet.absoluteFillObject}
+                />
                 <View style={styles.mediaSheetHandle} />
                 <View style={styles.mediaPreviewHeader}>
                   <Text style={styles.mediaPreviewTitle}>Preview</Text>
@@ -3186,17 +3151,10 @@ const ChatScreen = () => {
                     <Image
                       source={{ uri: pendingMedia.uri }}
                       style={styles.mediaPreviewImage}
-                      resizeMode={ResizeMode.CONTAIN}
+                      resizeMode="contain"
                     />
                   ) : pendingMedia.type === 'video' ? (
-                    <Video
-                      source={{ uri: pendingMedia.uri }}
-                      style={styles.mediaPreviewImage}
-                      resizeMode={ResizeMode.CONTAIN}
-                      useNativeControls={false}
-                      shouldPlay={false}
-                      isMuted
-                    />
+                    <ChatMediaPreviewVideo uri={pendingMedia.uri} />
                   ) : (
                     <View style={styles.mediaPreviewPlaceholder}>
                       <Ionicons
@@ -3239,6 +3197,15 @@ const ChatScreen = () => {
           <View style={styles.infoSheetOverlay}>
             <TouchableOpacity style={styles.infoSheetBackdrop} activeOpacity={1} onPress={handleCloseInfoSheet} />
             <View style={[styles.infoSheet, { paddingBottom: (Platform.OS === 'ios' ? 18 : 12) + insets.bottom }]}>
+              <LiquidGlass
+                glowColor={accentColor}
+                tintColor="#141722"
+                tintOpacity={0.95}
+                cornerRadius={24}
+                glowIntensity={0.15}
+                borderOpacity={0.2}
+                style={StyleSheet.absoluteFillObject}
+              />
               <View style={styles.infoSheetHandle} />
               <View style={styles.infoSheetHeader}>
                 {infoAvatarUri ? (
@@ -3396,6 +3363,15 @@ const ChatScreen = () => {
               onPress={() => setShowForwardSheet(false)}
             />
             <View style={[styles.forwardSheet, { paddingBottom: (Platform.OS === 'ios' ? 18 : 12) + insets.bottom }]}>
+              <LiquidGlass
+                glowColor={accentColor}
+                tintColor="#141722"
+                tintOpacity={0.95}
+                cornerRadius={24}
+                glowIntensity={0.15}
+                borderOpacity={0.2}
+                style={StyleSheet.absoluteFillObject}
+              />
               <View style={styles.forwardSheetHandle} />
 
               <View style={styles.forwardSheetHeader}>
@@ -3519,6 +3495,15 @@ const ChatScreen = () => {
               onPress={() => setShowMessageInfoSheet(false)}
             />
             <View style={[styles.messageInfoSheet, { paddingBottom: (Platform.OS === 'ios' ? 18 : 12) + insets.bottom }]}>
+              <LiquidGlass
+                glowColor={accentColor}
+                tintColor="#141722"
+                tintOpacity={0.95}
+                cornerRadius={24}
+                glowIntensity={0.15}
+                borderOpacity={0.2}
+                style={StyleSheet.absoluteFillObject}
+              />
               <View style={styles.messageInfoHandle} />
 
               <View style={styles.messageInfoHeader}>
@@ -3678,6 +3663,96 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.8)',
     fontSize: 13,
     fontWeight: '500',
+  },
+  headerOuter: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    alignItems: 'center',
+    width: '100%',
+  },
+  islandWrap: {
+    height: 56,
+    borderRadius: 28,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  islandContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 6,
+  },
+  headerBackBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerProfileSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingLeft: 4,
+  },
+  headerAvatarWrap: {
+    position: 'relative',
+  },
+  headerAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  headerAvatarPlaceholder: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  presenceIndicator: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: '#000',
+  },
+  headerTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  headerStatus: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 22,
+    paddingHorizontal: 4,
+    height: 44,
+  },
+  headerActionBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lastActionBtn: {
+    marginRight: 2,
   },
   // Header glass hero
   headerWrap: {

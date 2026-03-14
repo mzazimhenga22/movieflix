@@ -49,6 +49,7 @@ export interface DownloadItem {
   containerPath?: string;
   createdAt: number;
   bytesWritten?: number;
+  totalBytes?: number;
   runtimeMinutes?: number;
   releaseDate?: string;
   posterPath?: string | null;
@@ -59,6 +60,12 @@ export interface DownloadItem {
   sourceUrl?: string;
   downloadType?: 'file' | 'hls';
   segmentCount?: number;
+  totalSegments?: number;
   artist?: string | null;
   videoId?: string;
+  // Partial download support
+  isPartial?: boolean; // True if download incomplete but playable
+  partialProgress?: number; // 0-1 progress of partial download
+  playableDuration?: number; // Duration in seconds that's playable
+  downloadStatus?: 'completed' | 'downloading' | 'paused' | 'error';
 }

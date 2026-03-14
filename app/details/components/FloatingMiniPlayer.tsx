@@ -1,12 +1,14 @@
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
+import { Image as ExpoImage } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Dimensions, PanResponder, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { Ionicons } from '@expo/vector-icons';
-import { Image as ExpoImage } from 'expo-image';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import LiquidGlass from '../../../components/app-components/LiquidGlass';
 import { IMAGE_BASE_URL } from '../../../constants/api';
 import { buildProfileScopedKey } from '../../../lib/profileStorage';
-import * as Haptics from 'expo-haptics';
+
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -25,11 +27,11 @@ interface Props {
   accentColor?: string;
 }
 
-export default function FloatingMiniPlayer({ 
-  visible, 
-  movie, 
-  onPlay, 
-  onDismiss, 
+export default function FloatingMiniPlayer({
+  visible,
+  movie,
+  onPlay,
+  onDismiss,
   accentColor = '#e50914',
 }: Props) {
   const translateY = useRef(new Animated.Value(150)).current;
@@ -37,19 +39,19 @@ export default function FloatingMiniPlayer({
   const opacity = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(0.8)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  
+
   // Load active profile ID
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
-  
+
   useEffect(() => {
     AsyncStorage.getItem('activeProfile').then(stored => {
       if (stored) {
         const parsed = JSON.parse(stored);
         setActiveProfileId(parsed?.id ?? null);
       }
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
-  
+
   // Watch progress state - connected to watch history
   const [watchProgress, setWatchProgress] = useState<WatchProgress | null>(null);
   const progressAnim = useRef(new Animated.Value(0)).current;
@@ -57,7 +59,7 @@ export default function FloatingMiniPlayer({
   // Load watch progress from storage
   useEffect(() => {
     if (!movie?.id || !visible) return;
-    
+
     const loadProgress = async () => {
       try {
         const profileId = activeProfileId;
@@ -82,7 +84,7 @@ export default function FloatingMiniPlayer({
         console.warn('[FloatingMiniPlayer] Failed to load watch progress', err);
       }
     };
-    
+
     loadProgress();
   }, [movie?.id, visible, activeProfileId]);
 
@@ -174,8 +176,16 @@ export default function FloatingMiniPlayer({
       ]}
       {...panResponder.panHandlers}
     >
+      <LiquidGlass
+        glowColor={accentColor}
+        tintOpacity={0.15}
+        cornerRadius={16}
+        glowIntensity={0.2}
+        borderOpacity={0.2}
+        style={styles.gradient}
+      />
       <LinearGradient
-        colors={['rgba(25,25,35,0.98)', 'rgba(15,15,22,0.98)']}
+        colors={['rgba(15,15,22,0.6)', 'rgba(5,5,10,0.85)']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.gradient}
@@ -211,14 +221,14 @@ export default function FloatingMiniPlayer({
             transition={200}
           />
           <LinearGradient colors={['transparent', 'rgba(0,0,0,0.6)']} style={styles.thumbnailGradient} />
-          
+
           {/* Play overlay */}
           <TouchableOpacity style={styles.playOverlay} onPress={onPlay} activeOpacity={0.9}>
             <Animated.View style={[styles.playCircle, { transform: [{ scale: pulseAnim }], backgroundColor: accentColor }]}>
               <Ionicons name="play" size={18} color="#fff" style={{ marginLeft: 2 }} />
             </Animated.View>
           </TouchableOpacity>
-          
+
           {/* Progress badge on thumbnail */}
           {progressPercent > 0 && (
             <View style={[styles.progressBadge, { backgroundColor: accentColor }]}>
@@ -230,7 +240,7 @@ export default function FloatingMiniPlayer({
         {/* Info */}
         <View style={styles.info}>
           <Text style={styles.title} numberOfLines={1}>{movie.title || movie.name}</Text>
-          
+
           {/* Watch status */}
           <View style={styles.statusRow}>
             {progressPercent > 0 ? (
@@ -247,7 +257,7 @@ export default function FloatingMiniPlayer({
               </>
             )}
           </View>
-          
+
           {/* Mini stats */}
           <View style={styles.miniStats}>
             <View style={styles.miniStat}>
@@ -276,7 +286,7 @@ export default function FloatingMiniPlayer({
               <Ionicons name="play" size={18} color="#fff" />
             </LinearGradient>
           </TouchableOpacity>
-          
+
           <TouchableOpacity style={styles.closeBtn} onPress={onDismiss} activeOpacity={0.7}>
             <Ionicons name="close" size={18} color="rgba(255,255,255,0.6)" />
           </TouchableOpacity>

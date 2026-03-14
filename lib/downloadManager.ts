@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import DownloadServiceModule from '../modules/DownloadServiceModule';
 import { emitDownloadEvent } from './downloadEvents';
 import { notifyDownload } from './downloadNotifications';
-import { ensureDownloadDir, guessFileExtension, persistDownloadRecord, removeDownloadRecord } from './fileUtils';
+import { ensureDownloadDir, guessFileExtension, persistDownloadRecord, removeDownloadRecord, persistPartialDownload, updateDownloadRecord, markDownloadCompleted, getAllDownloads } from './fileUtils';
 import { downloadHlsPlaylist } from './hlsDownloader';
 import { getProfileScopedKey } from './profileStorage';
 
@@ -136,12 +136,16 @@ async function getMaxConcurrentJobs() {
 
 function updateForegroundService() {
   const count = activeJobs.size;
-  if (count > 0) {
-    DownloadServiceModule.startService('Downloading', `${count} item${count > 1 ? 's' : ''} remaining`);
-    isServiceRunning = true;
-  } else if (isServiceRunning) {
-    DownloadServiceModule.stopService();
-    isServiceRunning = false;
+  try {
+    if (count > 0) {
+      DownloadServiceModule?.startService?.('Downloading', `${count} item${count > 1 ? 's' : ''} remaining`);
+      isServiceRunning = true;
+    } else if (isServiceRunning) {
+      DownloadServiceModule?.stopService?.();
+      isServiceRunning = false;
+    }
+  } catch (err) {
+    console.warn('[DownloadManager] Native service error:', err);
   }
 }
 
@@ -187,6 +191,98 @@ async function loadQueue() {
 async function reconcileCompletedJobs() {
   const downloadsRoot = await ensureDownloadDir();
 
+  // First, scan the downloads folder for any files that weren't persisted
+  // This handles the case where download completed but app closed before persisting
+  try {
+    const files = await FileSystem.readDirectoryAsync(downloadsRoot);
+    const persistedKey = await getProfileScopedKey('downloads');
+    const persistedRaw = await AsyncStorage.getItem(persistedKey);
+    const persisted: any[] = persistedRaw ? JSON.parse(persistedRaw) : [];
+    const persistedIds = new Set(persisted.map(p => p.id));
+
+    for (const fileOrDir of files) {
+      const fullPath = `${downloadsRoot}/${fileOrDir}`;
+      const info = await FileSystem.getInfoAsync(fullPath);
+      
+      // Skip if already persisted
+      if (persistedIds.has(fileOrDir) || persistedIds.has(fileOrDir.split('.')[0])) continue;
+      
+      // Check if it's a completed download (file or HLS directory)
+      if (info.exists) {
+        // Check for HLS directory (contains index.m3u8)
+        if (info.isDirectory) {
+          const playlistPath = `${fullPath}/index.m3u8`;
+          const playlistInfo = await FileSystem.getInfoAsync(playlistPath);
+          if (playlistInfo.exists && !playlistInfo.isDirectory) {
+            // Found orphaned HLS download - try to recover from queue
+            const matchingJob = jobs.find(j => j.sessionId === fileOrDir);
+            if (matchingJob) {
+              await persistDownloadRecord({
+                id: matchingJob.sessionId,
+                mediaId: matchingJob.mediaId,
+                title: matchingJob.title,
+                mediaType: matchingJob.mediaType,
+                subtitle: matchingJob.subtitle,
+                runtimeMinutes: matchingJob.runtimeMinutes,
+                releaseDate: matchingJob.releaseDate,
+                posterPath: matchingJob.posterPath,
+                backdropPath: matchingJob.backdropPath,
+                overview: matchingJob.overview,
+                artist: matchingJob.artist ?? null,
+                videoId: matchingJob.videoId,
+                seasonNumber: matchingJob.seasonNumber,
+                episodeNumber: matchingJob.episodeNumber,
+                sourceUrl: matchingJob.sourceUrl,
+                downloadType: 'hls',
+                localUri: playlistPath,
+                containerPath: fullPath,
+                createdAt: matchingJob.createdAt,
+              } as any);
+              jobs = jobs.filter(j => j.sessionId !== fileOrDir);
+              continue;
+            }
+          }
+        } else {
+          // It's a file - check if it's a video file
+          const ext = fileOrDir.split('.').pop()?.toLowerCase();
+          if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v'].includes(ext || '')) {
+            // Found orphaned file download - try to recover from queue
+            const sessionId = fileOrDir.split('.')[0];
+            const matchingJob = jobs.find(j => j.sessionId === sessionId);
+            if (matchingJob) {
+              await persistDownloadRecord({
+                id: sessionId,
+                mediaId: matchingJob.mediaId,
+                title: matchingJob.title,
+                mediaType: matchingJob.mediaType,
+                subtitle: matchingJob.subtitle,
+                runtimeMinutes: matchingJob.runtimeMinutes,
+                releaseDate: matchingJob.releaseDate,
+                posterPath: matchingJob.posterPath,
+                backdropPath: matchingJob.backdropPath,
+                overview: matchingJob.overview,
+                artist: matchingJob.artist ?? null,
+                videoId: matchingJob.videoId,
+                seasonNumber: matchingJob.seasonNumber,
+                episodeNumber: matchingJob.episodeNumber,
+                sourceUrl: matchingJob.sourceUrl,
+                downloadType: 'file',
+                localUri: fullPath,
+                containerPath: fullPath,
+                createdAt: matchingJob.createdAt,
+                bytesWritten: info.size,
+              } as any);
+              jobs = jobs.filter(j => j.sessionId !== sessionId);
+              continue;
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[DownloadManager] Failed to scan for orphaned downloads:', e);
+  }
+
   const stillQueued: PersistedJob[] = [];
   for (const job of jobs) {
     try {
@@ -223,34 +319,41 @@ async function reconcileCompletedJobs() {
 
       if (job.downloadType === 'file') {
         const dest = job.destination;
-        if (dest && typeof job.totalBytes === 'number' && job.totalBytes > 0) {
+        if (dest) {
           const info = await FileSystem.getInfoAsync(dest);
-          const size = info.exists && !info.isDirectory ? Number(info.size ?? 0) : 0;
-          if (size >= job.totalBytes - 1024) {
-            await persistDownloadRecord({
-              id: job.sessionId,
-              mediaId: job.mediaId,
-              title: job.title,
-              mediaType: job.mediaType,
-              subtitle: job.subtitle,
-              runtimeMinutes: job.runtimeMinutes,
-              releaseDate: job.releaseDate,
-              posterPath: job.posterPath,
-              backdropPath: job.backdropPath,
-              overview: job.overview,
-              artist: job.artist ?? null,
-              videoId: job.videoId,
-              seasonNumber: job.seasonNumber,
-              episodeNumber: job.episodeNumber,
-              sourceUrl: job.sourceUrl,
-              downloadType: 'file',
-              localUri: dest,
-              containerPath: dest,
-              createdAt: job.createdAt,
-              bytesWritten: size,
-            } as any);
-            emit(job, 'completed', 1);
-            continue;
+          // Check if file exists and has reasonable size (> 1KB)
+          if (info.exists && !info.isDirectory && Number(info.size ?? 0) > 1024) {
+            // If we have totalBytes, verify; otherwise assume complete if file exists
+            const isComplete = typeof job.totalBytes === 'number' && job.totalBytes > 0
+              ? Number(info.size) >= job.totalBytes - 1024
+              : true; // Assume complete if no totalBytes recorded
+              
+            if (isComplete) {
+              await persistDownloadRecord({
+                id: job.sessionId,
+                mediaId: job.mediaId,
+                title: job.title,
+                mediaType: job.mediaType,
+                subtitle: job.subtitle,
+                runtimeMinutes: job.runtimeMinutes,
+                releaseDate: job.releaseDate,
+                posterPath: job.posterPath,
+                backdropPath: job.backdropPath,
+                overview: job.overview,
+                artist: job.artist ?? null,
+                videoId: job.videoId,
+                seasonNumber: job.seasonNumber,
+                episodeNumber: job.episodeNumber,
+                sourceUrl: job.sourceUrl,
+                downloadType: 'file',
+                localUri: dest,
+                containerPath: dest,
+                createdAt: job.createdAt,
+                bytesWritten: Number(info.size),
+              } as any);
+              emit(job, 'completed', 1);
+              continue;
+            }
           }
         }
       }
@@ -323,6 +426,77 @@ function pickNextRunnableJob(): PersistedJob | null {
 }
 
 async function finalizeAndRemoveJob(job: PersistedJob) {
+  // First, verify the download record was persisted
+  try {
+    const key = await getProfileScopedKey('downloads');
+    const stored = await AsyncStorage.getItem(key);
+    const existing: any[] = stored ? JSON.parse(stored) : [];
+    const hasRecord = existing.some(item => item?.id === job.sessionId);
+    
+    if (!hasRecord) {
+      // Record wasn't persisted - try to save it now
+      const downloadsRoot = await ensureDownloadDir();
+      
+      if (job.downloadType === 'hls') {
+        const containerPath = job.containerPath ?? `${downloadsRoot}/${job.sessionId}`;
+        const playlistPath = job.destination ?? `${containerPath}/index.m3u8`;
+        const info = await FileSystem.getInfoAsync(playlistPath);
+        if (info.exists) {
+          await persistDownloadRecord({
+            id: job.sessionId,
+            mediaId: job.mediaId,
+            title: job.title,
+            mediaType: job.mediaType,
+            subtitle: job.subtitle,
+            runtimeMinutes: job.runtimeMinutes,
+            releaseDate: job.releaseDate,
+            posterPath: job.posterPath,
+            backdropPath: job.backdropPath,
+            overview: job.overview,
+            artist: job.artist ?? null,
+            videoId: job.videoId,
+            seasonNumber: job.seasonNumber,
+            episodeNumber: job.episodeNumber,
+            sourceUrl: job.sourceUrl,
+            downloadType: 'hls',
+            localUri: playlistPath,
+            containerPath,
+            createdAt: job.createdAt,
+          } as any);
+        }
+      } else if (job.destination) {
+        const info = await FileSystem.getInfoAsync(job.destination);
+        if (info.exists && !info.isDirectory) {
+          await persistDownloadRecord({
+            id: job.sessionId,
+            mediaId: job.mediaId,
+            title: job.title,
+            mediaType: job.mediaType,
+            subtitle: job.subtitle,
+            runtimeMinutes: job.runtimeMinutes,
+            releaseDate: job.releaseDate,
+            posterPath: job.posterPath,
+            backdropPath: job.backdropPath,
+            overview: job.overview,
+            artist: job.artist ?? null,
+            videoId: job.videoId,
+            seasonNumber: job.seasonNumber,
+            episodeNumber: job.episodeNumber,
+            sourceUrl: job.sourceUrl,
+            downloadType: 'file',
+            localUri: job.destination,
+            containerPath: job.destination,
+            createdAt: job.createdAt,
+            bytesWritten: Number(info.size),
+          } as any);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[DownloadManager] Failed to verify/restore download record:', e);
+  }
+  
+  // Now safe to remove from queue
   jobs = jobs.filter((j) => j.sessionId !== job.sessionId);
   await saveQueue();
 }
@@ -347,6 +521,8 @@ async function runJob(job: PersistedJob) {
     await saveQueue();
 
     const concurrency = await getDownloadConcurrency();
+    let lastPartialPersist = 0;
+    
     const res = await downloadHlsPlaylist({
       playlistUrl: job.sourceUrl,
       headers: job.headers,
@@ -366,6 +542,33 @@ async function runJob(job: PersistedJob) {
           completedUnits: completed,
           totalUnits: total,
         });
+        
+        // Save partial download every 10% progress (for preview functionality)
+        const progressPercent = Math.floor(progress * 10) / 10;
+        if (progress >= 0.1 && progressPercent > lastPartialPersist) {
+          lastPartialPersist = progressPercent;
+          void persistPartialDownload({
+            id: job.sessionId,
+            mediaId: job.mediaId,
+            title: job.title,
+            mediaType: job.mediaType,
+            localUri: `${containerPath}/index.m3u8`,
+            containerPath,
+            createdAt: job.createdAt,
+            posterPath: job.posterPath,
+            backdropPath: job.backdropPath,
+            overview: job.overview,
+            seasonNumber: job.seasonNumber,
+            episodeNumber: job.episodeNumber,
+            sourceUrl: job.sourceUrl,
+            downloadType: 'hls',
+            segmentCount: completed,
+            totalSegments: total,
+            partialProgress: progress,
+            playableDuration: Math.floor((progress * (job.runtimeMinutes || 90)) * 60), // Estimate playable duration
+            downloadStatus: 'downloading',
+          }).catch(() => {});
+        }
       },
     });
 
@@ -409,6 +612,8 @@ async function runJob(job: PersistedJob) {
 
   // keep destination discoverable for cancellation cleanup
   updateJob(job.sessionId, { destination });
+  
+  let lastPartialPersist = 0;
 
   const onProgress = (progress: { totalBytesWritten: number; totalBytesExpectedToWrite: number }) => {
     if (shouldAbort()) return;
@@ -425,6 +630,33 @@ async function runJob(job: PersistedJob) {
         bytesWritten: progress.totalBytesWritten,
         totalBytes: progress.totalBytesExpectedToWrite,
       });
+      
+      // Save partial download every 10% progress (for preview functionality)
+      const progressPercent = Math.floor(ratio * 10) / 10;
+      if (ratio >= 0.1 && progressPercent > lastPartialPersist) {
+        lastPartialPersist = progressPercent;
+        void persistPartialDownload({
+          id: job.sessionId,
+          mediaId: job.mediaId,
+          title: job.title,
+          mediaType: job.mediaType,
+          localUri: destination,
+          containerPath: destination,
+          createdAt: job.createdAt,
+          bytesWritten: progress.totalBytesWritten,
+          totalBytes: progress.totalBytesExpectedToWrite,
+          posterPath: job.posterPath,
+          backdropPath: job.backdropPath,
+          overview: job.overview,
+          seasonNumber: job.seasonNumber,
+          episodeNumber: job.episodeNumber,
+          sourceUrl: job.sourceUrl,
+          downloadType: 'file',
+          partialProgress: ratio,
+          playableDuration: Math.floor((ratio * (job.runtimeMinutes || 90)) * 60), // Estimate playable duration
+          downloadStatus: 'downloading',
+        }).catch(() => {});
+      }
     }
   };
 
@@ -537,6 +769,15 @@ async function pumpQueue() {
             updateJob(job.sessionId, { status: 'paused' });
             await saveQueue();
             emit(job, 'paused', latest.progress, msg);
+            
+            // Save as partial download for preview
+            if (latest.progress && latest.progress >= 0.1) {
+              void updateDownloadRecord(job.sessionId, {
+                downloadStatus: 'paused',
+                partialProgress: latest.progress,
+                isPartial: true,
+              }).catch(() => {});
+            }
             return;
           }
           const nextStatus: DownloadJobStatus = cancelled ? 'cancelled' : 'error';
@@ -672,13 +913,40 @@ export async function pauseDownload(sessionId: string) {
 
 export async function resumeDownload(sessionId: string) {
   const job = jobs.find((j) => j.sessionId === sessionId);
-  if (!job) return;
+  if (!job) {
+    // Check if this is a partial download that needs to be re-queued
+    const downloads = await getAllDownloads();
+    const partial = downloads.find(d => d.id === sessionId && d.isPartial);
+    if (partial && partial.sourceUrl) {
+      // Re-enqueue the partial download
+      await enqueueDownload({
+        title: partial.title,
+        mediaId: partial.mediaId,
+        mediaType: partial.mediaType,
+        subtitle: partial.subtitle || null,
+        runtimeMinutes: partial.runtimeMinutes,
+        seasonNumber: partial.seasonNumber,
+        episodeNumber: partial.episodeNumber,
+        releaseDate: partial.releaseDate,
+        posterPath: partial.posterPath,
+        backdropPath: partial.backdropPath,
+        overview: partial.overview,
+        sourceUrl: partial.sourceUrl,
+        downloadType: partial.downloadType || 'file',
+      });
+    }
+    return;
+  }
   if (job.status !== 'paused') return;
   const state = getAbortController(sessionId);
   state.mode = 'none';
   updateJob(sessionId, { status: 'queued' });
   await saveQueue();
   emit(job, 'queued', job.progress);
+  
+  // Update the download record
+  await updateDownloadRecord(sessionId, { downloadStatus: 'downloading' });
+  
   void pumpQueue();
 }
 

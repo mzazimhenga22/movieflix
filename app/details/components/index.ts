@@ -5,3 +5,5 @@ export { default as WatchModes } from './WatchModes';
 export { default as QuickActions } from './QuickActions';
 export { default as BehindTheScenes } from './BehindTheScenes';
 export { default as FloatingMiniPlayer } from './FloatingMiniPlayer';
+
+export default function DummyTsRoute() { return null; }

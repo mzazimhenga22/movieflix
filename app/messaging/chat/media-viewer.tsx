@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ResizeMode, Video } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { BlurView } from 'expo-blur';
@@ -22,6 +22,42 @@ type MediaItem = {
   url: string;
   type: 'image' | 'video';
 };
+
+const MediaSlide = React.memo(({ item, screenWidth, screenHeight }: { item: MediaItem; screenWidth: number; screenHeight: number }) => {
+  const isVideo = item.type === 'video';
+  const player = useVideoPlayer(isVideo ? item.url : null, (p) => {
+    p.loop = true;
+  });
+
+  return (
+    <View style={[styles.slide, { width: screenWidth, height: screenHeight }]}>
+      <View style={[styles.mediaCard, { width: screenWidth, height: screenHeight }]}>
+        {isVideo ? (
+          <VideoView
+            player={player}
+            style={[styles.media, { width: screenWidth, height: Math.round(screenHeight * 0.62) }]}
+            contentFit="contain"
+            allowsFullscreen
+            nativeControls
+          />
+        ) : (
+          <Image
+            source={{ uri: item.url }}
+            style={[styles.media, { width: screenWidth, height: Math.round(screenHeight * 0.78) }]}
+            resizeMode="contain"
+          />
+        )}
+
+        {isVideo ? (
+          <View style={styles.videoHintPill} pointerEvents="none">
+            <Ionicons name="play" size={12} color="#fff" />
+            <Text style={styles.videoHintText}>Use native controls to play</Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+});
 
 const MediaViewerScreen = () => {
   const router = useRouter();
@@ -157,37 +193,9 @@ const MediaViewerScreen = () => {
           const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
           setCurrentIndex(index);
         }}
-        renderItem={({ item }) => {
-          const isVideo = item.type === 'video';
-          return (
-            <View style={[styles.slide, { width: screenWidth, height: screenHeight }]}>
-              <View style={[styles.mediaCard, { width: screenWidth, height: screenHeight }]}>
-                {isVideo ? (
-                  <Video
-                    source={{ uri: item.url }}
-                    style={[styles.media, { width: screenWidth, height: Math.round(screenHeight * 0.62) }]}
-                    useNativeControls
-                    resizeMode={ResizeMode.CONTAIN}
-                    shouldPlay={false}
-                  />
-                ) : (
-                  <Image
-                    source={{ uri: item.url }}
-                    style={[styles.media, { width: screenWidth, height: Math.round(screenHeight * 0.78) }]}
-                    resizeMode="contain"
-                  />
-                )}
-
-                {isVideo ? (
-                  <View style={styles.videoHintPill} pointerEvents="none">
-                    <Ionicons name="play" size={12} color="#fff" />
-                    <Text style={styles.videoHintText}>Tap controls to play</Text>
-                  </View>
-                ) : null}
-              </View>
-            </View>
-          );
-        }}
+        renderItem={({ item }) => (
+          <MediaSlide item={item} screenWidth={screenWidth} screenHeight={screenHeight} />
+        )}
       />
 
       {mediaList.length > 1 ? (

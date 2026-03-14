@@ -21,13 +21,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { recommendProducts } from '@/lib/algo';
+import { useAccent } from '../../components/app-components/AccentContext';
+import FlixyAssistant from '../../components/app-components/FlixyAssistant';
 import ScreenWrapper from '../../components/ScreenWrapper';
 import { useActiveProfile } from '../../hooks/use-active-profile';
 import { useMarketplaceCart } from '../../hooks/use-marketplace-cart';
 import { formatKsh } from '../../lib/money';
 import { useSubscription } from '../../providers/SubscriptionProvider';
-import { useAccent } from '../components/AccentContext';
-import FlixyAssistant from '../components/FlixyAssistant';
 import { findOrCreateConversation, getProfileById, type Profile } from '../messaging/controller';
 import { Product as APIProduct, getProducts, trackPromotionClick } from './api';
 import ProductCard from './components/ProductCard';

@@ -1,2227 +1,899 @@
-import { FontAwesome, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import Slider from '@react-native-community/slider';
-import { Audio, ResizeMode, Video } from 'expo-av';
-import { BlurView } from 'expo-blur';
-import { Image as ExpoImage } from 'expo-image';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Alert,
-  AppState,
-  Dimensions,
-  ImageBackground,
-  Modal,
-  Animated as RNAnimated,
-  NativeEventEmitter,
-  NativeModules,
-  Platform,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
+  View,
   Text,
+  StyleSheet,
+  ScrollView,
+  Image,
   TouchableOpacity,
-  View
+  TextInput,
+  Dimensions,
+  ActivityIndicator,
+  StatusBar,
+  Animated,
+  RefreshControl,
+  Platform,
+  FlatList,
+  Alert,
+  Modal,
 } from 'react-native';
-import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView } from '@gorhom/bottom-sheet';
-import Animated, {
-  cancelAnimation,
-  Easing,
-  useAnimatedStyle,
-  useSharedValue,
-  withRepeat,
-  withSequence,
-  withSpring,
-  withTiming
-} from 'react-native-reanimated';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useGlobalMusicPlayer } from '../components/GlobalMusicPlayer';
-
-import { API_BASE_URL, API_KEY, IMAGE_BASE_URL } from '../../constants/api';
-import { LyricsResolver } from '../../src/pstream/LyricsResolver';
-import { RecommendationAlgo } from '../../src/pstream/RecommendationAlgo';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import Slider from '@react-native-community/slider';
 import { usePStream } from '../../src/pstream/usePStream';
-import { Media } from '../../types';
-import { enqueueDownload } from '../../lib/downloadManager';
-import { LyricsView } from '../components/music/LyricsView';
-import { SongCard, SongRow } from '../components/SongItem';
-import NativePlaybackControlsView from '../components/NativePlaybackControlsView';
-import NativeVinylView from '../components/NativeVinylView';
-import NativeWaveformView from '../components/NativeWaveformView';
-import { useSubscription } from '../../providers/SubscriptionProvider';
-import LiquidGlass from '../components/LiquidGlass';
+import LiquidGlass from '../../components/app-components/LiquidGlass';
+import { useThemeColor } from '../../hooks/useThemeColor';
+import { useGlobalMusicPlayer } from '../../components/app-components/GlobalMusicPlayer';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getAuth } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, getDoc, updateDoc, arrayUnion, arrayRemove, onSnapshot, Timestamp } from 'firebase/firestore';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
+const COLUMN_WIDTH = (width - 60) / 2;
 
-const GENRE_FILTERS = [
-  { id: 'all', label: 'All', icon: 'musical-notes' },
-  { id: 'trending', label: 'Trending', icon: 'trending-up' },
-  { id: 'action', label: 'Action', icon: 'flash' },
-  { id: 'romance', label: 'Romance', icon: 'heart' },
-  { id: 'animation', label: 'Animation', icon: 'color-palette' },
-  { id: 'drama', label: 'Drama', icon: 'film' },
+const CATEGORIES = ['All', 'Trending', 'Relax', 'Workout', 'Party', 'Focus', 'Meditation'];
+const MOODS = [
+  { name: 'Deep Focus', color: '#4facfe', icon: 'brain' },
+  { name: 'Late Night', color: '#667eea', icon: 'weather-night' },
+  { name: 'Pure Energy', color: '#f093fb', icon: 'lightning-bolt' },
+  { name: 'Chilled Vibe', color: '#84fab0', icon: 'leaf' },
+];
+const PLAYLISTS = [
+  { name: 'Global Top 50', image: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400', tracks: '50 songs' },
+  { name: 'Lo-fi Beats', image: 'https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=400', tracks: '120 songs' },
+  { name: 'Glow Up Pop', image: 'https://images.unsplash.com/photo-1493225255756-d9584f8606e9?w=400', tracks: '85 songs' },
 ];
 
-const ACCENT_PALETTES: [string, string][] = [
-  ['#e50914', '#ff4d4d'],
-  ['#1db954', '#1ed760'],
-  ['#6366f1', '#a78bfa'],
-  ['#f59e0b', '#fbbf24'],
-  ['#ec4899', '#f472b6'],
+// Equalizer Presets
+const EQ_PRESETS = [
+  { name: 'Flat', bands: [0, 0, 0, 0, 0, 0, 0, 0] },
+  { name: 'Bass Boost', bands: [6, 5, 3, 0, 0, 0, 0, 0] },
+  { name: 'Treble Boost', bands: [0, 0, 0, 0, 2, 4, 5, 6] },
+  { name: 'Vocal', bands: [-2, -1, 0, 3, 4, 3, 0, -1] },
+  { name: 'Rock', bands: [5, 3, -1, -2, -1, 2, 4, 5] },
+  { name: 'Electronic', bands: [4, 2, 0, -2, -1, 2, 4, 5] },
+  { name: 'Jazz', bands: [3, 2, 0, 2, 3, 3, 2, 3] },
+  { name: 'Classical', bands: [4, 3, 2, 1, -1, 2, 3, 4] },
 ];
 
-const formatTime = (ms: number): string => {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-};
+const FAVORITES_KEY = '@movieflix_music_favorites';
+const RECENT_KEY = '@movieflix_music_recent';
 
-const isAudioUri = (uri?: string | null) => {
-  if (!uri) return false;
-  const clean = uri.split('?')[0].split('#')[0];
-  const ext = clean.split('.').pop()?.toLowerCase();
-  if (!ext) return false;
-  return ['m4a', 'mp3', 'aac', 'ogg', 'opus', 'wav', 'flac'].includes(ext);
-};
+const MusicScreen = () => {
+  const { searchMusic } = usePStream();
+  const { playTrack, playerActive, downloadTrack, accentColor: playerAccent, isPlaying: isPlayerPlaying, activeTrack: currentPlayerTrack, togglePlay, progress, duration } = useGlobalMusicPlayer();
+  const accentColor = useThemeColor({}, 'primary');
+  
+  const [searchQuery, setSearchQuery] = useState('');
+  const [songs, setSongs] = useState<any[]>([]);
+  const [recentlyPlayed, setRecentlyPlayed] = useState<any[]>([]);
+  const [favorites, setFavorites] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [activeCategory, setActiveCategory] = useState('All');
+  const [showEqualizer, setShowEqualizer] = useState(false);
+  const [activePreset, setActivePreset] = useState(0);
+  const [customBands, setCustomBands] = useState([0, 0, 0, 0, 0, 0, 0, 0]);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [showFavorites, setShowFavorites] = useState(false);
+  const [recommendedTracks, setRecommendedTracks] = useState<any[]>([]);
+  
+  // Animations
+  const scrollY = useRef(new Animated.Value(0)).current;
+  const visualizerAnim = useRef(new Animated.Value(0)).current;
 
-type WaveAnim = { value: number };
-type AppStateChangeStatus = 'active' | 'background' | 'inactive' | 'unknown' | 'extension';
+  // Firestore refs
+  const db = getFirestore();
+  const auth = getAuth();
+  const user = auth.currentUser;
 
-const WaveBar = memo(({ anim, color }: { anim: WaveAnim; color: string }) => {
-  const style = useAnimatedStyle(() => ({
-    transform: [{ scaleY: anim.value }]
-  }));
-  return (
-    <Animated.View
-      style={[
-        styles.waveBarLarge,
-        { backgroundColor: color },
-        style
-      ]}
-    />
-  );
-});
-WaveBar.displayName = 'WaveBar';
-
-type PlayerMode = 'video' | 'audio';
-
-interface PlayerState {
-  isPlaying: boolean;
-  position: number;
-  duration: number;
-  isLoading: boolean;
-  isBuffering: boolean;
-}
-
-const MusicPlayer = memo(function MusicPlayer({
-  visible,
-  active,
-  minimized,
-  track,
-  accentColor,
-  onClose,
-  onExpand,
-  onStop,
-}: {
-  visible: boolean;
-  active: boolean;
-  minimized: boolean;
-  track: Media | null;
-  accentColor: string;
-  onClose: () => void;
-  onExpand: () => void;
-  onStop: () => void;
-}) {
-  const insets = useSafeAreaInsets();
-  const videoRef = useRef<any>(null);
-  const soundRef = useRef<any>(null);
-  const router = useRouter();
-  const { getMusicStream, searchMusic } = usePStream();
-  const { currentPlan } = useSubscription();
-
-  const [mode, setMode] = useState<PlayerMode>('video');
-  const [audioFallbackToVideo, setAudioFallbackToVideo] = useState(false);
-  const allowBackground = currentPlan !== 'free';
-  const [playerState, setPlayerState] = useState<PlayerState>({
-    isPlaying: false,
-    position: 0,
-    duration: 0,
-    isLoading: true,
-    isBuffering: false,
-  });
-  const [streamData, setStreamData] = useState<{ uri: string; headers?: Record<string, string> } | null>(null);
-  const [streamError, setStreamError] = useState(false);
-  const [showVideo, setShowVideo] = useState(true);
-  const [repeat, setRepeat] = useState(false);
-  const [shuffle, setShuffle] = useState(false);
-  const [upNextTab, setUpNextTab] = useState<'upnext' | 'related'>('upnext');
-  const [relatedCandidates, setRelatedCandidates] = useState<Media[]>([]);
-
-  // Queue State
-  const [queue, setQueue] = useState<Media[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const activeTrack = queue[currentIndex] || track;
-
-  // Lyrics State
-  const [lyrics, setLyrics] = useState<any[]>([]);
-  const [showLyrics, setShowLyrics] = useState(false);
-  const [lyricsLoading, setLyricsLoading] = useState(false);
-
-  // Reanimated Shared Values
-  const slideAnim = useSharedValue(SCREEN_HEIGHT);
-  const rotateAnim = useSharedValue(0);
-  const upNextSheetRef = useRef<BottomSheet | null>(null);
-  const recommendationSeedRef = useRef<string | number | null>(null);
-  const upNextSnapPoints = useMemo(() => ['16%', '48%', '82%'], []);
-
-  const openUpNextSheet = useCallback(() => {
-    upNextSheetRef.current?.snapToIndex(1);
-  }, []);
-
-  // Fixed number of shared values (5 bars) - explicit hooks to satisfy Rules of Hooks
-  const wave1 = useSharedValue(0.3);
-  const wave2 = useSharedValue(0.3);
-  const wave3 = useSharedValue(0.3);
-  const wave4 = useSharedValue(0.3);
-  const wave5 = useSharedValue(0.3);
-
-  // Create stable array reference
-  const waveAnims = useMemo(() => [wave1, wave2, wave3, wave4, wave5], []);
-
-  // Styles
-  const modalStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: slideAnim.value }]
-  }));
-
-  const vinylStyle = useAnimatedStyle(() => ({
-    transform: [{ rotate: `${rotateAnim.value}deg` }]
-  }));
-
-  const posterUri = useMemo(() => {
-    if (!activeTrack?.poster_path) return null;
-    if (activeTrack.poster_path.startsWith('http')) return activeTrack.poster_path;
-    return `${IMAGE_BASE_URL}${activeTrack.poster_path}`;
-  }, [activeTrack?.poster_path]);
-  const backdropUri = useMemo(() => {
-    if (!activeTrack?.backdrop_path) return posterUri;
-    if (activeTrack.backdrop_path.startsWith('http')) return activeTrack.backdrop_path;
-    return `${IMAGE_BASE_URL}${activeTrack.backdrop_path}`;
-  }, [activeTrack?.backdrop_path, posterUri]);
-  const title = activeTrack?.title || activeTrack?.name || 'Unknown Track';
-  const year = (activeTrack?.release_date || activeTrack?.first_air_date || '').slice(0, 4);
-  const activeArtist = (activeTrack as any)?.artist || (activeTrack as any)?.channelTitle || '';
-  const localUri = (activeTrack as any)?.localUri as string | undefined;
-  const activeVideoId = (activeTrack as any)?.videoId as string | undefined;
-  const localIsAudio = useMemo(() => isAudioUri(localUri), [localUri]);
-  const playbackTarget: PlayerMode = localIsAudio
-    ? 'audio'
-    : (mode === 'audio' && !audioFallbackToVideo ? 'audio' : 'video');
-  const shouldUseVideoPlayer = playbackTarget === 'video';
-  const isPlayingRef = useRef(false);
-  const nowPlayingTsRef = useRef(0);
-
+  // Load persisted data and Firestore history
   useEffect(() => {
-    isPlayingRef.current = playerState.isPlaying;
-  }, [playerState.isPlaying]);
-
-  const pushNowPlayingUpdate = useCallback((
-    overrides?: Partial<{
-      title: string;
-      artist: string;
-      artworkUrl: string;
-      isPlaying: boolean;
-      positionMs: number;
-      durationMs: number;
-    }>,
-    force = false,
-  ) => {
-    const service = (NativeModules as any)?.MusicPlaybackServiceModule;
-    if (!service?.updateNowPlaying || !activeTrack) return;
-    const now = Date.now();
-    if (!force && now - nowPlayingTsRef.current < 1000) return;
-    nowPlayingTsRef.current = now;
-    service.updateNowPlaying({
-      title: overrides?.title ?? title,
-      artist: overrides?.artist ?? (activeArtist || 'MovieFlix Music'),
-      artworkUrl: overrides?.artworkUrl ?? (posterUri || ''),
-      isPlaying: overrides?.isPlaying ?? playerState.isPlaying,
-      positionMs: Math.max(0, Math.floor(overrides?.positionMs ?? playerState.position)),
-      durationMs: Math.max(0, Math.floor(overrides?.durationMs ?? playerState.duration)),
-    });
-  }, [activeArtist, activeTrack, playerState.duration, playerState.isPlaying, playerState.position, posterUri, title]);
-
-  // Animate entrance & Queue Init
-  useEffect(() => {
-    if (visible) {
-      slideAnim.value = withSpring(0, { damping: 15, stiffness: 90 });
-      if (track) {
-        // Reset queue with initial track
-        setQueue([track]);
-        setCurrentIndex(0);
-        setRelatedCandidates([]);
-        recommendationSeedRef.current = null;
-      }
-    } else {
-      slideAnim.value = withTiming(SCREEN_HEIGHT, { duration: 300 });
-      setQueue([]);
-      setCurrentIndex(0);
-      setRelatedCandidates([]);
-      recommendationSeedRef.current = null;
-    }
-  }, [visible, track]);
-
-  useEffect(() => {
-    if (!active) return;
-    void Audio.setIsEnabledAsync(true).catch(() => { });
-    void Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: true,
-      shouldDuckAndroid: true,
-      playThroughEarpieceAndroid: false,
-      interruptionModeAndroid: 2, // INTERRUPTION_MODE_ANDROID_DUCK_OTHERS = 2
-      interruptionModeIOS: 2,   // INTERRUPTION_MODE_IOS_DUCK_OTHERS = 2
-    });
-  }, [active]);
-
-  useEffect(() => {
-    if (mode === 'audio') {
-      setAudioFallbackToVideo(false);
-    }
-  }, [mode, activeTrack?.id]);
-
-  useEffect(() => {
-    if (localIsAudio && mode !== 'audio') {
-      setMode('audio');
-    }
-  }, [localIsAudio, mode]);
-
-  const handleAudioStatusUpdate = useCallback((status: any) => {
-    if (!status.isLoaded) {
-      setPlayerState((s) => ({ ...s, isBuffering: false }));
-      return;
-    }
-
-    setPlayerState((s) => ({
-      ...s,
-      isPlaying: status.isPlaying,
-      position: status.positionMillis,
-      duration: status.durationMillis || 0,
-      isBuffering: status.isBuffering,
-      isLoading: false,
-    }));
-
-    if (status.didJustFinish) {
-      if (repeat) {
-        void soundRef.current?.replayAsync?.();
-      } else {
-        // handleNextTrack called later
-        const next = () => {
-          if (currentIndex < queue.length - 1) {
-            setCurrentIndex(prev => prev + 1);
-          }
-        };
-        next();
-      }
-    }
-  }, [currentIndex, queue.length, repeat]);
-
-  const loadAudioStream = useCallback(async (stream: { uri: string; headers?: Record<string, string> }) => {
-    if (!stream?.uri) return;
-    try {
-      if (soundRef.current) {
-        await soundRef.current.unloadAsync();
-      }
-      const sound = new Audio.Sound();
-      sound.setOnPlaybackStatusUpdate(handleAudioStatusUpdate);
-      await sound.loadAsync(
-        { uri: stream.uri, headers: stream.headers },
-        { shouldPlay: true },
-        false
-      );
-      soundRef.current = sound;
-    } catch (err) {
-      console.warn('[MusicPlayer] Audio load failed:', err);
-      if (mode === 'audio') {
-        setAudioFallbackToVideo(true);
-        setPlayerState((s) => ({ ...s, isLoading: false, isBuffering: false, isPlaying: true }));
-        return;
-      }
-      setStreamError(true);
-      setPlayerState((s) => ({ ...s, isLoading: false }));
-    }
-  }, [handleAudioStatusUpdate, mode]);
-
-  useEffect(() => {
-    if (mode === 'audio') {
-      setShowVideo(false);
-      if (!audioFallbackToVideo) {
-        void videoRef.current?.pauseAsync?.();
-        if (streamData?.uri && !soundRef.current) {
-          void loadAudioStream({ uri: streamData.uri, headers: streamData.headers });
-        }
-      }
-    } else {
-      if (soundRef.current) {
-        void soundRef.current.unloadAsync?.();
-        soundRef.current = null;
-      }
-      if (streamData?.uri && videoRef.current) {
-        void videoRef.current.playAsync?.();
-      }
-    }
-  }, [audioFallbackToVideo, loadAudioStream, mode, streamData]);
-
-  useEffect(() => {
-    if (mode === 'video') {
-      setShowVideo(true);
-    }
-  }, [mode]);
-
-  useEffect(() => {
-    setRelatedCandidates([]);
-  }, [activeTrack?.id, currentIndex]);
-
-  // Vinyl rotation
-  useEffect(() => {
-    if (playerState.isPlaying && mode === 'audio') {
-      rotateAnim.value = withRepeat(
-        withTiming(360, { duration: 3000, easing: Easing.linear }),
-        -1,
-        false
-      );
-    } else {
-      cancelAnimation(rotateAnim);
-    }
-  }, [playerState.isPlaying, mode]);
-
-  // Waveform animation
-  useEffect(() => {
-    if (playerState.isPlaying) {
-      waveAnims.forEach((anim, i) => {
-        anim.value = withRepeat(
-          withSequence(
-            withTiming(0.8 + Math.random() * 0.2, { duration: 300 + i * 100 }),
-            withTiming(0.3 + Math.random() * 0.2, { duration: 300 + i * 100 })
-          ),
-          -1,
-          true
-        );
-      });
-    } else {
-      waveAnims.forEach(anim => cancelAnimation(anim));
-    }
-  }, [playerState.isPlaying]);
-
-  // Handle Play Next / Prev
-  const handleNextTrack = useCallback(() => {
-    if (currentIndex < queue.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-    } else {
-      // Loop or stop? For now stop or replay if repeat is on
-      if (repeat) {
-        if (mode === 'audio') {
-          void soundRef.current?.replayAsync?.();
-        } else {
-          void videoRef.current?.replayAsync?.();
-        }
-      }
-    }
-  }, [currentIndex, mode, queue.length, repeat]);
-
-  const handlePrevTrack = useCallback(() => {
-    if (currentIndex > 0) {
-      setCurrentIndex(prev => prev - 1);
-    } else {
-      if (mode === 'audio') {
-        void soundRef.current?.replayAsync?.();
-      } else {
-        void videoRef.current?.replayAsync?.();
-      }
-    }
-  }, [currentIndex, mode]);
-
-  const handleStartPlaybackService = useCallback(() => {
-    const service = (NativeModules as any)?.MusicPlaybackServiceModule;
-    if (!service) return;
-    if (service.startService) {
-      service.startService(title, activeArtist || 'Now Playing');
-    }
-    if (service.updateNowPlaying) {
-      service.updateNowPlaying({
-        title,
-        artist: activeArtist || 'MovieFlix Music',
-        artworkUrl: posterUri || '',
-        isPlaying: playerState.isPlaying,
-        positionMs: Math.max(0, Math.floor(playerState.position)),
-        durationMs: Math.max(0, Math.floor(playerState.duration)),
-      });
-    }
-  }, [activeArtist, playerState.duration, playerState.isPlaying, playerState.position, posterUri, title]);
-
-  const handleStopPlaybackService = useCallback(() => {
-    const service = (NativeModules as any)?.MusicPlaybackServiceModule;
-    if (!service?.stopService) return;
-    service.stopService();
-  }, []);
-
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (nextState: AppStateChangeStatus) => {
-      if (nextState === 'background' || nextState === 'inactive') {
-        if (!isPlayingRef.current) return;
-
-        // Video can't play in background, switch to audio
-        if (mode === 'video' && streamData?.uri) {
-          setMode('audio');
-        }
-
-        if (!allowBackground) {
-          setTimeout(() => {
-            if (soundRef.current) {
-              void soundRef.current.pauseAsync?.();
-            }
-            if (videoRef.current) {
-              void videoRef.current.pauseAsync?.();
-            }
-            setPlayerState((s) => ({
-              ...s,
-              isPlaying: false,
-            }));
-            handleStopPlaybackService();
-          }, 300);
-        }
-      }
-    });
-    return () => sub.remove();
-  }, [allowBackground, handleStopPlaybackService, mode, streamData?.uri]);
-
-  const normalizeRecommendation = useCallback((item: any): Media | null => {
-    const videoId = item?.videoId || item?.id;
-    if (!videoId) return null;
-    const artist =
-      item?.artist ||
-      item?.uploaderName ||
-      item?.channelTitle ||
-      (Array.isArray(item?.artists) ? item.artists[0]?.name : undefined);
-    const poster =
-      item?.thumbnail ||
-      item?.thumb ||
-      item?.thumbnailUrl ||
-      item?.thumbnails?.[0]?.url ||
-      item?.thumbnails?.[0]?.src ||
-      '';
-    return {
-      id: videoId,
-      videoId,
-      media_type: 'music',
-      title: item?.title || 'Unknown Track',
-      poster_path: poster,
-      artist: artist || undefined,
-    } as Media;
-  }, []);
-
-  const applyRecommendations = useCallback(async (rawRelated?: any[]) => {
-    if (!activeTrack) return;
-    const seedKey = (activeTrack as any)?.videoId || activeTrack?.id;
-    if (!seedKey) return;
-
-    if (recommendationSeedRef.current === seedKey && relatedCandidates.length > 0) return;
-    recommendationSeedRef.current = seedKey;
-
-    let pool = Array.isArray(rawRelated) ? rawRelated : [];
-    if (pool.length < 20) {
+    const loadData = async () => {
       try {
-        const extra = await searchMusic(`${title} ${activeArtist || ''}`.trim(), {
-          artist: activeArtist || undefined,
+        const [favData, recentData] = await Promise.all([
+          AsyncStorage.getItem(FAVORITES_KEY),
+          AsyncStorage.getItem(RECENT_KEY),
+        ]);
+        if (favData) setFavorites(JSON.parse(favData));
+        if (recentData) setRecentlyPlayed(JSON.parse(recentData));
+      } catch (e) {
+        console.warn('Failed to load persisted music data:', e);
+      }
+    };
+    loadData();
+
+    // Subscribe to Firestore music history for curated recommendations
+    if (user) {
+      const historyRef = doc(collection(db, 'users'), user.uid);
+      const unsubscribe = onSnapshot(historyRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          const musicHistory = data.musicHistory || [];
+          // Use last 10 played tracks for recommendations
+          if (musicHistory.length > 0) {
+            const recentArtists = musicHistory.slice(0, 5).map((h: any) => h.artist).filter(Boolean);
+            // Fetch recommendations based on recent artists
+            if (recentArtists.length > 0) {
+              fetchRecommendations(recentArtists);
+            }
+          }
+        }
+      });
+      return () => unsubscribe();
+    }
+  }, [user]);
+
+  // Fetch recommendations based on listening history
+  const fetchRecommendations = async (artists: string[]) => {
+    try {
+      const queries = artists.slice(0, 3).map(a => searchMusic(`${a} similar`));
+      const results = await Promise.all(queries);
+      const combined = results.flat().slice(0, 10);
+      setRecommendedTracks(combined);
+    } catch (e) {
+      console.warn('Failed to fetch recommendations:', e);
+    }
+  };
+
+  // Animate visualizer when playing
+  useEffect(() => {
+    if (isPlayerPlaying) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(visualizerAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+          Animated.timing(visualizerAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      visualizerAnim.setValue(0);
+    }
+  }, [isPlayerPlaying]);
+
+  const fetchMusic = useCallback(async (query: string = 'trending music 2026') => {
+    setLoading(true);
+    try {
+      const results = await searchMusic(query);
+      setSongs(results);
+      if (recentlyPlayed.length === 0 && results.length > 4) {
+          setRecentlyPlayed(results.slice(4, 10));
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [searchMusic, recentlyPlayed]);
+
+  useEffect(() => {
+    fetchMusic();
+  }, [fetchMusic]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchMusic();
+  };
+
+  const handleSearch = (text: string) => {
+    setSearchQuery(text);
+    if (text.length > 2) fetchMusic(text);
+    else if (text.length === 0) fetchMusic();
+  };
+
+  const handlePlayTrack = async (track: any) => {
+    playTrack(track, songs, accentColor);
+    const newRecent = [track, ...recentlyPlayed.filter(s => String(s.videoId || s.id) !== String(track.videoId || track.id))].slice(0, 20);
+    setRecentlyPlayed(newRecent);
+    AsyncStorage.setItem(RECENT_KEY, JSON.stringify(newRecent)).catch(() => {});
+
+    // Save to Firestore for curated algorithm
+    if (user) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        const historyEntry = {
+          id: track.videoId || track.id,
+          title: track.title,
+          artist: track.artist || track.uploaderName || 'Unknown',
+          thumbnail: track.thumbnail,
+          playedAt: Timestamp.now(),
+          duration: track.duration || 0,
+        };
+        
+        // Add to music history array (keep last 100)
+        await updateDoc(userRef, {
+          musicHistory: arrayUnion(historyEntry),
+        }).catch(async () => {
+          // If doc doesn't exist, create it
+          await setDoc(userRef, {
+            musicHistory: [historyEntry],
+            musicFavorites: [],
+          }, { merge: true });
         });
-        if (Array.isArray(extra)) {
-          pool = [...pool, ...extra];
-        }
-      } catch (err) {
-        console.warn('[MusicPlayer] Fallback recommendations failed:', err);
-      }
-    }
 
-    const baseQueue = queue.length ? queue : [activeTrack];
-    const processed = RecommendationAlgo.processQueue(baseQueue, pool, activeTrack);
-    const normalized = processed.map(normalizeRecommendation).filter(Boolean) as Media[];
-    const seen = new Set<string | number>();
-    const unique: Media[] = [];
-    normalized.forEach((item) => {
-      const id = (item as any).videoId || item.id;
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      unique.push(item);
-    });
-
-    const nextUp = unique.slice(0, 10);
-    const related = unique.slice(10, 20);
-
-    setRelatedCandidates(related.length ? related : unique.slice(0, 10));
-
-    setQueue((prev) => {
-      if (!prev.length) return [activeTrack, ...nextUp];
-      const first = prev[0] as any;
-      const firstKey = first?.videoId || first?.id;
-      if (prev.length === 1 && firstKey === seedKey) {
-        return [activeTrack, ...nextUp];
-      }
-      return prev;
-    });
-  }, [activeArtist, activeTrack, normalizeRecommendation, queue, relatedCandidates.length, searchMusic, title]);
-
-  const handleDownload = useCallback(async () => {
-    if (!activeTrack) return;
-    if (currentPlan === 'free') {
-      Alert.alert(
-        'Upgrade required',
-        'Downloads are available on Plus and Premium plans.',
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Upgrade', onPress: () => router.push('/premium?source=music-download') },
-        ],
-      );
-      return;
-    }
-    if (localUri) {
-      Alert.alert('Already downloaded', 'This song is already saved for offline playback.');
-      return;
-    }
-    if (!streamData?.uri) {
-      Alert.alert('Download unavailable', 'The audio stream is not ready yet.');
-      return;
-    }
-    try {
-      await enqueueDownload({
-        title,
-        mediaType: 'music',
-        subtitle: activeArtist || null,
-        artist: activeArtist || null,
-        videoId: activeVideoId,
-        posterPath: activeTrack.poster_path ?? null,
-        backdropPath: activeTrack.backdrop_path ?? null,
-        overview: activeTrack.overview ?? null,
-        runtimeMinutes: playerState.duration ? Math.round(playerState.duration / 60000) : undefined,
-        releaseDate: activeTrack.release_date ?? activeTrack.first_air_date ?? undefined,
-        downloadType: 'file',
-        sourceUrl: streamData.uri,
-        headers: streamData.headers,
-        qualityLabel: mode === 'audio' ? 'Audio' : 'Video',
-      });
-      Alert.alert('Added to downloads', `${title}${activeArtist ? ` • ${activeArtist}` : ''}`, [
-        { text: 'OK' },
-        { text: 'Go to downloads', onPress: () => router.push('/downloads') },
-      ]);
-    } catch (err: any) {
-      Alert.alert('Download failed', err?.message || 'Unable to queue this download right now.');
-    }
-  }, [activeArtist, activeTrack, activeVideoId, currentPlan, localUri, mode, playerState.duration, router, streamData, title]);
-
-  // Cleanup on close
-  useEffect(() => {
-    if (!active) {
-      videoRef.current?.pauseAsync();
-      soundRef.current?.unloadAsync();
-      handleStopPlaybackService();
-      setPlayerState({
-        isPlaying: false,
-        position: 0,
-        duration: 0,
-        isLoading: true,
-        isBuffering: false,
-      });
-    }
-  }, [active, handleStopPlaybackService]);
-
-  useEffect(() => {
-    if (!allowBackground) {
-      handleStopPlaybackService();
-      return;
-    }
-    if (active && playerState.isPlaying) {
-      handleStartPlaybackService();
-    }
-    if (!active || !playerState.isPlaying) {
-      handleStopPlaybackService();
-    }
-  }, [active, allowBackground, handleStartPlaybackService, handleStopPlaybackService, playerState.isPlaying]);
-
-  useEffect(() => {
-    if (!active) {
-      handleStopPlaybackService();
-      return;
-    }
-    handleStartPlaybackService();
-    pushNowPlayingUpdate(undefined, true);
-  }, [active, activeTrack?.id, handleStartPlaybackService, handleStopPlaybackService, pushNowPlayingUpdate]);
-
-  useEffect(() => {
-    if (!active || !playerState.isPlaying) return;
-    const interval = setInterval(() => {
-      pushNowPlayingUpdate();
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [active, playerState.isPlaying, pushNowPlayingUpdate]);
-
-  const handlePlaybackStatusUpdate = useCallback((status: any) => {
-    if (!status.isLoaded) {
-      setPlayerState((s) => ({ ...s, isBuffering: false }));
-      return;
-    }
-
-    setPlayerState((s) => ({
-      ...s,
-      isPlaying: status.isPlaying,
-      position: status.positionMillis,
-      duration: status.durationMillis || 0,
-      isBuffering: status.isBuffering,
-      isLoading: false,
-    }));
-
-    if (status.didJustFinish) {
-      if (repeat) {
-        videoRef.current?.replayAsync();
-      } else {
-        handleNextTrack();
-      }
-    }
-  }, [repeat, handleNextTrack]);
-
-  // Fetch video/trailer
-  useEffect(() => {
-    if (!activeTrack || !visible) return;
-
-    let cancelled = false;
-    setPlayerState((s) => ({ ...s, isLoading: true }));
-    setStreamData(null);
-    setStreamError(false);
-
-    // Reset Lyrics
-    setLyrics([]);
-    setLyricsLoading(true);
-    setShowLyrics(false);
-
-    // Fetch Lyrics
-    LyricsResolver.getLyrics(activeTrack.title || activeTrack.name || '', activeArtist || '')
-      .then(res => {
-        console.log('[MusicPlayer] Lyrics response:', res ? 'Found' : 'Null', res?.lines?.length);
-        if (!cancelled && res?.lines) {
-          setLyrics(res.lines);
-        }
-        setLyricsLoading(false);
-      })
-      .catch((err) => {
-        console.warn('[MusicPlayer] Lyrics fetch error:', err);
-        setLyricsLoading(false);
-      });
-
-    (async () => {
-      try {
-        console.log(`[MusicPlayer] Fetching ${playbackTarget} stream for track:`, activeTrack.title);
-
-        const handleResolvedStream = (stream: any, fallbackRelated?: any[]) => {
-          setStreamData(stream);
-          if (playbackTarget === 'audio') {
-            setPlayerState((s) => ({ ...s, isLoading: true, isBuffering: false }));
-            void loadAudioStream({ uri: stream.uri, headers: stream.headers });
-          } else {
-            if (mode === 'audio') setShowVideo(false);
-            setPlayerState((s) => ({ ...s, isLoading: false, isPlaying: true }));
+        // Trim history to last 100 entries (run periodically)
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const history = userSnap.data()?.musicHistory || [];
+          if (history.length > 100) {
+            const trimmed = history.slice(-100);
+            await updateDoc(userRef, { musicHistory: trimmed });
           }
-          void applyRecommendations(stream?.related?.length ? stream.related : fallbackRelated);
-        };
-
-        if (localUri) {
-          handleResolvedStream({ uri: localUri });
-          return;
-        }
-
-        // Improve Lyrics search with artist if available from track data
-        // We do this concurrently with stream fetching but inside the effect for simplicity
-        const artistName = (activeTrack as any).artist || (activeTrack as any).channelTitle || '';
-        if (artistName) {
-          LyricsResolver.getLyrics(activeTrack.title || activeTrack.name || '', artistName)
-            .then(res => {
-              if (!cancelled && res?.lines) {
-                setLyrics(res.lines);
-              }
-            });
-        }
-
-        // [NEW] Check if it's a song Result (has videoId and media_type='music' or similar)
-        const songItem = activeTrack as any;
-        if (songItem.videoId || songItem.media_type === 'music') {
-          const vidId = songItem.videoId || (songItem.id && String(songItem.id));
-          if (vidId) {
-            const stream: any = await getMusicStream(vidId, mode, false, {
-              artist: activeArtist || undefined,
-            });
-            if (!cancelled && stream?.uri && stream.uri !== vidId) {
-              console.log(`[MusicPlayer] Resolved direct YT ${mode} stream:`, stream.uri);
-              handleResolvedStream(stream);
-              return;
-            }
-          }
-        }
-
-        // Try to get TMDB details if we have a real numeric ID
-        const isNumericId = typeof activeTrack.id === 'number' && activeTrack.id > 100;
-        if (isNumericId && songItem.media_type !== 'music') {
-          const detailsRes = await fetch(
-            `${API_BASE_URL}/movie/${activeTrack.id}?api_key=${API_KEY}&append_to_response=external_ids,videos`
-          );
-          const details = await detailsRes.json();
-
-          if (cancelled) return;
-
-          // Check for YouTube trailer in TMDB response
-          const videos = details.videos?.results || [];
-          const trailer = videos.find((v: any) =>
-            v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser')
-          );
-
-          if (trailer?.key) {
-            const stream: any = await getMusicStream(trailer.key, mode, false, {
-              artist: activeArtist || undefined,
-            });
-            if (stream?.uri && stream.uri !== trailer.key && !cancelled) {
-              console.log(`[MusicPlayer] Resolved TMDB trailer ${mode} stream:`, stream.uri);
-              handleResolvedStream(stream);
-              return;
-            }
-          }
-        }
-
-        // Final fallback - try searching for the soundtrack on YT Music
-        // Try multiple results since some videos may be region-blocked
-        try {
-          const searchResults = await searchMusic(`${title} Soundtrack`, {
-            artist: activeArtist || undefined,
-          });
-          if (searchResults && searchResults.length > 0 && !cancelled) {
-            // Try up to 5 results
-            for (let i = 0; i < Math.min(5, searchResults.length); i++) {
-              if (cancelled) break;
-              try {
-                const result = searchResults[i];
-                console.log(`[MusicPlayer] Trying fallback result ${i + 1}:`, result.title || result.videoId);
-                const stream: any = await getMusicStream(result.videoId, mode, false, {
-                  artist: activeArtist || undefined,
-                });
-                if (stream?.uri && !cancelled) {
-                  console.log(`[MusicPlayer] Resolved fallback search ${mode} stream:`, stream.uri);
-                  handleResolvedStream(stream, searchResults);
-
-                  setQueue((prev) => {
-                    const next = [...prev];
-                    const updated: Media = {
-                      ...(next[currentIndex] || {}),
-                      media_type: 'music',
-                      title: result.title || next[currentIndex]?.title,
-                      poster_path: result.thumbnail || next[currentIndex]?.poster_path,
-                      artist: result.artist || (Array.isArray((result as any).artists) ? (result as any).artists[0]?.name : undefined),
-                      videoId: result.videoId,
-                    } as Media;
-                    if (next[currentIndex]) {
-                      next[currentIndex] = updated;
-                      return next;
-                    }
-                    return [updated];
-                  });
-
-                  // [NEW] Attempt to fetch lyrics for the actual resolved song
-                  const resolvedArtist = result.artist || (Array.isArray((result as any).artists) ? (result as any).artists[0]?.name : '') || '';
-                  if (resolvedArtist) {
-                    LyricsResolver.getLyrics(result.title, resolvedArtist)
-                      .then(lyr => {
-                        if (lyr?.lines && !cancelled) setLyrics(lyr.lines);
-                      })
-                      .catch(() => { });
-                  }
-
-                  return;
-                }
-              } catch (streamErr) {
-                console.warn(`[MusicPlayer] Fallback ${i + 1} failed:`, streamErr);
-              }
-            }
-          }
-        } catch (searchErr) {
-          console.warn('[MusicPlayer] YT Music fallback failed:', searchErr);
-        }
-
-        // Fallback - no video available
-        if (!cancelled) {
-          console.warn('[MusicPlayer] All stream resolution attempts failed');
-          setStreamError(true);
-          setPlayerState((s) => ({ ...s, isLoading: false }));
         }
       } catch (e) {
-        if (!cancelled) {
-          setPlayerState((s) => ({ ...s, isLoading: false }));
-        }
+        console.warn('Failed to save music history to Firestore:', e);
       }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeArtist, activeTrack, applyRecommendations, currentIndex, getMusicStream, loadAudioStream, localUri, mode, playbackTarget, searchMusic, title, visible]);
-
-  const handlePlayRequest = useCallback(async () => {
-    if (mode === 'audio') {
-      await soundRef.current?.playAsync?.();
-    } else {
-      await videoRef.current?.playAsync?.();
     }
-    pushNowPlayingUpdate({ isPlaying: true }, true);
-  }, [mode, pushNowPlayingUpdate]);
+  };
 
-  const handlePauseRequest = useCallback(async () => {
-    if (mode === 'audio') {
-      await soundRef.current?.pauseAsync?.();
-    } else {
-      await videoRef.current?.pauseAsync?.();
-    }
-    pushNowPlayingUpdate({ isPlaying: false }, true);
-  }, [mode, pushNowPlayingUpdate]);
-
-  const togglePlayPause = useCallback(async () => {
-    if (playerState.isPlaying) {
-      await handlePauseRequest();
-    } else {
-      await handlePlayRequest();
-    }
-  }, [handlePauseRequest, handlePlayRequest, playerState.isPlaying]);
-
-  useEffect(() => {
-    const module = (NativeModules as any)?.MusicPlaybackServiceModule;
-    if (!module) return;
-    const emitter = new NativeEventEmitter(module);
-    const sub = emitter.addListener('MusicPlaybackAction', (action: string) => {
-      const normalized = String(action || '').toLowerCase();
-      switch (normalized) {
-        case 'play':
-          void handlePlayRequest();
-          break;
-        case 'pause':
-        case 'stop':
-          void handlePauseRequest();
-          break;
-        case 'playpause':
-        case 'toggle':
-          void togglePlayPause();
-          break;
-        case 'next':
-        case 'skiptonext':
-        case 'forward':
-          handleNextTrack();
-          break;
-        case 'prev':
-        case 'previous':
-        case 'skiptoprevious':
-        case 'back':
-          handlePrevTrack();
-          break;
-        default:
-          break;
-      }
-    });
-    return () => sub.remove();
-  }, [handleNextTrack, handlePauseRequest, handlePlayRequest, handlePrevTrack, togglePlayPause]);
-
-  const seekTo = useCallback(async (position: number) => {
-    if (mode === 'audio') {
-      const sound = soundRef.current;
-      if (sound) {
-        await sound.setPositionAsync(position);
-      }
-      return;
-    }
-    if (videoRef.current) {
-      await videoRef.current.setPositionAsync(position);
-    }
-  }, [mode]);
-
-  const skipForward = useCallback(async () => {
-    const newPos = Math.min(playerState.position + 10000, playerState.duration);
-    await seekTo(newPos);
-  }, [playerState.position, playerState.duration, seekTo]);
-
-  const skipBackward = useCallback(async () => {
-    const newPos = Math.max(playerState.position - 10000, 0);
-    await seekTo(newPos);
-  }, [playerState.position, seekTo]);
-
-  const upNextItems = useMemo(() => {
-    return queue.filter((_, index) => index !== currentIndex).slice(0, 10);
-  }, [queue, currentIndex]);
-
-  const relatedItems = useMemo(() => {
-    if (relatedCandidates.length > 0) return relatedCandidates.slice(0, 10);
-    return upNextItems;
-  }, [relatedCandidates, upNextItems]);
-
-
-
-  if (!track) return null;
-
-  return (
-    <>
-      <Modal visible={visible} animationType="none" transparent statusBarTranslucent>
-        <Animated.View style={[styles.playerModal, modalStyle]}>
-          <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
-
-        {/* Background */}
-        {backdropUri && (
-          <ImageBackground source={{ uri: backdropUri }} style={styles.playerBg} blurRadius={50}>
-            <LinearGradient
-              colors={['rgba(5,6,15,0.7)', 'rgba(5,6,15,0.95)', 'rgba(5,6,15,1)']}
-              style={StyleSheet.absoluteFill}
-            />
-          </ImageBackground>
-        )}
-
-        {/* Accent glow */}
-        <LinearGradient
-          pointerEvents="none"
-          colors={[`${accentColor}44`, 'transparent']}
-          style={styles.playerGlow}
-        />
-
-        {/* Header */}
-        <View style={[styles.playerHeader, { paddingTop: insets.top + 10 }]}>
-          <TouchableOpacity style={styles.playerHeaderBtn} onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="chevron-down" size={28} color="#fff" />
-          </TouchableOpacity>
-
-          <View style={styles.playerHeaderCenter}>
-            <Text style={styles.playerHeaderTitle}>Now Playing</Text>
-            <Text style={styles.playerHeaderSubtitle}>Movie Soundtrack</Text>
-          </View>
-
-          <TouchableOpacity style={styles.playerHeaderBtn} onPress={openUpNextSheet}>
-            <Ionicons name="ellipsis-horizontal" size={24} color="#fff" />
-          </TouchableOpacity>
-        </View>
-
-        {/* Mode Selector Tabs */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[styles.tab, mode === 'video' && { backgroundColor: 'rgba(255,255,255,0.1)' }]}
-            onPress={() => setMode('video')}
-          >
-            <Ionicons name="videocam" size={16} color={mode === 'video' ? '#fff' : 'rgba(255,255,255,0.4)'} />
-            <Text style={[styles.tabText, mode === 'video' && styles.tabTextActive]}>Video</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, mode === 'audio' && { backgroundColor: 'rgba(255,255,255,0.1)' }]}
-            onPress={() => setMode('audio')}
-          >
-            <Ionicons name="musical-notes" size={16} color={mode === 'audio' ? '#fff' : 'rgba(255,255,255,0.4)'} />
-            <Text style={[styles.tabText, mode === 'audio' && styles.tabTextActive]}>Audio</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Main content */}
-        <View style={styles.playerContent}>
-          {/* Player Layer (Video mode) */}
-          {streamData?.uri && shouldUseVideoPlayer ? (
-            <View style={(mode === 'video' && showVideo) ? styles.videoContainer : { height: 0, width: 0, overflow: 'hidden', position: 'absolute' }}>
-              <Video
-                ref={videoRef}
-                source={{
-                  uri: streamData.uri,
-                  headers: streamData.headers
-                }}
-                style={styles.video}
-                resizeMode={ResizeMode.CONTAIN}
-                shouldPlay={playerState.isPlaying}
-                onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-                onError={(err: any) => {
-                  console.error('[MusicPlayer] Stream error:', err);
-                  if (!streamError) setStreamError(true);
-                  setPlayerState(s => ({ ...s, isLoading: false }));
-                }}
-              />
-
-              {(mode === 'video' && showVideo) && (
-                <TouchableOpacity
-                  style={styles.videoToggle}
-                  onPress={() => setShowVideo(false)}
-                >
-                  <Ionicons name="musical-notes" size={20} color="#fff" />
-                </TouchableOpacity>
-              )}
-            </View>
-          ) : (
-            (streamError || (!playerState.isLoading && !streamData)) && (
-              <View style={[styles.videoContainer, styles.errorContainer]}>
-                <Ionicons name="cloud-offline-outline" size={48} color="rgba(255,255,255,0.4)" />
-                <Text style={styles.errorText}>Stream unavailable</Text>
-                <Text style={[styles.errorText, { fontSize: 12, marginTop: 4 }]}>
-                  Track restricted or unavailable
-                </Text>
-              </View>
-            )
-          )}
-
-          {/* Album Art Layer (Audio mode or hidden video) */}
-          {(!(mode === 'video' && showVideo)) && (
-            <View style={styles.albumContainer}>
-              {Platform.OS === 'android' ? (
-                <NativeVinylView
-                  style={styles.vinylDisc}
-                  accentColor={accentColor}
-                  isPlaying={playerState.isPlaying}
-                  imageUrl={posterUri ?? undefined}
-                />
-              ) : (
-                <Animated.View style={[styles.vinylDisc, vinylStyle]}>
-                  <LinearGradient
-                    colors={['#1a1a1a', '#0a0a0a', '#1a1a1a']}
-                    style={styles.vinylGradient}
-                  >
-                    {posterUri && (
-                      <ExpoImage source={{ uri: posterUri }} style={styles.vinylCenter} contentFit="cover" />
-                    )}
-                    <View style={styles.vinylRing} />
-                    <View style={styles.vinylRing2} />
-                  </LinearGradient>
-                </Animated.View>
-              )}
-
-              <View style={styles.albumArtWrapper}>
-                {posterUri ? (
-                  <ExpoImage source={{ uri: posterUri }} style={styles.albumArt} contentFit="cover" />
-                ) : (
-                  <View style={[styles.albumArt, styles.albumPlaceholder]}>
-                    <Ionicons name="musical-notes" size={60} color="rgba(255,255,255,0.3)" />
-                  </View>
-                )}
-                <LinearGradient
-                  colors={['transparent', 'rgba(0,0,0,0.3)']}
-                  style={styles.albumOverlay}
-                />
-              </View>
-
-            </View>
-          )}
-
-          {/* Lyrics Overlay */}
-          {showLyrics && (
-            <LyricsView
-              lyrics={lyrics}
-              currentTime={playerState.position / 1000}
-              onClose={() => setShowLyrics(false)}
-              isLoading={lyricsLoading}
-            />
-          )}
-
-          {/* Track info */}
-          <View style={styles.trackInfo}>
-            <Text style={styles.trackTitle} numberOfLines={2}>{title}</Text>
-            <Text style={styles.trackArtist}>{year ? `${year} • ` : ''}Original Soundtrack</Text>
-          </View>
-
-
-          {/* Waveform visualization */}
-          <View style={styles.waveformContainer}>
-            {Platform.OS === 'android' ? (
-              <NativeWaveformView
-                style={styles.waveformNative}
-                accentColor={accentColor}
-                isPlaying={playerState.isPlaying}
-              />
-            ) : (
-              <>
-                {waveAnims.map((anim, i) => (
-                  <WaveBar key={i} anim={anim} color={accentColor} />
-                ))}
-                {/* Mirror bars */}
-                {waveAnims.map((anim, i) => (
-                  <WaveBar key={`r-${i}`} anim={anim} color={accentColor} />
-                ))}
-              </>
-            )}
-          </View>
-
-          {/* Progress bar */}
-          <View style={styles.progressContainer}>
-            {Platform.OS === 'android' ? (
-              <NativePlaybackControlsView
-                style={styles.nativePlaybackControls}
-                durationMs={playerState.duration || 1}
-                positionMs={playerState.position}
-                accentColor={accentColor}
-                onSeekComplete={(event: { nativeEvent: { positionMs: number } }) =>
-                  seekTo(event.nativeEvent.positionMs)
-                }
-              />
-            ) : (
-              <>
-                <Slider
-                  style={styles.slider}
-                  minimumValue={0}
-                  maximumValue={playerState.duration || 1}
-                  value={playerState.position}
-                  onSlidingComplete={seekTo}
-                  minimumTrackTintColor={accentColor}
-                  maximumTrackTintColor="rgba(255,255,255,0.2)"
-                  thumbTintColor={accentColor}
-                />
-                <View style={styles.timeRow}>
-                  <Text style={styles.timeText}>{formatTime(playerState.position)}</Text>
-                  <Text style={styles.timeText}>{formatTime(playerState.duration)}</Text>
-                </View>
-              </>
-            )}
-          </View>
-
-          {/* Controls */}
-          <View style={styles.controlsRow}>
-            <TouchableOpacity
-              style={[styles.controlBtn, shuffle && { backgroundColor: `${accentColor}33` }]}
-              onPress={() => setShuffle(!shuffle)}
-            >
-              <Ionicons name="shuffle" size={22} color={shuffle ? accentColor : 'rgba(255,255,255,0.6)'} />
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.controlBtn} onPress={handlePrevTrack}>
-              <Ionicons name="play-skip-back" size={28} color="#fff" />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.playPauseBtn, { backgroundColor: accentColor }]}
-              onPress={togglePlayPause}
-            >
-              {playerState.isLoading || playerState.isBuffering ? (
-                <MaterialCommunityIcons name="loading" size={32} color="#fff" />
-              ) : (
-                <Ionicons name={playerState.isPlaying ? 'pause' : 'play'} size={32} color="#fff" />
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.controlBtn} onPress={handleNextTrack}>
-              <Ionicons name="play-skip-forward" size={28} color="#fff" />
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.controlBtn, repeat && { backgroundColor: `${accentColor}33` }]}
-              onPress={() => setRepeat(!repeat)}
-            >
-              <Ionicons name="repeat" size={22} color={repeat ? accentColor : 'rgba(255,255,255,0.6)'} />
-            </TouchableOpacity>
-          </View>
-
-        </View>
-
-        <BottomSheet
-          ref={upNextSheetRef}
-          index={-1}
-          snapPoints={upNextSnapPoints}
-          enablePanDownToClose
-          backdropComponent={(props) => (
-            <BottomSheetBackdrop
-              {...props}
-              appearsOnIndex={0}
-              disappearsOnIndex={-1}
-              opacity={0.45}
-            />
-          )}
-          backgroundStyle={styles.upNextSheetBg}
-          handleIndicatorStyle={styles.upNextHandle}
-        >
-          <View style={[styles.bottomActions, styles.sheetActions, { paddingBottom: insets.bottom + 10 }]}>
-            <TouchableOpacity style={styles.bottomAction}>
-              <Ionicons name="heart-outline" size={24} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.bottomAction}>
-              <Ionicons name="share-outline" size={24} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.bottomAction} onPress={handleDownload}>
-              <Ionicons name="cloud-download-outline" size={24} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.bottomAction} onPress={() => setUpNextTab('upnext')}>
-              <Ionicons name="list" size={24} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.bottomAction}
-              onPress={() => setShowLyrics(!showLyrics)}
-            >
-              <Ionicons name="mic" size={24} color={showLyrics ? accentColor : "rgba(255,255,255,0.7)"} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.bottomAction}>
-              <MaterialCommunityIcons name="cast" size={24} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.upNextHeader}>
-            <Text style={styles.upNextTitle}>Up Next</Text>
-            <View style={styles.upNextTabs}>
-              <TouchableOpacity
-                style={[styles.upNextTab, upNextTab === 'upnext' && { backgroundColor: `${accentColor}22` }]}
-                onPress={() => setUpNextTab('upnext')}
-              >
-                <Text style={[styles.upNextTabText, upNextTab === 'upnext' && styles.upNextTabTextActive]}>Up Next</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.upNextTab, upNextTab === 'related' && { backgroundColor: `${accentColor}22` }]}
-                onPress={() => setUpNextTab('related')}
-              >
-                <Text style={[styles.upNextTabText, upNextTab === 'related' && styles.upNextTabTextActive]}>Related</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-          <BottomSheetScrollView
-            contentContainerStyle={[styles.upNextList, { paddingBottom: insets.bottom + 30 }]}
-            showsVerticalScrollIndicator={false}
-          >
-            {(upNextTab === 'upnext' ? upNextItems : relatedItems).map((item, index) => (
-              <SongRow
-                key={`${item.id}-${index}`}
-                item={item}
-                index={index}
-                accentColor={accentColor}
-                onPress={() => {
-                  const targetId = (item as any).videoId || item.id;
-                  const nextIndex = queue.findIndex((q) => (q as any).videoId === targetId || q.id === targetId);
-                  if (nextIndex >= 0) {
-                    setCurrentIndex(nextIndex);
-                  } else {
-                    setQueue((prev) => {
-                      const next = [...prev, item];
-                      setCurrentIndex(next.length - 1);
-                      return next;
-                    });
-                  }
-                }}
-              />
-            ))}
-            {upNextItems.length === 0 && (
-              <Text style={styles.upNextEmpty}>Your queue will build as you play.</Text>
-            )}
-          </BottomSheetScrollView>
-        </BottomSheet>
-        </Animated.View>
-      </Modal>
-
-      {minimized && active && (
-        <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#0d0d12"
-          tintOpacity={0.75}
-          cornerRadius={16}
-          glowIntensity={0.8}
-          borderWidth={1.5}
-          animated={true}
-          style={styles.floatingPlayerWrap}
-        >
-          <View style={styles.floatingContent}>
-            <TouchableOpacity style={styles.floatingInfoRow} onPress={onExpand} activeOpacity={0.9}>
-              <View style={styles.floatingThumbWrap}>
-                {posterUri ? (
-                  <ExpoImage source={{ uri: posterUri }} style={styles.floatingThumb} contentFit="cover" />
-                ) : (
-                  <View style={[styles.floatingThumb, styles.floatingThumbFallback]}>
-                    <Ionicons name="musical-notes" size={16} color="rgba(255,255,255,0.6)" />
-                  </View>
-                )}
-              </View>
-              <View style={styles.floatingInfo}>
-                <Text style={styles.floatingTitle} numberOfLines={1}>{title}</Text>
-                <Text style={styles.floatingArtist} numberOfLines={1}>{activeArtist || 'Soundtrack'}</Text>
-              </View>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.floatingControl, { backgroundColor: `${accentColor}33` }]}
-              onPress={togglePlayPause}
-            >
-              <Ionicons name={playerState.isPlaying ? 'pause' : 'play'} size={16} color="#fff" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.floatingControl} onPress={onStop}>
-              <Ionicons name="close" size={16} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-          </View>
-        </LiquidGlass>
-      )}
-    </>
-  );
-});
-
-
-
-
-
-export default function SongsScreen() {
-  const router = useRouter();
-  const params = useLocalSearchParams();
-  const insets = useSafeAreaInsets();
-  const { playTrack } = useGlobalMusicPlayer();
-  const [activeFilter, setActiveFilter] = useState('all');
-  const [paletteIndex, setPaletteIndex] = useState(0);
-  const [trending, setTrending] = useState<Media[]>([]);
-  const [popular, setPopular] = useState<Media[]>([]);
-  const [topRated, setTopRated] = useState<Media[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const scrollY = useRef(new RNAnimated.Value(0)).current;
-  const trackIdParam = params.trackId ? String(params.trackId) : null;
-
-  const accentColor = useMemo(() => ACCENT_PALETTES[paletteIndex][0], [paletteIndex]);
-  const accentColorRef = useRef(accentColor);
-
-  useEffect(() => {
-    accentColorRef.current = accentColor;
-  }, [accentColor]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setPaletteIndex((prev) => (prev + 1) % ACCENT_PALETTES.length);
-    }, 8000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
+  const toggleFavorite = async (track: any) => {
+    const trackId = String(track.videoId || track.id);
+    const isFav = favorites.some(f => String(f.videoId || f.id) === trackId);
+    const newFavs = isFav 
+      ? favorites.filter(f => String(f.videoId || f.id) !== trackId)
+      : [...favorites, track];
+    setFavorites(newFavs);
+    await AsyncStorage.setItem(FAVORITES_KEY, JSON.stringify(newFavs));
+    
+    // Sync to Firestore
+    if (user) {
       try {
-        const [trendingRes, popularRes, topRatedRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/trending/movie/week?api_key=${API_KEY}`),
-          fetch(`${API_BASE_URL}/movie/popular?api_key=${API_KEY}`),
-          fetch(`${API_BASE_URL}/movie/top_rated?api_key=${API_KEY}`),
-        ]);
-
-        const trendingData = await trendingRes.json();
-        const popularData = await popularRes.json();
-        const topRatedData = await topRatedRes.json();
-
-        setTrending(trendingData.results || []);
-        setPopular(popularData.results || []);
-        setTopRated(topRatedData.results || []);
-      } catch (error) {
-        console.error('Failed to fetch songs data:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, []);
-
-  const handlePlayTrack = useCallback((item: Media) => {
-    playTrack(item, accentColor);
-  }, [accentColor, playTrack]);
-
-  // Handle trackId from navigation params
-  useEffect(() => {
-    if (trackIdParam && !loading) {
-      const allTracks = [...trending, ...popular, ...topRated];
-      const track = allTracks.find((t) => String(t.id) === trackIdParam || (t as any).videoId === trackIdParam);
-      if (track) {
-        playTrack(track, accentColorRef.current);
-      } else if (params.mediaType === 'music') {
-        // If not in trending/local list, it might be a direct YT result
-        // Create a placeholder Media object to trigger the player logic which will then fetch the stream
-        const placeholder: Media = {
-          id: 0 as any, // Not used for YT streams but required by type
-          videoId: trackIdParam,
-          media_type: 'music',
-          title: (params.title as string) || 'Loading Track...',
-          poster_path: (params.thumbnail as string) || '',
-          localUri: (params.localUri as string) || undefined,
-          artist: (params.artist as string) || undefined,
+        const userRef = doc(db, 'users', user.uid);
+        const favEntry = {
+          id: trackId,
+          title: track.title,
+          artist: track.artist || track.uploaderName || 'Unknown',
+          thumbnail: track.thumbnail,
+          addedAt: Timestamp.now(),
         };
-        playTrack(placeholder, accentColorRef.current);
+        
+        if (isFav) {
+          await updateDoc(userRef, {
+            musicFavorites: arrayRemove(favEntry),
+          });
+        } else {
+          await updateDoc(userRef, {
+            musicFavorites: arrayUnion(favEntry),
+          });
+        }
+      } catch (e) {
+        console.warn('Failed to sync favorites to Firestore:', e);
       }
     }
-  }, [loading, params.artist, params.localUri, params.mediaType, params.thumbnail, params.title, playTrack, popular, topRated, trackIdParam, trending]);
+    
+    Alert.alert(isFav ? 'Removed from Favorites' : 'Added to Favorites', track.title);
+  };
 
-  const headerOpacity = scrollY.interpolate({
+  const isFavorite = (track: any) => favorites.some(f => String(f.videoId || f.id) === String(track.videoId || track.id));
+
+  const handleEqualizerPreset = (index: number) => {
+    setActivePreset(index);
+    setCustomBands(EQ_PRESETS[index].bands);
+  };
+
+  const formatTime = (s: number) => {
+    if (!s || isNaN(s)) return '0:00';
+    const m = Math.floor(s / 60);
+    return `${m}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
+  };
+
+  // Dynamic Island Animations
+  const islandTranslateY = scrollY.interpolate({
     inputRange: [0, 80],
-    outputRange: [0, 1],
+    outputRange: [0, -10],
     extrapolate: 'clamp',
   });
 
-  const featuredItem = trending[0];
+  const islandOpacity = scrollY.interpolate({
+    inputRange: [0, 60],
+    outputRange: [1, 0.95],
+    extrapolate: 'clamp',
+  });
+
+  const headerTextOpacity = scrollY.interpolate({
+    inputRange: [0, 40],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
 
   return (
-    <View style={styles.root}>
+    <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      
+      {/* Background with mesh gradient feel */}
+      <View style={StyleSheet.absoluteFill}>
+        <LinearGradient colors={['#0a0b1e', '#000']} style={StyleSheet.absoluteFill} />
+        <View style={styles.bgCircle1} />
+        <View style={styles.bgCircle2} />
+      </View>
 
-      {/* Full-screen background */}
-      <LinearGradient
-        colors={[accentColor, '#070815', '#05060f']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={StyleSheet.absoluteFill}
-      />
-
-      {/* Sticky header */}
-      <RNAnimated.View style={[styles.stickyHeader, { opacity: headerOpacity, paddingTop: insets.top }]}>
-        <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
-        <View style={styles.stickyHeaderContent}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={22} color="#fff" />
-          </TouchableOpacity>
-          <Text style={styles.stickyTitle}>Soundtracks</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: '/search', params: { tab: 'music' } })}>
-            <Ionicons name="search" size={20} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      </RNAnimated.View>
-
-      <RNAnimated.ScrollView
-        showsVerticalScrollIndicator={false}
-        onScroll={RNAnimated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], { useNativeDriver: true })}
-        scrollEventThrottle={16}
-        contentContainerStyle={{ paddingBottom: insets.bottom + 100 }}
-      >
-        {/* Hero header - edge to edge */}
-        <View style={[styles.heroHeader, { paddingTop: insets.top + 60 }]}>
-          {featuredItem?.backdrop_path && (
-            <ImageBackground
-              source={{ uri: `${IMAGE_BASE_URL}${featuredItem.backdrop_path}` }}
-              style={styles.heroBg}
-            >
-              <LinearGradient
-                colors={['transparent', 'rgba(5,6,15,0.8)', 'rgba(5,6,15,1)']}
-                style={StyleSheet.absoluteFill}
-              />
-            </ImageBackground>
-          )}
-
-          <View style={styles.heroContent}>
-            <View style={[styles.heroIcon, { backgroundColor: `${accentColor}33` }]}>
-              <Ionicons name="musical-notes" size={32} color={accentColor} />
-            </View>
-            <Text style={styles.heroTitle}>Soundtracks</Text>
-            <Text style={styles.heroSubtitle}>Discover music from your favorite movies</Text>
-
-            {featuredItem && (
-              <TouchableOpacity
-                style={[styles.heroPlayBtn, { backgroundColor: accentColor }]}
-                onPress={() => handlePlayTrack(featuredItem)}
-              >
-                <FontAwesome name="play" size={14} color="#fff" />
-                <Text style={styles.heroPlayText}>Play Featured</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-
-        {/* Filter chips */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filtersScroll}
-        >
-          {GENRE_FILTERS.map((filter) => {
-            const isActive = activeFilter === filter.id;
-            return (
-              <TouchableOpacity
-                key={filter.id}
-                onPress={() => setActiveFilter(filter.id)}
-                style={{ marginRight: 8 }}
-              >
-                {isActive ? (
-                  <LiquidGlass
-                    glowColor={accentColor}
-                    tintColor={accentColor}
-                    tintOpacity={0.85}
-                    cornerRadius={20}
-                    glowIntensity={0.7}
-                    borderWidth={1}
-                    animated={true}
-                    style={styles.filterChipLiquid}
-                  >
-                    <View style={styles.filterChipInner}>
-                      <Ionicons name={filter.icon as any} size={14} color="#fff" />
-                      <Text style={[styles.filterText, styles.filterTextActive]}>
-                        {filter.label}
-                      </Text>
-                    </View>
-                  </LiquidGlass>
-                ) : (
-                  <View style={styles.filterChip}>
-                    <Ionicons name={filter.icon as any} size={14} color="rgba(255,255,255,0.7)" />
-                    <Text style={styles.filterText}>{filter.label}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-
-        {/* Trending rail */}
+      <Animated.View style={[
+        styles.dynamicIsland,
+        {
+          transform: [{ translateY: islandTranslateY }],
+          opacity: islandOpacity,
+        }
+      ]}>
         <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#0d0d12"
-          tintOpacity={0.45}
-          cornerRadius={24}
-          glowIntensity={0.5}
-          borderWidth={1}
-          animated={true}
-          style={styles.railContainer}
-        >
-          <View style={styles.railHeader}>
-            <Text style={styles.railTitle}>Trending Now</Text>
-            <TouchableOpacity style={styles.railSeeAll}>
-              <Text style={[styles.railSeeAllText, { color: accentColor }]}>See All</Text>
-              <Ionicons name="chevron-forward" size={14} color={accentColor} />
+          tintOpacity={0.18}
+          tintColor="#000000"
+          cornerRadius={32}
+          borderOpacity={0.25}
+          glowIntensity={0.2}
+          glowColor={accentColor || '#e50914'}
+          chromaticAberration={true}
+          style={StyleSheet.absoluteFill}
+        />
+        <View style={styles.islandContent}>
+          <View style={styles.islandLeft}>
+            <View style={[styles.accentDot, { backgroundColor: accentColor || '#e50914', shadowColor: accentColor || '#e50914' }]} />
+            <Animated.View style={{ opacity: headerTextOpacity, marginLeft: 8 }}>
+              <Text style={styles.islandEyebrow}>DISCOVER VIBE</Text>
+              <Text style={styles.islandTitle}>Music Pro</Text>
+            </Animated.View>
+          </View>
+          <View style={styles.islandActions}>
+            <TouchableOpacity style={styles.islandIconBtn} onPress={() => setShowEqualizer(true)}>
+              <Ionicons name="options-outline" size={20} color="#fff" />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.islandIconBtn} onPress={() => setShowFavorites(!showFavorites)}>
+              <Ionicons name={showFavorites ? "heart" : "heart-outline"} size={20} color={showFavorites ? accentColor : "#fff"} />
             </TouchableOpacity>
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.railScroll}>
-            {trending.slice(0, 10).map((item) => (
-              <SongCard
-                key={item.id}
-                item={item}
-                accentColor={accentColor}
-                onPress={() => handlePlayTrack(item)}
-              />
-            ))}
-          </ScrollView>
-        </LiquidGlass>
+        </View>
+      </Animated.View>
 
-        {/* Top tracks list */}
-        <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#0d0d12"
-          tintOpacity={0.45}
-          cornerRadius={24}
-          glowIntensity={0.5}
-          borderWidth={1}
-          animated={true}
-          style={styles.listSection}
+      {/* Mini Player - Shows when track is playing */}
+      {playerActive && currentPlayerTrack && (
+        <TouchableOpacity 
+          style={styles.miniPlayer} 
+          activeOpacity={0.9}
+          onPress={() => {/* Could open full player modal */}}
         >
-          <Text style={styles.listTitle}>Top Tracks</Text>
-          {[...trending, ...popular].slice(0, 10).map((item, index) => (
-            <SongRow
-              key={item.id}
-              item={item}
-              index={index}
-              accentColor={accentColor}
-              onPress={() => handlePlayTrack(item)}
-            />
+          <LiquidGlass cornerRadius={20} tintOpacity={0.25} tintColor="#000" style={StyleSheet.absoluteFill} />
+          <Image source={{ uri: currentPlayerTrack.thumbnail }} style={styles.miniThumb} />
+          <View style={styles.miniInfo}>
+            <Text style={styles.miniTitle} numberOfLines={1}>{currentPlayerTrack.title}</Text>
+            <Text style={styles.miniArtist} numberOfLines={1}>{currentPlayerTrack.artist || 'Unknown'}</Text>
+          </View>
+          <View style={styles.miniProgress}>
+            <View style={[styles.miniProgressFill, { width: `${(progress / duration) * 100}%`, backgroundColor: accentColor }]} />
+          </View>
+          <TouchableOpacity style={styles.miniPlayBtn} onPress={togglePlay}>
+            <Ionicons name={isPlayerPlaying ? "pause" : "play"} size={24} color="#fff" />
+          </TouchableOpacity>
+        </TouchableOpacity>
+      )}
+
+      <Animated.ScrollView 
+        contentContainerStyle={[styles.scrollContent, playerActive && { paddingBottom: 180 }]} 
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={accentColor} />}
+        onScroll={Animated.event(
+            [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+            { useNativeDriver: true }
+        )}
+        scrollEventThrottle={16}
+      >
+        <View style={styles.searchSection}>
+            <LiquidGlass 
+            cornerRadius={24} 
+            tintOpacity={0.1} 
+            dynamicHighlight 
+            style={styles.searchBarContainer}
+            >
+            <View style={styles.searchInner}>
+                <Ionicons name="search" size={20} color="rgba(255,255,255,0.6)" />
+                <TextInput
+                style={styles.searchInput}
+                placeholder="Artists, songs, or genres..."
+                placeholderTextColor="rgba(255,255,255,0.4)"
+                value={searchQuery}
+                onChangeText={handleSearch}
+                />
+                {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => handleSearch('')}>
+                    <Ionicons name="close-circle" size={18} color="rgba(255,255,255,0.4)" />
+                </TouchableOpacity>
+                )}
+            </View>
+            </LiquidGlass>
+        </View>
+
+        {/* Recently Played */}
+        {recentlyPlayed.length > 0 && (
+            <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionTitle}>Recently Played</Text>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentScroll}>
+                    {recentlyPlayed.map((item, i) => (
+                        <TouchableOpacity key={i} style={styles.recentCard} onPress={() => handlePlayTrack(item)}>
+                            <View style={styles.recentThumbContainer}>
+                                <Image source={{ uri: item.thumbnail }} style={styles.recentThumb} />
+                                <View style={styles.recentPlayBtn}>
+                                    <Ionicons name="play" size={14} color="#fff" />
+                                </View>
+                            </View>
+                            <Text style={styles.recentTitle} numberOfLines={1}>{item.title}</Text>
+                        </TouchableOpacity>
+                    ))}
+                </ScrollView>
+            </View>
+        )}
+
+        {/* For You - Curated based on listening history */}
+        {recommendedTracks.length > 0 && (
+            <View style={styles.section}>
+                <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionTitle}>For You</Text>
+                    <Text style={styles.curatedBadge}>Based on your history</Text>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.recentScroll}>
+                    {recommendedTracks.map((item, i) => (
+                        <TouchableOpacity key={i} style={styles.recentCard} onPress={() => handlePlayTrack(item)}>
+                            <View style={styles.recentThumbContainer}>
+                                <Image source={{ uri: item.thumbnail }} style={styles.recentThumb} />
+                                <View style={styles.aiBadge}>
+                                    <Ionicons name="sparkles" size={10} color="#FFD700" />
+                                </View>
+                                <View style={styles.recentPlayBtn}>
+                                    <Ionicons name="play" size={14} color="#fff" />
+                                </View>
+                            </View>
+                            <Text style={styles.recentTitle} numberOfLines={1}>{item.title}</Text>
+                            <Text style={styles.recentArtist} numberOfLines={1}>{item.artist || 'Artist'}</Text>
+                        </TouchableOpacity>
+                    ))}
+                </ScrollView>
+            </View>
+        )}
+
+        {/* Categories */}
+        <View style={styles.sectionHeader}>
+           <Text style={styles.sectionTitle}>Categories</Text>
+        </View>
+        
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.catScroll}>
+          {CATEGORIES.map(cat => (
+            <TouchableOpacity 
+              key={cat} 
+              onPress={() => setActiveCategory(cat)}
+              activeOpacity={0.8}
+            >
+              <LiquidGlass 
+                cornerRadius={12} 
+                tintOpacity={activeCategory === cat ? 0.4 : 0.08}
+                tintColor={activeCategory === cat ? accentColor : undefined}
+                borderOpacity={activeCategory === cat ? 0.5 : 0.1}
+                style={styles.catGlass}
+              >
+                <Text style={[styles.catText, activeCategory === cat && styles.catTextActive]}>{cat}</Text>
+              </LiquidGlass>
+            </TouchableOpacity>
           ))}
-        </LiquidGlass>
+        </ScrollView>
 
-        {/* Popular rail */}
-        <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#0d0d12"
-          tintOpacity={0.45}
-          cornerRadius={24}
-          glowIntensity={0.5}
-          borderWidth={1}
-          animated={true}
-          style={styles.railContainer}
-        >
-          <View style={styles.railHeader}>
-            <Text style={styles.railTitle}>Popular This Week</Text>
-          </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.railScroll}>
-            {popular.slice(0, 10).map((item) => (
-              <SongCard
-                key={item.id}
-                item={item}
-                accentColor={accentColor}
-                onPress={() => handlePlayTrack(item)}
-              />
+        {/* Mood Radio */}
+        <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Your Mood</Text>
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.moodScroll}>
+            {MOODS.map((mood, i) => (
+                <TouchableOpacity key={i} activeOpacity={0.8}>
+                    <LiquidGlass cornerRadius={20} tintColor={mood.color} tintOpacity={0.15} style={styles.moodGlass}>
+                        <MaterialCommunityIcons name={mood.icon as any} size={24} color={mood.color} />
+                        <Text style={styles.moodText}>{mood.name}</Text>
+                    </LiquidGlass>
+                </TouchableOpacity>
             ))}
-          </ScrollView>
-        </LiquidGlass>
+        </ScrollView>
 
-        {/* Top Rated rail */}
-        <LiquidGlass
-          glowColor={accentColor}
-          tintColor="#0d0d12"
-          tintOpacity={0.45}
-          cornerRadius={24}
-          glowIntensity={0.5}
-          borderWidth={1}
-          animated={true}
-          style={styles.railContainer}
-        >
-          <View style={styles.railHeader}>
-            <Text style={styles.railTitle}>Highest Rated</Text>
-          </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.railScroll}>
-            {topRated.slice(0, 10).map((item) => (
-              <SongCard
-                key={item.id}
-                item={item}
-                accentColor={accentColor}
-                onPress={() => handlePlayTrack(item)}
-              />
+        {/* Hero Card */}
+        {songs.length > 0 && !loading && (
+          <TouchableOpacity 
+            style={styles.heroContainer} 
+            onPress={() => handlePlayTrack(songs[0])}
+            activeOpacity={0.9}
+          >
+            <LiquidGlass 
+                cornerRadius={32} 
+                tintOpacity={0.15} 
+                breathingEffect 
+                style={styles.heroGlass}
+            >
+                <Image source={{ uri: songs[0].thumbnail }} style={styles.heroImage} />
+                <LinearGradient colors={['transparent', 'rgba(0,0,0,0.85)']} style={StyleSheet.absoluteFill} />
+                <View style={styles.heroContent}>
+                    <View style={styles.heroBadge}>
+                        <Text style={styles.heroBadgeText}>TRENDING NOW • OFFLINE ENABLED</Text>
+                    </View>
+                    <Text style={styles.heroTitle} numberOfLines={2}>{songs[0].title}</Text>
+                    <Text style={styles.heroArtist}>{songs[0].artist || 'Featured Artist'}</Text>
+                    
+                    <View style={styles.heroActions}>
+                        <View style={[styles.playBtnLarge, { backgroundColor: accentColor }]}>
+                            <Ionicons name="play" size={24} color="#fff" />
+                        </View>
+                        <View style={styles.heroStats}>
+                             <Ionicons name="headset-outline" size={14} color="rgba(255,255,255,0.6)" />
+                             <Text style={styles.heroStatsText}>42k listeners</Text>
+                        </View>
+                    </View>
+                </View>
+            </LiquidGlass>
+          </TouchableOpacity>
+        )}
+
+        {/* Playlists */}
+        <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Featured Playlists</Text>
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.moodScroll}>
+            {PLAYLISTS.map((pl, i) => (
+                <TouchableOpacity key={i} activeOpacity={0.8}>
+                    <View style={styles.plCard}>
+                        <Image source={{ uri: pl.image }} style={styles.plThumb} />
+                        <Text style={styles.plTitle}>{pl.name}</Text>
+                        <Text style={styles.plMeta}>{pl.tracks}</Text>
+                    </View>
+                </TouchableOpacity>
             ))}
-          </ScrollView>
-        </LiquidGlass>
-      </RNAnimated.ScrollView>
+        </ScrollView>
 
+        <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>{showFavorites ? 'Your Favorites' : `${activeCategory} Picks`}</Text>
+            <View style={styles.viewToggle}>
+              <TouchableOpacity style={styles.viewBtn} onPress={() => setViewMode('grid')}>
+                <Ionicons name="grid-outline" size={20} color={viewMode === 'grid' ? accentColor : 'rgba(255,255,255,0.4)'} />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.viewBtn} onPress={() => setViewMode('list')}>
+                <Ionicons name="list-outline" size={20} color={viewMode === 'list' ? accentColor : 'rgba(255,255,255,0.4)'} />
+              </TouchableOpacity>
+            </View>
+        </View>
+
+        {loading ? (
+          <View style={styles.loader}>
+            <ActivityIndicator size="large" color={accentColor} />
+            <Text style={styles.loadingText}>Tuning your frequencies...</Text>
+          </View>
+        ) : (
+          <View style={viewMode === 'grid' ? styles.grid : styles.listView}>
+            {(showFavorites ? favorites : songs).map((item, index) => (
+              <View key={index} style={viewMode === 'grid' ? styles.card : styles.listCard}>
+                <TouchableOpacity 
+                    style={viewMode === 'grid' ? styles.cardImageContainer : styles.listImageContainer} 
+                    onPress={() => handlePlayTrack(item)}
+                    activeOpacity={0.8}
+                >
+                    <Image source={{ uri: item.thumbnail }} style={viewMode === 'grid' ? styles.cardImage : styles.listImage} />
+                    <LiquidGlass 
+                        cornerRadius={viewMode === 'grid' ? 15 : 12} 
+                        tintOpacity={0.2} 
+                        style={StyleSheet.absoluteFill}
+                    />
+                    <View style={styles.cardPlayOverlay}>
+                        <View style={[styles.miniPlayBtn, { backgroundColor: 'rgba(255,255,255,0.2)' }]}>
+                            <Ionicons name="play" size={18} color="#fff" />
+                        </View>
+                    </View>
+                </TouchableOpacity>
+                <View style={styles.cardBottomRow}>
+                    <View style={{ flex: 1 }}>
+                        <Text style={viewMode === 'grid' ? styles.cardTitle : styles.listTitle} numberOfLines={1}>{item.title}</Text>
+                        <Text style={viewMode === 'grid' ? styles.cardArtist : styles.listArtist} numberOfLines={1}>{item.artist || 'Artist'}</Text>
+                    </View>
+                    <TouchableOpacity onPress={() => toggleFavorite(item)} style={styles.cardDownload}>
+                        <Ionicons name={isFavorite(item) ? "heart" : "heart-outline"} size={18} color={isFavorite(item) ? accentColor : "rgba(255,255,255,0.4)"} />
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => downloadTrack(item)} style={styles.cardDownload}>
+                        <Ionicons name="cloud-download-outline" size={18} color="rgba(255,255,255,0.4)" />
+                    </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+      </Animated.ScrollView>
+
+      {/* Equalizer Modal */}
+      <Modal visible={showEqualizer} transparent animationType="slide" onRequestClose={() => setShowEqualizer(false)}>
+        <View style={styles.eqOverlay}>
+          <LinearGradient colors={['#1a1b2e', '#0d0e1a']} style={styles.eqSheet}>
+            <View style={styles.eqHeader}>
+              <Text style={styles.eqTitle}>Equalizer</Text>
+              <TouchableOpacity onPress={() => setShowEqualizer(false)}>
+                <Ionicons name="close" size={28} color="#fff" />
+              </TouchableOpacity>
+            </View>
+            
+            {/* Presets */}
+            <View style={styles.eqPresets}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.eqPresetScroll}>
+                {EQ_PRESETS.map((preset, i) => (
+                  <TouchableOpacity 
+                    key={preset.name} 
+                    style={[styles.eqPreset, activePreset === i && styles.eqPresetActive]}
+                    onPress={() => handleEqualizerPreset(i)}
+                  >
+                    <Text style={[styles.eqPresetText, activePreset === i && styles.eqPresetTextActive]}>{preset.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Bands */}
+            <View style={styles.eqBands}>
+              {['60Hz', '170Hz', '400Hz', '1kHz', '3kHz', '6kHz', '12kHz', '16kHz'].map((label, i) => (
+                <View key={label} style={styles.eqBand}>
+                  <Slider
+                    style={styles.eqSlider}
+                    minimumValue={-10}
+                    maximumValue={10}
+                    value={customBands[i]}
+                    onValueChange={(val) => {
+                      const newBands = [...customBands];
+                      newBands[i] = val;
+                      setCustomBands(newBands);
+                    }}
+                    minimumTrackTintColor={accentColor}
+                    maximumTrackTintColor="rgba(255,255,255,0.1)"
+                    thumbTintColor="#fff"
+                    vertical
+                  />
+                  <Text style={styles.eqLabel}>{label.replace('Hz', '')}</Text>
+                </View>
+              ))}
+            </View>
+          </LinearGradient>
+        </View>
+      </Modal>
     </View>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#05060f',
+  container: { flex: 1, backgroundColor: '#000' },
+  bgCircle1: { 
+    position: 'absolute', 
+    top: -100, 
+    right: -100, 
+    width: 300, 
+    height: 300, 
+    borderRadius: 150, 
+    backgroundColor: 'rgba(124, 58, 237, 0.15)',
+    filter: 'blur(80px)' as any,
   },
-  stickyHeader: {
+  bgCircle2: { 
+    position: 'absolute', 
+    bottom: height * 0.3, 
+    left: -150, 
+    width: 400, 
+    height: 400, 
+    borderRadius: 200, 
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    filter: 'blur(100px)' as any,
+  },
+  dynamicIsland: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
+    top: Platform.OS === 'ios' ? 60 : 40,
+    left: 16,
+    right: 16,
+    height: 56,
     zIndex: 100,
-    overflow: 'hidden',
-  },
-  stickyHeaderContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  stickyTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  headerBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  heroHeader: {
-    minHeight: 320,
-    justifyContent: 'flex-end',
-    paddingHorizontal: 20,
-    paddingBottom: 30,
-  },
-  heroBg: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  heroContent: {
-    alignItems: 'center',
-  },
-  heroIcon: {
-    width: 72,
-    height: 72,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 16,
-  },
-  heroTitle: {
-    color: '#fff',
-    fontSize: 36,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  heroSubtitle: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 15,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginTop: 8,
-  },
-  heroPlayBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 999,
-    marginTop: 24,
-  },
-  heroPlayText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  filtersScroll: {
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    gap: 10,
-  },
-  filterChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  filterText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  filterChipLiquid: {
-    borderRadius: 999,
-    overflow: 'hidden',
-  },
-  filterChipInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  filterTextActive: {
-    color: '#fff',
-  },
-  railContainer: {
-    marginBottom: 28,
-  },
-  railHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    marginBottom: 14,
-  },
-  railTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '800',
-  },
-  railSeeAll: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  railSeeAllText: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  railScroll: {
-    paddingHorizontal: 16,
-  },
-
-  thumbPlaceholder: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  listSection: {
-    paddingHorizontal: 16,
-    marginBottom: 28,
-  },
-  listTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '800',
-    marginBottom: 14,
-  },
-
-  // Player styles
-  playerModal: {
-    flex: 1,
-    backgroundColor: '#05060f',
-  },
-  floatingPlayerWrap: {
-    position: 'absolute',
-    left: 14,
-    right: 14,
-    bottom: 90,
-    height: 64,
-    borderRadius: 16,
+    borderRadius: 32,
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.35,
-    shadowRadius: 16,
-    elevation: 12,
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
   },
-  floatingPlayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  floatingContent: {
+  islandContent: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    gap: 10,
-  },
-  floatingInfoRow: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  floatingThumbWrap: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  floatingThumb: {
-    width: '100%',
-    height: '100%',
-  },
-  floatingThumbFallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  floatingInfo: {
-    flex: 1,
-  },
-  floatingTitle: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  floatingArtist: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 11,
-    marginTop: 2,
-  },
-  floatingControl: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
-  playerBg: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  playerGlow: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 300,
-  },
-  playerHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingBottom: 10,
   },
-  playerHeaderBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  islandLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  accentDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  islandEyebrow: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  islandTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  islandActions: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 20,
+    padding: 4,
+  },
+  islandIconBtn: {
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  playerHeaderCenter: {
-    alignItems: 'center',
-  },
-  playerHeaderTitle: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  playerHeaderSubtitle: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    alignSelf: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    padding: 4,
-    borderRadius: 20,
-    marginTop: 10,
+  searchSection: {
     marginBottom: 10,
-  },
-  tab: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 16,
-    gap: 6,
-  },
-  tabText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  tabTextActive: {
-    color: '#fff',
-  },
-  playerContent: {
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  videoContainer: {
-    width: '100%',
-    aspectRatio: 16 / 9,
-    borderRadius: 20,
-    overflow: 'hidden',
-    backgroundColor: '#000',
     marginTop: 20,
   },
-  video: {
-    width: '100%',
-    height: '100%',
+  searchBarContainer: { height: 56 },
+  searchInner: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    height: '100%', 
+    paddingHorizontal: 20 
   },
-  videoToggle: {
+  searchInput: { flex: 1, color: '#fff', marginLeft: 12, fontSize: 16, fontWeight: '500' },
+  scrollContent: { paddingHorizontal: 25, paddingTop: 120, paddingBottom: 150 },
+  section: { marginBottom: 10 },
+  sectionHeader: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    alignItems: 'flex-end',
+    marginBottom: 15,
+    marginTop: 25,
+  },
+  curatedBadge: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 11,
+    fontWeight: '500',
+    fontStyle: 'italic',
+  },
+  aiBadge: {
     position: 'absolute',
-    top: 12,
-    right: 12,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    left: 8,
+    top: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  albumContainer: {
+  recentArtist: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 10,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  sectionTitle: { fontSize: 22, fontWeight: '800', color: '#fff' },
+  seeAll: { fontSize: 14, fontWeight: '700' },
+  recentScroll: { gap: 15, paddingRight: 25 },
+  recentCard: { width: 110 },
+  recentThumbContainer: { width: 110, height: 110, borderRadius: 15, overflow: 'hidden' },
+  recentThumb: { width: 110, height: 110, borderRadius: 15, backgroundColor: '#111' },
+  recentPlayBtn: { position: 'absolute', right: 8, top: 8, width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
+  recentTitle: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight: '600', marginTop: 8 },
+  catScroll: { gap: 12, paddingBottom: 5 },
+  catGlass: { paddingHorizontal: 20, paddingVertical: 10 },
+  catText: { color: 'rgba(255,255,255,0.6)', fontWeight: '700', fontSize: 14 },
+  catTextActive: { color: '#fff' },
+  moodScroll: { gap: 15 },
+  moodGlass: { paddingHorizontal: 20, paddingVertical: 15, width: 140, gap: 10 },
+  moodText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  plCard: { width: 160 },
+  plThumb: { width: 160, height: 160, borderRadius: 24, backgroundColor: '#111' },
+  plTitle: { color: '#fff', fontSize: 15, fontWeight: '700', marginTop: 10 },
+  plMeta: { color: 'rgba(255,255,255,0.5)', fontSize: 12, marginTop: 2 },
+  heroContainer: { marginTop: 25, height: 260 },
+  heroGlass: { flex: 1 },
+  heroImage: { ...StyleSheet.absoluteFillObject, width: '100%', height: '100%' },
+  heroOverlay: { ...StyleSheet.absoluteFillObject },
+  heroContent: { flex: 1, justifyContent: 'flex-end', padding: 25 },
+  heroBadge: { 
+    backgroundColor: 'rgba(255,255,255,0.2)', 
+    paddingHorizontal: 10, 
+    paddingVertical: 4, 
+    borderRadius: 8, 
+    alignSelf: 'flex-start',
+    marginBottom: 10,
+  },
+  heroBadgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+  heroTitle: { fontSize: 26, fontWeight: '900', color: '#fff', marginBottom: 5 },
+  heroArtist: { fontSize: 16, color: 'rgba(255,255,255,0.7)', fontWeight: '600', marginBottom: 15 },
+  heroActions: { flexDirection: 'row', alignItems: 'center', gap: 15 },
+  playBtnLarge: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  heroStats: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  heroStatsText: { color: 'rgba(255,255,255,0.5)', fontSize: 12, fontWeight: '600' },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginTop: 10 },
+  listView: { marginTop: 10 },
+  card: { width: COLUMN_WIDTH, marginBottom: 25 },
+  listCard: { marginBottom: 16, marginHorizontal: 0 },
+  cardImageContainer: { 
+    width: '100%', 
+    height: COLUMN_WIDTH, 
+    borderRadius: 22, 
+    overflow: 'hidden', 
+    backgroundColor: '#111',
+    marginBottom: 12,
+  },
+  listImageContainer: {
+    width: 70,
+    height: 70,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#111',
+  },
+  listImage: { width: 70, height: 70, borderRadius: 12 },
+  listTitle: { color: '#fff', fontSize: 16, fontWeight: '700', marginBottom: 2 },
+  listArtist: { color: 'rgba(255,255,255,0.5)', fontSize: 14, fontWeight: '600' },
+  cardImage: { width: '100%', height: '100%' },
+  cardPlayOverlay: { 
+    ...StyleSheet.absoluteFillObject, 
+    justifyContent: 'center', 
     alignItems: 'center',
-    marginTop: 30,
+    backgroundColor: 'rgba(0,0,0,0.1)'
   },
-  vinylDisc: {
+  miniPlayBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
+  cardBottomRow: { flexDirection: 'row', alignItems: 'center' },
+  cardTitle: { color: '#fff', fontSize: 15, fontWeight: '700', marginBottom: 2 },
+  cardArtist: { color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '600' },
+  cardDownload: { padding: 8 },
+  loader: { marginTop: 60, alignItems: 'center' },
+  loadingText: { color: 'rgba(255,255,255,0.5)', marginTop: 15, fontWeight: '600' },
+  // Mini Player
+  miniPlayer: {
     position: 'absolute',
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    right: -30,
-  },
-  vinylGradient: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 130,
+    bottom: 80,
+    left: 12,
+    right: 12,
+    height: 72,
+    borderRadius: 20,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-  },
-  vinylCenter: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-  },
-  vinylRing: {
-    position: 'absolute',
-    width: 180,
-    height: 180,
-    borderRadius: 90,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.05)',
-  },
-  vinylRing2: {
-    position: 'absolute',
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.03)',
-  },
-  errorContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.05)',
-  },
-  errorText: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  albumArtWrapper: {
-    width: 240,
-    height: 240,
-    borderRadius: 24,
+    paddingHorizontal: 12,
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.5,
-    shadowRadius: 40,
-    elevation: 20,
-  },
-  albumArt: {
-    width: '100%',
-    height: '100%',
-  },
-  albumOverlay: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  albumPlaceholder: {
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  videoToggleAlt: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 999,
-    marginTop: 20,
-  },
-  videoToggleText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  trackInfo: {
-    alignItems: 'center',
-    marginTop: 30,
-  },
-  trackTitle: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  trackArtist: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 15,
-    fontWeight: '600',
-    marginTop: 8,
-  },
-  waveformContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    height: 40,
-    marginTop: 24,
-  },
-  waveformNative: {
-    width: '100%',
-    height: '100%'
-  },
-  waveBarLarge: {
-    width: 4,
-    height: 40,
-    borderRadius: 2,
-  },
-  progressContainer: {
-    marginTop: 24,
-  },
-  nativePlaybackControls: {
-    width: '100%',
-    height: 56,
-  },
-  slider: {
-    width: '100%',
-    height: 40,
-  },
-  timeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: -8,
-  },
-  timeText: {
-    color: 'rgba(255,255,255,0.5)',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 20,
-    marginTop: 20,
-  },
-  controlBtn: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playPauseBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.4,
-    shadowRadius: 16,
+    shadowRadius: 12,
+    elevation: 12,
   },
-  bottomActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 'auto',
-    paddingTop: 20,
-  },
-  sheetActions: {
-    marginTop: 0,
-    paddingTop: 12,
-  },
-  bottomAction: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  upNextSheetBg: {
-    backgroundColor: '#0b0c16',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-  },
-  upNextHandle: {
-    backgroundColor: 'rgba(255,255,255,0.35)',
-    width: 44,
-  },
-  upNextHeader: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  upNextTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '900',
-  },
-  upNextTabs: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    padding: 4,
-    borderRadius: 999,
-  },
-  upNextTab: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  upNextTabText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  upNextTabTextActive: {
-    color: '#fff',
-  },
-  upNextList: {
-    paddingHorizontal: 20,
-    paddingBottom: 30,
-  },
-  upNextEmpty: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 13,
-    fontWeight: '600',
-    textAlign: 'center',
-    paddingVertical: 24,
-  },
+  miniThumb: { width: 52, height: 52, borderRadius: 12, backgroundColor: '#111' },
+  miniInfo: { flex: 1, marginLeft: 12, marginRight: 8 },
+  miniTitle: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  miniArtist: { color: 'rgba(255,255,255,0.5)', fontSize: 12, marginTop: 2 },
+  miniProgress: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 3, backgroundColor: 'rgba(255,255,255,0.1)' },
+  miniProgressFill: { height: '100%' },
+  miniPlayBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  // View Toggle
+  viewToggle: { flexDirection: 'row', gap: 8 },
+  viewBtn: { padding: 8 },
+  // Equalizer Modal
+  eqOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'flex-end' },
+  eqSheet: { borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, paddingBottom: 40 },
+  eqHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  eqTitle: { color: '#fff', fontSize: 22, fontWeight: '800' },
+  eqPresets: { marginBottom: 30 },
+  eqPresetScroll: { gap: 12 },
+  eqPreset: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20 },
+  eqPresetText: { color: 'rgba(255,255,255,0.6)', fontWeight: '700', fontSize: 14 },
+  eqPresetActive: { backgroundColor: 'rgba(255,255,255,0.15)' },
+  eqPresetTextActive: { color: '#fff' },
+  eqBands: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 10 },
+  eqBand: { alignItems: 'center', width: 40 },
+  eqSlider: { height: 150, width: 30 },
+  eqLabel: { color: 'rgba(255,255,255,0.4)', fontSize: 10, marginTop: 8, fontWeight: '600' },
 });
+
+export default MusicScreen;
